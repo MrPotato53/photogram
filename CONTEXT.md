@@ -18,7 +18,7 @@
 
 ## Current Implementation Status
 
-### Completed (Phase 1)
+### Completed (Phase 1 - Homepage)
 - [x] Project scaffolding (Tauri + React + Vite + Tailwind)
 - [x] Homepage with project grid
 - [x] New project modal (name, aspect ratio, photo import)
@@ -29,15 +29,30 @@
 - [x] Sort dropdown (recency, date, name) - persisted
 - [x] Tab system for multi-project editing
 - [x] Rust backend: project CRUD, preferences, media import
+- [x] Duplicate project name validation
+
+### Completed (Phase 2 - Editor Layout)
+- [x] EditorLayout with toolbar and floating panels
+- [x] EditorToolbar with panel toggle buttons
+- [x] CanvasArea with aspect-ratio-aware sizing
+- [x] FloatingPanel - draggable, resizable panel wrapper
+- [x] MediaPoolPanel placeholder (shows media grid)
+- [x] LayersPanel placeholder (shows elements)
+- [x] TemplatesPanel placeholder
+- [x] editorStore for editor state management
+
+### In Progress (Phase 2 - Editor Functionality)
+- [ ] Photo manipulation (drag, resize, rotate)
+- [ ] Media import in editor
+- [ ] Konva.js canvas integration
 
 ### Not Started
-- [ ] Project editor (canvas, media pool, slides)
-- [ ] Photo manipulation (drag, resize, rotate)
 - [ ] Intelligent snapping/alignment
 - [ ] Cross-frame elements
-- [ ] Layers panel
+- [ ] Layer reordering
 - [ ] Command palette (Cmd+K)
 - [ ] Templates system
+- [ ] SlideStrip (multi-slide navigation)
 - [ ] Export functionality
 - [ ] Instagram API integration
 
@@ -57,7 +72,14 @@ photogram/
 │   │   │   ├── RenameModal.tsx
 │   │   │   └── PreferencesModal.tsx  # Light/dark toggle
 │   │   ├── Editor/
-│   │   │   └── EditorPlaceholder.tsx # Stub for project editor
+│   │   │   ├── EditorLayout.tsx      # Main editor container
+│   │   │   ├── EditorToolbar.tsx     # Top bar with panel toggles
+│   │   │   ├── CanvasArea.tsx        # White canvas, aspect-ratio aware
+│   │   │   ├── FloatingPanel.tsx     # Draggable/resizable panel wrapper
+│   │   │   └── panels/
+│   │   │       ├── MediaPoolPanel.tsx
+│   │   │       ├── LayersPanel.tsx
+│   │   │       └── TemplatesPanel.tsx
 │   │   ├── common/                   # Reusable UI components
 │   │   │   ├── Modal.tsx
 │   │   │   ├── Button.tsx

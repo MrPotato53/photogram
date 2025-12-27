@@ -3,7 +3,7 @@ mod models;
 
 use tauri::Manager;
 use commands::{
-    create_project, delete_project, get_all_projects, get_preferences, get_project,
+    create_project, delete_media, delete_project, get_all_projects, get_preferences, get_project,
     import_media_files, rename_project, save_preferences, update_project,
 };
 
@@ -38,6 +38,7 @@ pub fn run() {
             delete_project,
             rename_project,
             import_media_files,
+            delete_media,
             get_preferences,
             save_preferences,
         ])
