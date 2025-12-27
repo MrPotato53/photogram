@@ -18,6 +18,7 @@ export function MediaPoolPanel() {
     draggingMediaId,
     setDraggingMedia,
     setDragPosition,
+    setDragMousePosition,
   } = useEditorStore();
 
   const mediaPool = project?.mediaPool || [];
@@ -122,8 +123,11 @@ export function MediaPoolPanel() {
         }
         setDraggingMedia(mediaId);
       }
-      // Note: We don't update dragPosition during drag - only on mouseup
-      // This prevents the drop handler from firing on every mouse move
+
+      // Update mouse position for drag preview (this is separate from dragPosition which triggers drop)
+      if (isDragging) {
+        setDragMousePosition({ x: moveEvent.clientX, y: moveEvent.clientY });
+      }
     };
 
     const handleMouseUp = (upEvent: MouseEvent) => {
@@ -131,6 +135,8 @@ export function MediaPoolPanel() {
       window.removeEventListener('mouseup', handleMouseUp);
 
       if (isDragging) {
+        // Clear drag preview position
+        setDragMousePosition(null);
         // Set final position for drop handling
         setDragPosition({ x: upEvent.clientX, y: upEvent.clientY });
         // The drop will be handled by EditorLayout listening to dragPosition changes

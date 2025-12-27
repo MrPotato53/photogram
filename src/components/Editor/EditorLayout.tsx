@@ -6,6 +6,7 @@ import { FloatingPanel } from './FloatingPanel';
 import { MediaPoolPanel } from './panels/MediaPoolPanel';
 import { LayersPanel } from './panels/LayersPanel';
 import { TemplatesPanel } from './panels/TemplatesPanel';
+import { DragPreview } from './DragPreview';
 import type { Element } from '../../types';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -34,6 +35,19 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   useEffect(() => {
     loadProject(projectId);
   }, [projectId, loadProject]);
+
+  // Change cursor during drag
+  useEffect(() => {
+    if (draggingMediaId) {
+      document.body.style.cursor = 'grabbing';
+    } else {
+      document.body.style.cursor = '';
+    }
+
+    return () => {
+      document.body.style.cursor = '';
+    };
+  }, [draggingMediaId]);
 
   // Handle drop when mouse is released (dragPosition is set on mouseup)
   useEffect(() => {
@@ -152,7 +166,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   }
 
   return (
-    <div className="h-full flex flex-col bg-theme-bg-tertiary">
+    <div className="h-full flex flex-col bg-theme-bg-tertiary select-none">
       <EditorToolbar projectName={project.name} />
 
       <div
@@ -198,6 +212,9 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
           </FloatingPanel>
         )}
       </div>
+
+      {/* Drag preview that follows cursor */}
+      <DragPreview />
     </div>
   );
 }

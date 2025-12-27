@@ -26,6 +26,20 @@ export interface Element {
   locked: boolean;
   zIndex: number;
   spanFrames?: string[];
+  // Crop (normalized 0-1, relative to original image)
+  cropX?: number;
+  cropY?: number;
+  cropWidth?: number;
+  cropHeight?: number;
+  // Flip/mirror
+  flipX?: boolean;
+  flipY?: boolean;
+}
+
+// Alignment guide for snapping
+export interface Guide {
+  orientation: 'vertical' | 'horizontal';
+  position: number;
 }
 
 export interface Slide {
