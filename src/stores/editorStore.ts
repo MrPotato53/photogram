@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Element, Project } from '../types';
+import type { Element, Guide, Project } from '../types';
 import { getProject, updateProject, deleteMedia, importMediaFiles } from '../services/tauri';
 
 export type PanelId = 'mediaPool' | 'layers' | 'templates';
@@ -20,7 +20,13 @@ interface EditorState {
   lastSelectedMediaId: string | null;
   draggingMediaId: string | null;
   dragPosition: { x: number; y: number } | null;
+  dragMousePosition: { x: number; y: number } | null;
   panels: Record<PanelId, PanelState>;
+  // Snapping
+  snapEnabled: boolean;
+  activeGuides: Guide[];
+  // Cropping
+  cropModeElementId: string | null;
 
   // Project operations
   loadProject: (id: string) => Promise<void>;
@@ -44,11 +50,20 @@ interface EditorState {
   isMediaInUse: (mediaId: string) => boolean;
   setDraggingMedia: (mediaId: string | null) => void;
   setDragPosition: (position: { x: number; y: number } | null) => void;
+  setDragMousePosition: (position: { x: number; y: number } | null) => void;
 
   // Panel operations
   togglePanel: (panelId: PanelId) => void;
   setPanelSize: (panelId: PanelId, size: { width?: number; height?: number }) => void;
   closePanel: (panelId: PanelId) => void;
+
+  // Snap operations
+  setSnapEnabled: (enabled: boolean) => void;
+  setActiveGuides: (guides: Guide[]) => void;
+
+  // Crop operations
+  enterCropMode: (elementId: string) => void;
+  exitCropMode: () => void;
 }
 
 const defaultPanelState: Record<PanelId, PanelState> = {
@@ -67,7 +82,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   lastSelectedMediaId: null,
   draggingMediaId: null,
   dragPosition: null,
+  dragMousePosition: null,
   panels: { ...defaultPanelState },
+  snapEnabled: true,
+  activeGuides: [],
+  cropModeElementId: null,
 
   loadProject: async (id: string) => {
     set({ isLoading: true, error: null });
@@ -139,7 +158,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   removeElement: async (elementId: string) => {
-    const { project, currentSlideIndex, selectedElementId } = get();
+    const { project, currentSlideIndex, selectedElementId, cropModeElementId } = get();
     if (!project) return;
 
     const updatedSlides = [...project.slides];
@@ -156,6 +175,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       set({
         project: savedProject,
         selectedElementId: selectedElementId === elementId ? null : selectedElementId,
+        // Exit crop mode if the deleted element was being cropped
+        cropModeElementId: cropModeElementId === elementId ? null : cropModeElementId,
       });
     } catch (error) {
       console.error('Failed to remove element:', error);
@@ -273,6 +294,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ dragPosition: position });
   },
 
+  setDragMousePosition: (position: { x: number; y: number } | null) => {
+    set({ dragMousePosition: position });
+  },
+
   togglePanel: (panelId: PanelId) => {
     set((state) => ({
       panels: {
@@ -308,5 +333,23 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         },
       },
     }));
+  },
+
+  // Snap operations
+  setSnapEnabled: (enabled: boolean) => {
+    set({ snapEnabled: enabled });
+  },
+
+  setActiveGuides: (guides: Guide[]) => {
+    set({ activeGuides: guides });
+  },
+
+  // Crop operations
+  enterCropMode: (elementId: string) => {
+    set({ cropModeElementId: elementId, selectedElementId: elementId });
+  },
+
+  exitCropMode: () => {
+    set({ cropModeElementId: null });
   },
 }));

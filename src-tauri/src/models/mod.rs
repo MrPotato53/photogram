@@ -37,6 +37,14 @@ pub struct Element {
     pub locked: bool,
     pub z_index: i32,
     pub span_frames: Option<Vec<String>>,
+    // Crop (normalized 0-1, relative to original image)
+    pub crop_x: Option<f64>,
+    pub crop_y: Option<f64>,
+    pub crop_width: Option<f64>,
+    pub crop_height: Option<f64>,
+    // Flip/mirror
+    pub flip_x: Option<bool>,
+    pub flip_y: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

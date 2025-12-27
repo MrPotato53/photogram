@@ -1,6 +1,8 @@
 use crate::models::{AspectRatio, MediaItem, Preferences, Project, ProjectSummary};
 use chrono::Utc;
-use std::fs;
+use exif::{In, Reader as ExifReader, Tag};
+use std::fs::{self, File};
+use std::io::BufReader;
 use std::path::PathBuf;
 use tauri::{command, AppHandle, Manager};
 use uuid::Uuid;
@@ -20,18 +22,41 @@ fn get_media_dir(app: &AppHandle, project_id: &str) -> PathBuf {
         .join(project_id)
 }
 
+// Check if EXIF orientation requires swapping width/height
+// Orientations 5, 6, 7, 8 indicate 90° or 270° rotation
+fn get_exif_orientation(path: &PathBuf) -> Option<u32> {
+    let file = File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let exif = ExifReader::new().read_from_container(&mut reader).ok()?;
+
+    if let Some(orientation) = exif.get_field(Tag::Orientation, In::PRIMARY) {
+        orientation.value.get_uint(0)
+    } else {
+        None
+    }
+}
+
 // Get image dimensions without loading the full image into memory
+// Accounts for EXIF orientation to return display dimensions
 fn get_image_dimensions(path: &PathBuf) -> Option<(u32, u32)> {
-    // Use image crate's reader to get dimensions without decoding the full image
-    match image::io::Reader::open(path) {
+    // Use image crate's reader to get raw dimensions without decoding the full image
+    let (width, height) = match image::ImageReader::open(path) {
         Ok(reader) => match reader.with_guessed_format() {
             Ok(format_reader) => match format_reader.into_dimensions() {
-                Ok(dims) => Some(dims),
-                Err(_) => None,
+                Ok(dims) => dims,
+                Err(_) => return None,
             },
-            Err(_) => None,
+            Err(_) => return None,
         },
-        Err(_) => None,
+        Err(_) => return None,
+    };
+
+    // Check EXIF orientation - orientations 5-8 require swapping width/height
+    let orientation = get_exif_orientation(path).unwrap_or(1);
+    if orientation >= 5 && orientation <= 8 {
+        Some((height, width)) // Swap for rotated images
+    } else {
+        Some((width, height))
     }
 }
 

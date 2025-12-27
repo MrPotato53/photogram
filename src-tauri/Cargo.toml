@@ -26,3 +26,4 @@ tauri-plugin-dialog = "2"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 image = "0.25"
+kamadak-exif = "0.5"
