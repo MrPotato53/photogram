@@ -20,6 +20,21 @@ fn get_media_dir(app: &AppHandle, project_id: &str) -> PathBuf {
         .join(project_id)
 }
 
+// Get image dimensions without loading the full image into memory
+fn get_image_dimensions(path: &PathBuf) -> Option<(u32, u32)> {
+    // Use image crate's reader to get dimensions without decoding the full image
+    match image::io::Reader::open(path) {
+        Ok(reader) => match reader.with_guessed_format() {
+            Ok(format_reader) => match format_reader.into_dimensions() {
+                Ok(dims) => Some(dims),
+                Err(_) => None,
+            },
+            Err(_) => None,
+        },
+        Err(_) => None,
+    }
+}
+
 fn get_preferences_path(app: &AppHandle) -> PathBuf {
     app.path()
         .app_data_dir()
@@ -132,6 +147,41 @@ pub fn rename_project(app: AppHandle, id: String, new_name: String) -> Result<Pr
     update_project(app, project)
 }
 
+fn is_image_file(path: &PathBuf) -> bool {
+    let extensions = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| extensions.contains(&ext.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn collect_image_files(paths: Vec<String>) -> Vec<PathBuf> {
+    let mut image_files: Vec<PathBuf> = vec![];
+
+    for path_str in paths {
+        let path = PathBuf::from(&path_str);
+        if !path.exists() {
+            continue;
+        }
+
+        if path.is_dir() {
+            // Recursively collect image files from directory
+            if let Ok(entries) = fs::read_dir(&path) {
+                for entry in entries.flatten() {
+                    let entry_path = entry.path();
+                    if entry_path.is_file() && is_image_file(&entry_path) {
+                        image_files.push(entry_path);
+                    }
+                }
+            }
+        } else if path.is_file() && is_image_file(&path) {
+            image_files.push(path);
+        }
+    }
+
+    image_files
+}
+
 #[command]
 pub fn import_media_files(
     app: AppHandle,
@@ -141,18 +191,34 @@ pub fn import_media_files(
     let media_dir = get_media_dir(&app, &project_id);
     fs::create_dir_all(&media_dir).map_err(|e| format!("Failed to create media dir: {}", e))?;
 
+    // Load existing project to check for duplicates
+    let projects_dir = get_projects_dir(&app);
+    let project_path = projects_dir.join(format!("{}.json", project_id));
+    let existing_filenames: Vec<String> = if let Ok(contents) = fs::read_to_string(&project_path) {
+        if let Ok(project) = serde_json::from_str::<Project>(&contents) {
+            project.media_pool.iter().map(|m| m.file_name.clone()).collect()
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
+    // Collect all image files (handles both files and directories)
+    let image_files = collect_image_files(file_paths);
+
     let mut media_items: Vec<MediaItem> = vec![];
 
-    for path_str in file_paths {
-        let source_path = PathBuf::from(&path_str);
-        if !source_path.exists() {
-            continue;
-        }
-
+    for source_path in image_files {
         let file_name = source_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
+
+        // Skip if this filename already exists in the media pool
+        if existing_filenames.contains(&file_name) {
+            continue;
+        }
 
         let media_id = Uuid::new_v4().to_string();
         let extension = source_path
@@ -164,23 +230,73 @@ pub fn import_media_files(
         let dest_path = media_dir.join(&dest_filename);
 
         // Copy file to media directory
-        fs::copy(&source_path, &dest_path)
-            .map_err(|e| format!("Failed to copy file {}: {}", file_name, e))?;
+        if let Err(e) = fs::copy(&source_path, &dest_path) {
+            eprintln!("Failed to copy file {}: {}", file_name, e);
+            continue;
+        }
 
-        // Get image dimensions (basic implementation - could use image crate for accuracy)
-        let (width, height) = (1080, 1080); // Default, will be updated when we add image processing
+        // Get image dimensions without loading full image into memory
+        let (width, height) = get_image_dimensions(&dest_path).unwrap_or((1080, 1080));
 
         media_items.push(MediaItem {
             id: media_id,
             file_name,
             file_path: dest_path.to_string_lossy().to_string(),
-            thumbnail_path: None,
+            thumbnail_path: None, // No thumbnails - use full image with lazy loading
             width,
             height,
         });
     }
 
+    // Also update the project's media pool
+    if !media_items.is_empty() {
+        if let Ok(contents) = fs::read_to_string(&project_path) {
+            if let Ok(mut project) = serde_json::from_str::<Project>(&contents) {
+                project.media_pool.extend(media_items.clone());
+                project.updated_at = Utc::now();
+
+                if let Ok(json) = serde_json::to_string_pretty(&project) {
+                    let _ = fs::write(&project_path, json);
+                }
+            }
+        }
+    }
+
     Ok(media_items)
+}
+
+#[command]
+pub fn delete_media(
+    app: AppHandle,
+    project_id: String,
+    media_id: String,
+) -> Result<Project, String> {
+    let projects_dir = get_projects_dir(&app);
+    let project_path = projects_dir.join(format!("{}.json", project_id));
+
+    let contents = fs::read_to_string(&project_path)
+        .map_err(|e| format!("Failed to read project: {}", e))?;
+
+    let mut project: Project =
+        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse project: {}", e))?;
+
+    // Find and remove the media item
+    if let Some(media_item) = project.media_pool.iter().find(|m| m.id == media_id) {
+        // Delete the actual file
+        let file_path = PathBuf::from(&media_item.file_path);
+        if file_path.exists() {
+            let _ = fs::remove_file(&file_path);
+        }
+    }
+
+    project.media_pool.retain(|m| m.id != media_id);
+    project.updated_at = Utc::now();
+
+    let json = serde_json::to_string_pretty(&project)
+        .map_err(|e| format!("Failed to serialize project: {}", e))?;
+    fs::write(&project_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
+
+    Ok(project)
 }
 
 #[command]

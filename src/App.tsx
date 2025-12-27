@@ -3,7 +3,7 @@ import { usePreferencesStore } from './stores/preferencesStore';
 import { useTabsStore } from './stores/tabsStore';
 import { TabBar } from './components/TabBar';
 import { HomePage } from './components/Home';
-import { EditorPlaceholder } from './components/Editor/EditorPlaceholder';
+import { EditorLayout } from './components/Editor/EditorLayout';
 
 export default function App() {
   const { loadPreferences } = usePreferencesStore();
@@ -21,10 +21,7 @@ export default function App() {
       <div className="flex-1 overflow-hidden">
         {activeTab?.type === 'home' && <HomePage />}
         {activeTab?.type === 'project' && activeTab.projectId && (
-          <EditorPlaceholder
-            projectId={activeTab.projectId}
-            projectName={activeTab.projectName || 'Untitled'}
-          />
+          <EditorLayout projectId={activeTab.projectId} />
         )}
       </div>
     </div>

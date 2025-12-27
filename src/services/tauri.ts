@@ -35,6 +35,13 @@ export async function importMediaFiles(
   return invoke('import_media_files', { projectId, filePaths });
 }
 
+export async function deleteMedia(
+  projectId: string,
+  mediaId: string
+): Promise<Project> {
+  return invoke('delete_media', { projectId, mediaId });
+}
+
 export async function getPreferences(): Promise<Preferences> {
   return invoke('get_preferences');
 }
