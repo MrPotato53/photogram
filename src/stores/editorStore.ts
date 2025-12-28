@@ -10,7 +10,7 @@ import {
   deleteElementAsset,
 } from '../services/tauri';
 
-export type PanelId = 'mediaPool' | 'layers' | 'templates' | 'slides';
+export type PanelId = 'mediaPool' | 'layers' | 'templates' | 'slides' | 'editBar';
 
 interface PanelState {
   isOpen: boolean;
@@ -123,6 +123,7 @@ const defaultPanelState: Record<PanelId, PanelState> = {
   layers: { isOpen: false, width: 250, height: 300 },
   templates: { isOpen: false, width: 280, height: 400 },
   slides: { isOpen: false, width: 0, height: 120 },
+  editBar: { isOpen: true, width: 0, height: 44 },
 };
 
 export const useEditorStore = create<EditorState>((set, get) => ({

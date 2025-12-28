@@ -209,6 +209,7 @@ export function SlidesPanel() {
     removeSlide,
     reorderSlides,
     togglePanel,
+    panels,
   } = useEditorStore();
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -465,6 +466,23 @@ export function SlidesPanel() {
 
   if (!project) return null;
 
+  // Collapsed state - show a small strip at the bottom
+  if (!panels.slides.isOpen) {
+    return (
+      <div className="flex-shrink-0 bg-theme-bg-secondary border-t border-theme-border">
+        <button
+          onClick={() => togglePanel('slides')}
+          className="w-full py-1 text-xs text-theme-text-muted hover:text-theme-text hover:bg-theme-bg-tertiary transition-colors flex items-center justify-center gap-1"
+        >
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+          </svg>
+          Slides
+        </button>
+      </div>
+    );
+  }
+
   const addButton = slides.length < MAX_SLIDES && (
     <button
       onClick={handleAddSlide}
@@ -482,14 +500,14 @@ export function SlidesPanel() {
       ref={containerRef}
       className="h-full bg-theme-bg-secondary border-t border-theme-border flex items-center px-3 gap-2 relative"
     >
-      {/* Close button - top right */}
+      {/* Collapse button - top right */}
       <button
         onClick={() => togglePanel('slides')}
         className="absolute top-1 right-1 flex items-center justify-center w-5 h-5 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors z-10"
-        title="Close slides panel"
+        title="Collapse slides panel"
       >
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
       {/* Slides list */}
