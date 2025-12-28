@@ -43,6 +43,8 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     selectElement,
     updateElement,
     removeElement,
+    sendToFront,
+    sendToBack,
     draggingMediaId,
     snapEnabled,
     activeGuides,
@@ -61,6 +63,16 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     position: { x: number; y: number };
     elementId: string | null;
   }>({ isOpen: false, position: { x: 0, y: 0 }, elementId: null });
+
+  // Crop aspect ratio state (null = free, number = w/h ratio)
+  const [cropAspectRatio, setCropAspectRatio] = useState<number | null>(null);
+
+  // Reset crop aspect ratio when exiting crop mode
+  useEffect(() => {
+    if (!cropModeElementId) {
+      setCropAspectRatio(null);
+    }
+  }, [cropModeElementId]);
 
   const currentSlide = project?.slides[currentSlideIndex];
   const elements = currentSlide?.elements || [];
@@ -242,41 +254,88 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     selectElement(elementId);
   };
 
-  // Handle element drag move (for snapping)
+  // Clamp element position to keep minimum visibility within allowed bounds
+  // Currently bounds = single canvas, but structured for future multi-canvas support
+  const clampToVisibleBounds = useCallback(
+    (x: number, y: number, elementWidth: number, elementHeight: number) => {
+      // Minimum pixels of element that must remain visible
+      const minVisible = 50;
+
+      // Define allowed bounds - currently just the single canvas
+      // Future: This could be the union of all canvas bounds, or a larger workspace
+      const allowedBounds = {
+        left: 0,
+        top: 0,
+        right: designSize.width,
+        bottom: designSize.height,
+      };
+
+      // Clamp so at least minVisible pixels remain within allowed bounds
+      // Element right edge must be at least minVisible inside from left bound
+      // Element left edge must be at least minVisible inside from right bound
+      const clampedX = Math.max(
+        allowedBounds.left - elementWidth + minVisible,
+        Math.min(x, allowedBounds.right - minVisible)
+      );
+      const clampedY = Math.max(
+        allowedBounds.top - elementHeight + minVisible,
+        Math.min(y, allowedBounds.bottom - minVisible)
+      );
+
+      return { x: clampedX, y: clampedY };
+    },
+    [designSize.width, designSize.height]
+  );
+
+  // Handle element drag move (for snapping and bounds clamping)
   const handleDragMove = useCallback(
     (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
-      if (!snapEnabled) return;
-
       const node = e.target;
       const element = elements.find((el) => el.id === elementId);
       if (!element) return;
 
-      const rect = {
-        x: node.x(),
-        y: node.y(),
-        width: element.width,
-        height: element.height,
-      };
+      let newX = node.x();
+      let newY = node.y();
 
-      const snapLines = calculateSnapLines(elements, elementId, designSize.width, designSize.height);
-      const snapResult = findSnap(rect, snapLines);
+      // Apply snapping if enabled
+      if (snapEnabled) {
+        const rect = {
+          x: newX,
+          y: newY,
+          width: element.width,
+          height: element.height,
+        };
 
-      // Apply snapped position
-      node.x(snapResult.x);
-      node.y(snapResult.y);
+        const snapLines = calculateSnapLines(elements, elementId, designSize.width, designSize.height);
+        const snapResult = findSnap(rect, snapLines);
 
-      // Update visible guides
-      setActiveGuides(snapResult.guides);
+        newX = snapResult.x;
+        newY = snapResult.y;
+
+        // Update visible guides
+        setActiveGuides(snapResult.guides);
+      }
+
+      // Clamp to keep element visible
+      const clamped = clampToVisibleBounds(newX, newY, element.width, element.height);
+      node.x(clamped.x);
+      node.y(clamped.y);
     },
-    [snapEnabled, elements, designSize.width, designSize.height, setActiveGuides]
+    [snapEnabled, elements, designSize.width, designSize.height, setActiveGuides, clampToVisibleBounds]
   );
 
   // Handle element drag end
   const handleDragEnd = (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
     const node = e.target;
+    const element = elements.find((el) => el.id === elementId);
+    if (!element) return;
+
+    // Final clamp to ensure element stays visible
+    const clamped = clampToVisibleBounds(node.x(), node.y(), element.width, element.height);
+
     updateElement(elementId, {
-      x: node.x(),
-      y: node.y(),
+      x: clamped.x,
+      y: clamped.y,
     });
     // Clear guides on drag end
     setActiveGuides([]);
@@ -346,6 +405,18 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     setContextMenu({ ...contextMenu, isOpen: false });
   };
 
+  const handleSendToFront = () => {
+    if (!contextMenu.elementId) return;
+    sendToFront(contextMenu.elementId);
+    setContextMenu({ ...contextMenu, isOpen: false });
+  };
+
+  const handleSendToBack = () => {
+    if (!contextMenu.elementId) return;
+    sendToBack(contextMenu.elementId);
+    setContextMenu({ ...contextMenu, isOpen: false });
+  };
+
   const handleCropFromMenu = () => {
     if (!contextMenu.elementId) return;
     enterCropMode(contextMenu.elementId);
@@ -355,6 +426,75 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
   const handleDeleteFromMenu = () => {
     if (!contextMenu.elementId) return;
     removeElement(contextMenu.elementId);
+    setContextMenu({ ...contextMenu, isOpen: false });
+  };
+
+  const handleResetCrop = () => {
+    if (!contextMenu.elementId) return;
+    const element = elements.find((el) => el.id === contextMenu.elementId);
+    if (!element) return;
+
+    // Calculate full bounds to determine new element size
+    const existingCropX = element.cropX ?? 0;
+    const existingCropY = element.cropY ?? 0;
+    const existingCropW = element.cropWidth ?? 1;
+    const existingCropH = element.cropHeight ?? 1;
+
+    // If already fully uncropped, nothing to do
+    if (existingCropX === 0 && existingCropY === 0 && existingCropW === 1 && existingCropH === 1) {
+      setContextMenu({ ...contextMenu, isOpen: false });
+      return;
+    }
+
+    // Calculate full bounds dimensions
+    const fullWidth = element.width / existingCropW;
+    const fullHeight = element.height / existingCropH;
+    const fullX = element.x - existingCropX * fullWidth;
+    const fullY = element.y - existingCropY * fullHeight;
+
+    // Reset crop and update element dimensions to full size
+    updateElement(contextMenu.elementId, {
+      cropX: 0,
+      cropY: 0,
+      cropWidth: 1,
+      cropHeight: 1,
+      x: fullX,
+      y: fullY,
+      width: fullWidth,
+      height: fullHeight,
+    });
+    setContextMenu({ ...contextMenu, isOpen: false });
+  };
+
+  const handleResetAspectRatio = () => {
+    if (!contextMenu.elementId) return;
+    const element = elements.find((el) => el.id === contextMenu.elementId);
+    if (!element) return;
+
+    // Get the loaded image to find original dimensions
+    const loadedImage = loadedImages.find((li) => li.id === element.id);
+    if (!loadedImage) return;
+
+    const sourceImage = loadedImage.image;
+    const originalRatio = sourceImage.naturalWidth / sourceImage.naturalHeight;
+
+    // Keep the same area, adjust dimensions to match original aspect ratio
+    const currentArea = element.width * element.height;
+    const newHeight = Math.sqrt(currentArea / originalRatio);
+    const newWidth = newHeight * originalRatio;
+
+    // Center the new dimensions around the old center
+    const centerX = element.x + element.width / 2;
+    const centerY = element.y + element.height / 2;
+    const newX = centerX - newWidth / 2;
+    const newY = centerY - newHeight / 2;
+
+    updateElement(contextMenu.elementId, {
+      x: newX,
+      y: newY,
+      width: newWidth,
+      height: newHeight,
+    });
     setContextMenu({ ...contextMenu, isOpen: false });
   };
 
@@ -633,6 +773,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
                 <CropOverlay
                   element={croppingElement}
                   fullBounds={croppingFullBounds}
+                  aspectRatio={cropAspectRatio}
                   onCropConfirm={handleCropConfirm}
                   onCancel={handleCropCancel}
                 />
@@ -641,6 +782,83 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
           </Stage>
         )}
 
+        {/* Crop toolbar - appears at top when in crop mode */}
+        {cropModeElementId && croppingFullBounds && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-1 px-2 py-1.5 bg-gray-900/90 backdrop-blur-sm rounded-lg shadow-lg z-10">
+            <span className="text-xs text-gray-400 mr-2">Ratio:</span>
+            {[
+              { label: 'Free', ratio: null },
+              { label: 'Original', ratio: croppingFullBounds.width / croppingFullBounds.height },
+              { label: '1:1', ratio: 1 },
+              { label: '4:5', ratio: 4 / 5 },
+              { label: '16:9', ratio: 16 / 9 },
+            ].map((preset) => {
+              // Check if this preset matches (accounting for swapped ratios)
+              const isSelected = cropAspectRatio === preset.ratio ||
+                (preset.ratio !== null && cropAspectRatio !== null &&
+                 Math.abs(cropAspectRatio - 1 / preset.ratio) < 0.001);
+              // For display, show the actual orientation
+              let displayLabel = preset.label;
+              if (preset.label !== 'Free' && preset.label !== 'Original' && preset.label !== '1:1' && preset.ratio !== null) {
+                if (cropAspectRatio !== null && Math.abs(cropAspectRatio - 1 / preset.ratio) < 0.001) {
+                  // Currently showing swapped version
+                  displayLabel = preset.label.split(':').reverse().join(':');
+                }
+              }
+              return (
+                <button
+                  key={preset.label}
+                  onClick={() => setCropAspectRatio(preset.ratio)}
+                  className={`px-2 py-1 text-xs rounded transition-colors ${
+                    isSelected
+                      ? 'bg-blue-500 text-white'
+                      : 'text-gray-300 hover:bg-gray-700'
+                  }`}
+                >
+                  {isSelected && preset.label !== 'Free' && preset.label !== 'Original' && preset.label !== '1:1'
+                    ? displayLabel
+                    : preset.label}
+                </button>
+              );
+            })}
+            {/* Swap orientation button */}
+            <button
+              onClick={() => {
+                if (cropAspectRatio !== null && cropAspectRatio !== 1) {
+                  setCropAspectRatio(1 / cropAspectRatio);
+                }
+              }}
+              disabled={cropAspectRatio === null || cropAspectRatio === 1}
+              className={`px-2 py-1 text-xs rounded transition-colors ${
+                cropAspectRatio === null || cropAspectRatio === 1
+                  ? 'text-gray-600 cursor-not-allowed'
+                  : 'text-gray-300 hover:bg-gray-700'
+              }`}
+              title="Swap orientation"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+              </svg>
+            </button>
+            <div className="w-px h-4 bg-gray-600 mx-1" />
+            <button
+              onClick={handleCropCancel}
+              className="px-2 py-1 text-xs text-gray-300 hover:bg-gray-700 rounded transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                // Trigger confirm via the CropOverlay's Enter key handler
+                const event = new KeyboardEvent('keydown', { key: 'Enter' });
+                window.dispatchEvent(event);
+              }}
+              className="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+            >
+              Apply
+            </button>
+          </div>
+        )}
 
         {/* Empty state */}
         {elements.length === 0 && !showDropZone && (
@@ -687,8 +905,20 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         <ContextMenuItem onClick={handleCropFromMenu}>
           Crop
         </ContextMenuItem>
+        <ContextMenuItem onClick={handleResetCrop}>
+          Reset Crop
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleResetAspectRatio}>
+          Reset Aspect Ratio
+        </ContextMenuItem>
         <ContextMenuItem onClick={handleCenterOnCanvas}>
           Center on Canvas
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleSendToFront}>
+          Send to Front
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleSendToBack}>
+          Send to Back
         </ContextMenuItem>
         <ContextMenuItem onClick={handleDeleteFromMenu} danger>
           Delete

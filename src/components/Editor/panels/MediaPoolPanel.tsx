@@ -1,10 +1,162 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, memo } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import clsx from 'clsx';
 import { useEditorStore } from '../../../stores/editorStore';
 import { ConfirmDialog } from '../../common/ConfirmDialog';
+import { MediaPreviewModal } from '../MediaPreviewModal';
+import { showInFolder, checkMediaExists, relinkMedia } from '../../../services/tauri';
+import type { MediaItem } from '../../../types';
+
+// Memoized media item to prevent re-renders during panel resize
+interface MediaItemProps {
+  media: MediaItem;
+  isSelected: boolean;
+  isDragging: boolean;
+  inUse: boolean;
+  isMissing: boolean;
+  onMouseDown: (e: React.MouseEvent, mediaId: string) => void;
+  onDoubleClick: (media: MediaItem) => void;
+  onContextMenu: (e: React.MouseEvent, media: MediaItem) => void;
+  getMediaSrc: (media: MediaItem, isMissing: boolean) => string | null;
+}
+
+const MediaItemComponent = memo(function MediaItemComponent({
+  media,
+  isSelected,
+  isDragging,
+  inUse,
+  isMissing,
+  onMouseDown,
+  onDoubleClick,
+  onContextMenu,
+  getMediaSrc,
+}: MediaItemProps) {
+  const src = getMediaSrc(media, isMissing);
+
+  return (
+    <div
+      onMouseDown={(e) => onMouseDown(e, media.id)}
+      onDoubleClick={() => onDoubleClick(media)}
+      onContextMenu={(e) => onContextMenu(e, media)}
+      className={clsx(
+        'aspect-square bg-theme-bg-tertiary rounded overflow-hidden cursor-grab transition-all relative select-none',
+        isSelected
+          ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-theme-bg-secondary'
+          : 'hover:ring-2 hover:ring-theme-border',
+        isDragging && 'opacity-50 cursor-grabbing',
+        isMissing && 'ring-2 ring-red-500/50'
+      )}
+      title={isMissing ? `${media.fileName} (Missing)` : media.fileName}
+    >
+      {isMissing ? (
+        <div className="w-full h-full flex flex-col items-center justify-center text-red-400">
+          <svg className="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={1.5}
+              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+            />
+          </svg>
+          <span className="text-[10px] text-center px-1 truncate w-full">Missing</span>
+        </div>
+      ) : (
+        <img
+          src={src || ''}
+          alt={media.fileName}
+          className="w-full h-full object-cover pointer-events-none"
+          draggable={false}
+          loading="lazy"
+          decoding="async"
+        />
+      )}
+      {/* In-use indicator */}
+      {inUse && !isMissing && (
+        <div
+          className="absolute bottom-1 right-1 w-2.5 h-2.5 bg-blue-500 rounded-full border border-white/50 shadow-sm"
+          title="On canvas"
+        />
+      )}
+    </div>
+  );
+});
+
+// Context menu component
+interface ContextMenuProps {
+  x: number;
+  y: number;
+  isMissing: boolean;
+  onClose: () => void;
+  onShowInFinder: () => void;
+  onRelink: () => void;
+  onPreview: () => void;
+  onDelete: () => void;
+}
+
+function MediaContextMenu({
+  x,
+  y,
+  isMissing,
+  onClose,
+  onShowInFinder,
+  onRelink,
+  onPreview,
+  onDelete,
+}: ContextMenuProps) {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    window.addEventListener('mousedown', handleClickOutside);
+    return () => window.removeEventListener('mousedown', handleClickOutside);
+  }, [onClose]);
+
+  return (
+    <div
+      ref={menuRef}
+      className="fixed bg-theme-bg-secondary border border-theme-border rounded-lg shadow-xl py-1 min-w-[160px] z-[150]"
+      style={{ left: x, top: y }}
+    >
+      {!isMissing && (
+        <button
+          onClick={onPreview}
+          className="w-full px-3 py-1.5 text-left text-sm text-theme-text hover:bg-theme-bg-tertiary transition-colors"
+        >
+          Preview
+        </button>
+      )}
+      {!isMissing && (
+        <button
+          onClick={onShowInFinder}
+          className="w-full px-3 py-1.5 text-left text-sm text-theme-text hover:bg-theme-bg-tertiary transition-colors"
+        >
+          Show in Finder
+        </button>
+      )}
+      {isMissing && (
+        <button
+          onClick={onRelink}
+          className="w-full px-3 py-1.5 text-left text-sm text-theme-text hover:bg-theme-bg-tertiary transition-colors"
+        >
+          Relink Media...
+        </button>
+      )}
+      <div className="my-1 border-t border-theme-border" />
+      <button
+        onClick={onDelete}
+        className="w-full px-3 py-1.5 text-left text-sm text-red-500 hover:bg-red-500/10 transition-colors"
+      >
+        Delete
+      </button>
+    </div>
+  );
+}
 
 export function MediaPoolPanel() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -14,16 +166,43 @@ export function MediaPoolPanel() {
     selectMedia,
     importMedia,
     removeSelectedMedia,
+    removeMedia,
     isMediaInUse,
     draggingMediaId,
     setDraggingMedia,
     setDragPosition,
     setDragMousePosition,
+    setProject,
   } = useEditorStore();
 
   const mediaPool = project?.mediaPool || [];
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [previewMedia, setPreviewMedia] = useState<MediaItem | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    isOpen: boolean;
+    x: number;
+    y: number;
+    media: MediaItem | null;
+  }>({ isOpen: false, x: 0, y: 0, media: null });
+
+  // Track which media files are missing
+  const [missingMediaIds, setMissingMediaIds] = useState<Set<string>>(new Set());
+
+  // Check for missing media on mount and when mediaPool changes
+  useEffect(() => {
+    const checkMissingMedia = async () => {
+      const missing = new Set<string>();
+      for (const media of mediaPool) {
+        const exists = await checkMediaExists(media.filePath);
+        if (!exists) {
+          missing.add(media.id);
+        }
+      }
+      setMissingMediaIds(missing);
+    };
+    checkMissingMedia();
+  }, [mediaPool]);
 
   // Listen for Tauri drag-drop events from file explorer
   useEffect(() => {
@@ -101,63 +280,183 @@ export function MediaPoolPanel() {
   };
 
   // Use mouse events for dragging (more reliable than HTML5 drag-drop across z-index boundaries)
-  const handleMediaMouseDown = (e: React.MouseEvent, mediaId: string) => {
-    // Only handle left click
-    if (e.button !== 0) return;
+  const handleMediaMouseDown = useCallback(
+    (e: React.MouseEvent, mediaId: string) => {
+      // Only handle left click
+      if (e.button !== 0) return;
 
-    // Don't start drag immediately - wait for mouse move to distinguish from click
-    const startX = e.clientX;
-    const startY = e.clientY;
-    let isDragging = false;
+      // Don't start drag immediately - wait for mouse move to distinguish from click
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let isDragging = false;
 
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const dx = moveEvent.clientX - startX;
-      const dy = moveEvent.clientY - startY;
+      const handleMouseMove = (moveEvent: MouseEvent) => {
+        const dx = moveEvent.clientX - startX;
+        const dy = moveEvent.clientY - startY;
 
-      // Start dragging after 5px of movement
-      if (!isDragging && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
-        isDragging = true;
-        // If the dragged item isn't selected, select only it
-        if (!selectedMediaIds.includes(mediaId)) {
-          selectMedia(mediaId);
+        // Start dragging after 5px of movement
+        if (!isDragging && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
+          isDragging = true;
+          // If the dragged item isn't selected, select only it
+          if (!selectedMediaIds.includes(mediaId)) {
+            selectMedia(mediaId);
+          }
+          setDraggingMedia(mediaId);
         }
-        setDraggingMedia(mediaId);
-      }
 
-      // Update mouse position for drag preview (this is separate from dragPosition which triggers drop)
-      if (isDragging) {
-        setDragMousePosition({ x: moveEvent.clientX, y: moveEvent.clientY });
-      }
-    };
+        // Update mouse position for drag preview (this is separate from dragPosition which triggers drop)
+        if (isDragging) {
+          setDragMousePosition({ x: moveEvent.clientX, y: moveEvent.clientY });
+        }
+      };
 
-    const handleMouseUp = (upEvent: MouseEvent) => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
+      const handleMouseUp = (upEvent: MouseEvent) => {
+        window.removeEventListener('mousemove', handleMouseMove);
+        window.removeEventListener('mouseup', handleMouseUp);
 
-      if (isDragging) {
-        // Clear drag preview position
-        setDragMousePosition(null);
-        // Set final position for drop handling
-        setDragPosition({ x: upEvent.clientX, y: upEvent.clientY });
-        // The drop will be handled by EditorLayout listening to dragPosition changes
-      } else {
-        // It was a click, not a drag
-        selectMedia(mediaId, {
-          shift: e.shiftKey,
-          ctrl: e.metaKey || e.ctrlKey,
+        if (isDragging) {
+          // Clear drag preview position
+          setDragMousePosition(null);
+          // Set final position for drop handling
+          setDragPosition({ x: upEvent.clientX, y: upEvent.clientY });
+          // The drop will be handled by EditorLayout listening to dragPosition changes
+        } else {
+          // It was a click, not a drag
+          selectMedia(mediaId, {
+            shift: e.shiftKey,
+            ctrl: e.metaKey || e.ctrlKey,
+          });
+        }
+      };
+
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    },
+    [selectedMediaIds, selectMedia, setDraggingMedia, setDragMousePosition, setDragPosition]
+  );
+
+  const handleDoubleClick = useCallback(async (media: MediaItem) => {
+    // Check if already known to be missing
+    if (missingMediaIds.has(media.id)) return;
+
+    // Check if file still exists
+    const exists = await checkMediaExists(media.filePath);
+    if (!exists) {
+      // Mark as missing
+      setMissingMediaIds((prev) => new Set(prev).add(media.id));
+      return;
+    }
+
+    setPreviewMedia(media);
+  }, [missingMediaIds]);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent, media: MediaItem) => {
+    e.preventDefault();
+    setContextMenu({
+      isOpen: true,
+      x: e.clientX,
+      y: e.clientY,
+      media,
+    });
+  }, []);
+
+  const handleShowInFinder = useCallback(async () => {
+    if (!contextMenu.media) return;
+
+    // Check if file still exists
+    const exists = await checkMediaExists(contextMenu.media.filePath);
+    if (!exists) {
+      // Mark as missing
+      setMissingMediaIds((prev) => new Set(prev).add(contextMenu.media!.id));
+      setContextMenu({ ...contextMenu, isOpen: false });
+      return;
+    }
+
+    try {
+      await showInFolder(contextMenu.media.filePath);
+    } catch (error) {
+      console.error('Failed to show in folder:', error);
+    }
+    setContextMenu({ ...contextMenu, isOpen: false });
+  }, [contextMenu]);
+
+  const handleRelink = useCallback(async () => {
+    if (!contextMenu.media || !project) return;
+
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: 'Images',
+            extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'],
+          },
+        ],
+      });
+
+      if (selected && typeof selected === 'string') {
+        const updatedProject = await relinkMedia(project.id, contextMenu.media.id, selected);
+        setProject(updatedProject);
+        // Remove from missing set
+        setMissingMediaIds((prev) => {
+          const next = new Set(prev);
+          next.delete(contextMenu.media!.id);
+          return next;
         });
       }
-    };
+    } catch (error) {
+      console.error('Failed to relink media:', error);
+    }
+    setContextMenu({ ...contextMenu, isOpen: false });
+  }, [contextMenu, project, setProject]);
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-  };
+  const handleContextMenuPreview = useCallback(async () => {
+    if (!contextMenu.media) {
+      setContextMenu({ ...contextMenu, isOpen: false });
+      return;
+    }
 
-  const getMediaSrc = useCallback((media: { filePath: string; thumbnailPath: string | null }) => {
-    // Use thumbnail if available for better performance
-    const path = media.thumbnailPath || media.filePath;
-    return convertFileSrc(path);
-  }, []);
+    // Check if already known to be missing
+    if (missingMediaIds.has(contextMenu.media.id)) {
+      setContextMenu({ ...contextMenu, isOpen: false });
+      return;
+    }
+
+    // Check if file still exists
+    const exists = await checkMediaExists(contextMenu.media.filePath);
+    if (!exists) {
+      // Mark as missing
+      setMissingMediaIds((prev) => new Set(prev).add(contextMenu.media!.id));
+      setContextMenu({ ...contextMenu, isOpen: false });
+      return;
+    }
+
+    setPreviewMedia(contextMenu.media);
+    setContextMenu({ ...contextMenu, isOpen: false });
+  }, [contextMenu, missingMediaIds]);
+
+  const handleContextMenuDelete = useCallback(async () => {
+    if (!contextMenu.media) return;
+
+    if (isMediaInUse(contextMenu.media.id)) {
+      selectMedia(contextMenu.media.id);
+      setDeleteConfirmOpen(true);
+    } else {
+      await removeMedia(contextMenu.media.id);
+    }
+    setContextMenu({ ...contextMenu, isOpen: false });
+  }, [contextMenu, isMediaInUse, selectMedia, removeMedia]);
+
+  const getMediaSrc = useCallback(
+    (media: MediaItem, isMissing: boolean) => {
+      if (isMissing) return null;
+      // Use thumbnail if available for better performance
+      const path = media.thumbnailPath || media.filePath;
+      return convertFileSrc(path);
+    },
+    []
+  );
 
   return (
     <div
@@ -198,34 +497,20 @@ export function MediaPoolPanel() {
           {/* Extra padding to prevent ring clipping */}
           <div className="p-1">
             <div className="grid grid-cols-3 gap-2">
-              {mediaPool.map((media) => {
-                const isSelected = selectedMediaIds.includes(media.id);
-                const isDragging = draggingMediaId === media.id;
-
-                return (
-                  <div
-                    key={media.id}
-                    onMouseDown={(e) => handleMediaMouseDown(e, media.id)}
-                    className={clsx(
-                      'aspect-square bg-theme-bg-tertiary rounded overflow-hidden cursor-grab transition-all relative select-none',
-                      isSelected
-                        ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-theme-bg-secondary'
-                        : 'hover:ring-2 hover:ring-theme-border',
-                      isDragging && 'opacity-50 cursor-grabbing'
-                    )}
-                    title={media.fileName}
-                  >
-                    <img
-                      src={getMediaSrc(media)}
-                      alt={media.fileName}
-                      className="w-full h-full object-cover pointer-events-none"
-                      draggable={false}
-                      loading="lazy"
-                      decoding="async"
-                    />
-                  </div>
-                );
-              })}
+              {mediaPool.map((media) => (
+                <MediaItemComponent
+                  key={media.id}
+                  media={media}
+                  isSelected={selectedMediaIds.includes(media.id)}
+                  isDragging={draggingMediaId === media.id}
+                  inUse={isMediaInUse(media.id)}
+                  isMissing={missingMediaIds.has(media.id)}
+                  onMouseDown={handleMediaMouseDown}
+                  onDoubleClick={handleDoubleClick}
+                  onContextMenu={handleContextMenu}
+                  getMediaSrc={getMediaSrc}
+                />
+              ))}
             </div>
           </div>
         </div>
@@ -278,6 +563,29 @@ export function MediaPoolPanel() {
         confirmLabel="Delete"
         danger
       />
+
+      {/* Preview modal */}
+      {previewMedia && (
+        <MediaPreviewModal
+          filePath={previewMedia.filePath}
+          fileName={previewMedia.fileName}
+          onClose={() => setPreviewMedia(null)}
+        />
+      )}
+
+      {/* Context menu */}
+      {contextMenu.isOpen && contextMenu.media && (
+        <MediaContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          isMissing={missingMediaIds.has(contextMenu.media.id)}
+          onClose={() => setContextMenu({ ...contextMenu, isOpen: false })}
+          onShowInFinder={handleShowInFinder}
+          onRelink={handleRelink}
+          onPreview={handleContextMenuPreview}
+          onDelete={handleContextMenuDelete}
+        />
+      )}
     </div>
   );
 }

@@ -30,6 +30,7 @@ interface EditorState {
 
   // Project operations
   loadProject: (id: string) => Promise<void>;
+  refreshProject: () => Promise<void>;
   setProject: (project: Project) => void;
 
   // Slide operations
@@ -40,6 +41,9 @@ interface EditorState {
   addElement: (element: Element) => Promise<void>;
   updateElement: (elementId: string, updates: Partial<Element>) => Promise<void>;
   removeElement: (elementId: string) => Promise<void>;
+  reorderElements: (orderedIds: string[]) => Promise<void>;
+  sendToFront: (elementId: string) => Promise<void>;
+  sendToBack: (elementId: string) => Promise<void>;
 
   // Media operations
   selectMedia: (id: string | null, options?: { shift?: boolean; ctrl?: boolean }) => void;
@@ -96,6 +100,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     } catch (error) {
       console.error('Failed to load project:', error);
       set({ error: String(error), isLoading: false });
+    }
+  },
+
+  refreshProject: async () => {
+    const { project } = get();
+    if (!project) return;
+    try {
+      const refreshedProject = await getProject(project.id);
+      set({ project: refreshedProject });
+    } catch (error) {
+      console.error('Failed to refresh project:', error);
     }
   },
 
@@ -181,6 +196,76 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     } catch (error) {
       console.error('Failed to remove element:', error);
     }
+  },
+
+  reorderElements: async (orderedIds: string[]) => {
+    const { project, currentSlideIndex } = get();
+    if (!project) return;
+
+    const updatedSlides = [...project.slides];
+    const slide = updatedSlides[currentSlideIndex];
+
+    // Create a map of elements by ID
+    const elementMap = new Map(slide.elements.map((e) => [e.id, e]));
+
+    // Rebuild elements array with new zIndex values
+    // orderedIds is in visual order (top to bottom), so reverse for zIndex (higher = on top)
+    const reorderedElements = orderedIds
+      .map((id, index) => {
+        const element = elementMap.get(id);
+        if (!element) return null;
+        return { ...element, zIndex: orderedIds.length - 1 - index };
+      })
+      .filter((e): e is Element => e !== null);
+
+    updatedSlides[currentSlideIndex] = {
+      ...slide,
+      elements: reorderedElements,
+    };
+
+    const updatedProject = { ...project, slides: updatedSlides };
+    try {
+      const savedProject = await updateProject(updatedProject);
+      set({ project: savedProject });
+    } catch (error) {
+      console.error('Failed to reorder elements:', error);
+    }
+  },
+
+  sendToFront: async (elementId: string) => {
+    const { project, currentSlideIndex } = get();
+    if (!project) return;
+
+    const slide = project.slides[currentSlideIndex];
+    const elements = [...slide.elements].sort((a, b) => b.zIndex - a.zIndex);
+    const currentIndex = elements.findIndex((e) => e.id === elementId);
+
+    if (currentIndex <= 0) return; // Already at front
+
+    // Move to front (index 0 in sorted array = highest zIndex)
+    const [element] = elements.splice(currentIndex, 1);
+    elements.unshift(element);
+
+    const orderedIds = elements.map((e) => e.id);
+    await get().reorderElements(orderedIds);
+  },
+
+  sendToBack: async (elementId: string) => {
+    const { project, currentSlideIndex } = get();
+    if (!project) return;
+
+    const slide = project.slides[currentSlideIndex];
+    const elements = [...slide.elements].sort((a, b) => b.zIndex - a.zIndex);
+    const currentIndex = elements.findIndex((e) => e.id === elementId);
+
+    if (currentIndex === elements.length - 1) return; // Already at back
+
+    // Move to back (last index in sorted array = lowest zIndex)
+    const [element] = elements.splice(currentIndex, 1);
+    elements.push(element);
+
+    const orderedIds = elements.map((e) => e.id);
+    await get().reorderElements(orderedIds);
   },
 
   selectMedia: (id: string | null, options = {}) => {

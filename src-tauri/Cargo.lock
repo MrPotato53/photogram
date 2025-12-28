@@ -3008,6 +3008,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "log",
+ "rayon",
  "serde",
  "serde_json",
  "tauri",
