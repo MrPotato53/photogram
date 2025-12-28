@@ -4,11 +4,11 @@ import { useEditorStore } from '../../../stores/editorStore';
 import type { Element } from '../../../types';
 
 export function LayersPanel() {
-  const { project, currentSlideIndex, selectedElementId, selectElement, reorderElements } =
+  const { project, selectedElementId, selectElement, reorderElements } =
     useEditorStore();
 
-  const currentSlide = project?.slides[currentSlideIndex];
-  const elements = currentSlide?.elements || [];
+  // Global elements across all slides
+  const elements = project?.elements || [];
 
   // Sort by zIndex descending (top layers first)
   const sortedElements = [...elements].sort((a, b) => b.zIndex - a.zIndex);

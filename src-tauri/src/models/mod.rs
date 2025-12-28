@@ -28,6 +28,8 @@ pub struct Element {
     #[serde(rename = "type")]
     pub element_type: String,
     pub media_id: Option<String>,
+    // Embedded asset path (copy of image stored in project for portability)
+    pub asset_path: Option<String>,
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -51,7 +53,6 @@ pub struct Element {
 #[serde(rename_all = "camelCase")]
 pub struct Slide {
     pub id: String,
-    pub elements: Vec<Element>,
     pub order: i32,
 }
 
@@ -62,6 +63,8 @@ pub struct Project {
     pub name: String,
     pub aspect_ratio: AspectRatio,
     pub slides: Vec<Slide>,
+    // Global elements - x coordinates span across all slides
+    pub elements: Vec<Element>,
     pub media_pool: Vec<MediaItem>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -80,9 +83,9 @@ impl Project {
             aspect_ratio,
             slides: vec![Slide {
                 id: slide_id,
-                elements: vec![],
                 order: 0,
             }],
+            elements: vec![],
             media_pool: vec![],
             created_at: now,
             updated_at: now,

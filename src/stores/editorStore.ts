@@ -1,8 +1,16 @@
 import { create } from 'zustand';
-import type { Element, Guide, Project } from '../types';
-import { getProject, updateProject, deleteMedia, importMediaFiles } from '../services/tauri';
+import { v4 as uuidv4 } from 'uuid';
+import type { Element, Guide, Project, Slide } from '../types';
+import {
+  getProject,
+  updateProject,
+  deleteMedia,
+  importMediaFiles,
+  embedElementAsset,
+  deleteElementAsset,
+} from '../services/tauri';
 
-export type PanelId = 'mediaPool' | 'layers' | 'templates';
+export type PanelId = 'mediaPool' | 'layers' | 'templates' | 'slides';
 
 interface PanelState {
   isOpen: boolean;
@@ -35,8 +43,11 @@ interface EditorState {
 
   // Slide operations
   setCurrentSlide: (index: number) => void;
+  addSlide: () => Promise<void>;
+  removeSlide: (slideIndex: number) => Promise<void>;
+  reorderSlides: (fromIndex: number, toIndex: number) => Promise<void>;
 
-  // Element operations
+  // Element operations (global across all slides)
   selectElement: (id: string | null) => void;
   addElement: (element: Element) => Promise<void>;
   updateElement: (elementId: string, updates: Partial<Element>) => Promise<void>;
@@ -74,6 +85,7 @@ const defaultPanelState: Record<PanelId, PanelState> = {
   mediaPool: { isOpen: false, width: 300, height: 200 },
   layers: { isOpen: false, width: 250, height: 300 },
   templates: { isOpen: false, width: 280, height: 400 },
+  slides: { isOpen: false, width: 0, height: 120 },
 };
 
 export const useEditorStore = create<EditorState>((set, get) => ({
@@ -121,7 +133,148 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setCurrentSlide: (index: number) => {
     const { project } = get();
     if (project && index >= 0 && index < project.slides.length) {
-      set({ currentSlideIndex: index, selectedElementId: null });
+      set({ currentSlideIndex: index });
+    }
+  },
+
+  addSlide: async () => {
+    const { project } = get();
+    if (!project) return;
+
+    // Maximum 20 slides
+    if (project.slides.length >= 20) return;
+
+    const newSlide: Slide = {
+      id: uuidv4(),
+      order: project.slides.length,
+    };
+
+    const updatedProject = {
+      ...project,
+      slides: [...project.slides, newSlide],
+    };
+
+    try {
+      const savedProject = await updateProject(updatedProject);
+      set({ project: savedProject });
+    } catch (error) {
+      console.error('Failed to add slide:', error);
+    }
+  },
+
+  removeSlide: async (slideIndex: number) => {
+    const { project, currentSlideIndex } = get();
+    if (!project) return;
+
+    // Must have at least 1 slide
+    if (project.slides.length <= 1) return;
+
+    // Calculate slide width for element repositioning
+    const slideWidth = 1080 * (project.aspectRatio.width / project.aspectRatio.height);
+
+    // Find elements "homed" on this slide and remove them
+    // An element's home slide is the leftmost slide it occupies
+    const updatedElements = project.elements.filter((element) => {
+      const homeSlideIndex = Math.floor(element.x / slideWidth);
+      return homeSlideIndex !== slideIndex;
+    });
+
+    // Adjust x coordinates for elements on slides after the deleted one
+    const adjustedElements = updatedElements.map((element) => {
+      const homeSlideIndex = Math.floor(element.x / slideWidth);
+      if (homeSlideIndex > slideIndex) {
+        return { ...element, x: element.x - slideWidth };
+      }
+      return element;
+    });
+
+    const updatedSlides = project.slides.filter((_, index) => index !== slideIndex);
+    // Update order values
+    updatedSlides.forEach((slide, index) => {
+      slide.order = index;
+    });
+
+    const updatedProject = { ...project, slides: updatedSlides, elements: adjustedElements };
+
+    // Adjust current slide index if needed
+    let newCurrentIndex = currentSlideIndex;
+    if (currentSlideIndex >= updatedSlides.length) {
+      newCurrentIndex = updatedSlides.length - 1;
+    } else if (currentSlideIndex > slideIndex) {
+      newCurrentIndex = currentSlideIndex - 1;
+    }
+
+    try {
+      const savedProject = await updateProject(updatedProject);
+      set({ project: savedProject, currentSlideIndex: newCurrentIndex });
+    } catch (error) {
+      console.error('Failed to remove slide:', error);
+    }
+  },
+
+  reorderSlides: async (fromIndex: number, toIndex: number) => {
+    const { project, currentSlideIndex } = get();
+    if (!project) return;
+    if (fromIndex === toIndex) return;
+    if (fromIndex < 0 || fromIndex >= project.slides.length) return;
+    if (toIndex < 0 || toIndex >= project.slides.length) return;
+
+    const slideWidth = 1080 * (project.aspectRatio.width / project.aspectRatio.height);
+
+    // Reorder slides array
+    const newSlides = [...project.slides];
+    const [movedSlide] = newSlides.splice(fromIndex, 1);
+    newSlides.splice(toIndex, 0, movedSlide);
+
+    // Update order values
+    newSlides.forEach((slide, index) => {
+      slide.order = index;
+    });
+
+    // Adjust element positions based on slide movement
+    // Elements stay with their "home" slide (leftmost slide they occupy)
+    const adjustedElements = project.elements.map((element) => {
+      const homeSlideIndex = Math.floor(element.x / slideWidth);
+
+      if (homeSlideIndex === fromIndex) {
+        // Element is homed on the moved slide - move it to new position
+        const offsetWithinSlide = element.x - fromIndex * slideWidth;
+        return { ...element, x: toIndex * slideWidth + offsetWithinSlide };
+      } else if (fromIndex < toIndex) {
+        // Slide moved right: elements on slides between fromIndex+1 and toIndex shift left
+        if (homeSlideIndex > fromIndex && homeSlideIndex <= toIndex) {
+          return { ...element, x: element.x - slideWidth };
+        }
+      } else {
+        // Slide moved left: elements on slides between toIndex and fromIndex-1 shift right
+        if (homeSlideIndex >= toIndex && homeSlideIndex < fromIndex) {
+          return { ...element, x: element.x + slideWidth };
+        }
+      }
+      return element;
+    });
+
+    const updatedProject = { ...project, slides: newSlides, elements: adjustedElements };
+
+    // Update current slide index to follow the moved slide if it was selected
+    let newCurrentIndex = currentSlideIndex;
+    if (currentSlideIndex === fromIndex) {
+      newCurrentIndex = toIndex;
+    } else if (fromIndex < toIndex) {
+      if (currentSlideIndex > fromIndex && currentSlideIndex <= toIndex) {
+        newCurrentIndex = currentSlideIndex - 1;
+      }
+    } else {
+      if (currentSlideIndex >= toIndex && currentSlideIndex < fromIndex) {
+        newCurrentIndex = currentSlideIndex + 1;
+      }
+    }
+
+    try {
+      const savedProject = await updateProject(updatedProject);
+      set({ project: savedProject, currentSlideIndex: newCurrentIndex });
+    } catch (error) {
+      console.error('Failed to reorder slides:', error);
     }
   },
 
@@ -130,16 +283,30 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   addElement: async (element: Element) => {
-    const { project, currentSlideIndex } = get();
+    const { project } = get();
     if (!project) return;
 
-    const updatedSlides = [...project.slides];
-    updatedSlides[currentSlideIndex] = {
-      ...updatedSlides[currentSlideIndex],
-      elements: [...updatedSlides[currentSlideIndex].elements, element],
+    let elementWithAsset = { ...element };
+
+    // For photo elements, embed the source image as a project asset
+    if (element.type === 'photo' && element.mediaId) {
+      const media = project.mediaPool.find((m) => m.id === element.mediaId);
+      if (media) {
+        try {
+          const assetPath = await embedElementAsset(project.id, element.id, media.filePath);
+          elementWithAsset.assetPath = assetPath;
+        } catch (error) {
+          console.error('Failed to embed asset:', error);
+          // Continue without embedded asset - will fall back to media pool reference
+        }
+      }
+    }
+
+    const updatedProject = {
+      ...project,
+      elements: [...project.elements, elementWithAsset],
     };
 
-    const updatedProject = { ...project, slides: updatedSlides };
     try {
       const savedProject = await updateProject(updatedProject);
       set({ project: savedProject, selectedElementId: element.id });
@@ -149,21 +316,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   updateElement: async (elementId: string, updates: Partial<Element>) => {
-    const { project, currentSlideIndex } = get();
+    const { project } = get();
     if (!project) return;
 
-    const updatedSlides = [...project.slides];
-    const slide = updatedSlides[currentSlideIndex];
-    const elementIndex = slide.elements.findIndex((e) => e.id === elementId);
-
+    const elementIndex = project.elements.findIndex((e) => e.id === elementId);
     if (elementIndex === -1) return;
 
-    slide.elements[elementIndex] = {
-      ...slide.elements[elementIndex],
+    const updatedElements = [...project.elements];
+    updatedElements[elementIndex] = {
+      ...updatedElements[elementIndex],
       ...updates,
     };
 
-    const updatedProject = { ...project, slides: updatedSlides };
+    const updatedProject = { ...project, elements: updatedElements };
     try {
       const savedProject = await updateProject(updatedProject);
       set({ project: savedProject });
@@ -173,18 +338,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   removeElement: async (elementId: string) => {
-    const { project, currentSlideIndex, selectedElementId, cropModeElementId } = get();
+    const { project, selectedElementId, cropModeElementId } = get();
     if (!project) return;
 
-    const updatedSlides = [...project.slides];
-    updatedSlides[currentSlideIndex] = {
-      ...updatedSlides[currentSlideIndex],
-      elements: updatedSlides[currentSlideIndex].elements.filter(
-        (e) => e.id !== elementId
-      ),
+    // Find the element to get its asset path before removing
+    const elementToRemove = project.elements.find((e) => e.id === elementId);
+
+    const updatedProject = {
+      ...project,
+      elements: project.elements.filter((e) => e.id !== elementId),
     };
 
-    const updatedProject = { ...project, slides: updatedSlides };
     try {
       const savedProject = await updateProject(updatedProject);
       set({
@@ -193,20 +357,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         // Exit crop mode if the deleted element was being cropped
         cropModeElementId: cropModeElementId === elementId ? null : cropModeElementId,
       });
+
+      // Clean up the embedded asset file if it exists
+      if (elementToRemove?.assetPath) {
+        deleteElementAsset(project.id, elementToRemove.assetPath).catch((error) => {
+          console.error('Failed to delete asset file:', error);
+        });
+      }
     } catch (error) {
       console.error('Failed to remove element:', error);
     }
   },
 
   reorderElements: async (orderedIds: string[]) => {
-    const { project, currentSlideIndex } = get();
+    const { project } = get();
     if (!project) return;
 
-    const updatedSlides = [...project.slides];
-    const slide = updatedSlides[currentSlideIndex];
-
     // Create a map of elements by ID
-    const elementMap = new Map(slide.elements.map((e) => [e.id, e]));
+    const elementMap = new Map(project.elements.map((e) => [e.id, e]));
 
     // Rebuild elements array with new zIndex values
     // orderedIds is in visual order (top to bottom), so reverse for zIndex (higher = on top)
@@ -218,12 +386,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       })
       .filter((e): e is Element => e !== null);
 
-    updatedSlides[currentSlideIndex] = {
-      ...slide,
-      elements: reorderedElements,
+    // Add back any elements not in orderedIds (shouldn't happen but safety)
+    const orderedIdSet = new Set(orderedIds);
+    const remainingElements = project.elements.filter((e) => !orderedIdSet.has(e.id));
+
+    const updatedProject = {
+      ...project,
+      elements: [...reorderedElements, ...remainingElements],
     };
 
-    const updatedProject = { ...project, slides: updatedSlides };
     try {
       const savedProject = await updateProject(updatedProject);
       set({ project: savedProject });
@@ -233,11 +404,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   sendToFront: async (elementId: string) => {
-    const { project, currentSlideIndex } = get();
+    const { project } = get();
     if (!project) return;
 
-    const slide = project.slides[currentSlideIndex];
-    const elements = [...slide.elements].sort((a, b) => b.zIndex - a.zIndex);
+    const elements = [...project.elements].sort((a, b) => b.zIndex - a.zIndex);
     const currentIndex = elements.findIndex((e) => e.id === elementId);
 
     if (currentIndex <= 0) return; // Already at front
@@ -251,11 +421,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   sendToBack: async (elementId: string) => {
-    const { project, currentSlideIndex } = get();
+    const { project } = get();
     if (!project) return;
 
-    const slide = project.slides[currentSlideIndex];
-    const elements = [...slide.elements].sort((a, b) => b.zIndex - a.zIndex);
+    const elements = [...project.elements].sort((a, b) => b.zIndex - a.zIndex);
     const currentIndex = elements.findIndex((e) => e.id === elementId);
 
     if (currentIndex === elements.length - 1) return; // Already at back
@@ -366,9 +535,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const { project } = get();
     if (!project) return false;
 
-    return project.slides.some((slide) =>
-      slide.elements.some((element) => element.mediaId === mediaId)
-    );
+    return project.elements.some((element) => element.mediaId === mediaId);
   },
 
   setDraggingMedia: (mediaId: string | null) => {

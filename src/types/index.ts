@@ -17,6 +17,8 @@ export interface Element {
   id: string;
   type: 'photo' | 'placeholder';
   mediaId?: string;
+  // Embedded asset path (copy of image stored in project for portability)
+  assetPath?: string;
   x: number;
   y: number;
   width: number;
@@ -44,7 +46,6 @@ export interface Guide {
 
 export interface Slide {
   id: string;
-  elements: Element[];
   order: number;
 }
 
@@ -53,6 +54,9 @@ export interface Project {
   name: string;
   aspectRatio: AspectRatio;
   slides: Slide[];
+  // Global elements - x coordinates span across all slides
+  // (e.g., x=1200 on 1080-wide slides means element is on slide 2)
+  elements: Element[];
   mediaPool: MediaItem[];
   createdAt: string;
   updatedAt: string;

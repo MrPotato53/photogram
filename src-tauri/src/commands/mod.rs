@@ -22,6 +22,14 @@ fn get_thumbnails_dir(app: &AppHandle, project_id: &str) -> PathBuf {
         .join(project_id)
 }
 
+fn get_assets_dir(app: &AppHandle, project_id: &str) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .expect("Failed to get app data dir")
+        .join("assets")
+        .join(project_id)
+}
+
 // Generate a small thumbnail for the media pool (128x128, JPEG quality 80)
 fn generate_thumbnail(source_path: &PathBuf, thumb_path: &PathBuf) -> Result<(), String> {
     use image::imageops::FilterType;
@@ -191,6 +199,13 @@ pub fn delete_project(app: AppHandle, id: String) -> Result<(), String> {
     if thumbnails_dir.exists() {
         fs::remove_dir_all(&thumbnails_dir)
             .map_err(|e| format!("Failed to delete thumbnails directory: {}", e))?;
+    }
+
+    // Delete assets directory (embedded element images)
+    let assets_dir = get_assets_dir(&app, &id);
+    if assets_dir.exists() {
+        fs::remove_dir_all(&assets_dir)
+            .map_err(|e| format!("Failed to delete assets directory: {}", e))?;
     }
 
     Ok(())
@@ -558,4 +573,67 @@ pub fn relink_media(
     });
 
     Ok(project)
+}
+
+/// Embed an image asset for a canvas element
+/// Copies the source image to the project's assets folder and returns the asset path
+#[command]
+pub fn embed_element_asset(
+    app: AppHandle,
+    project_id: String,
+    element_id: String,
+    source_file_path: String,
+) -> Result<String, String> {
+    let source_path = PathBuf::from(&source_file_path);
+    if !source_path.exists() {
+        return Err("Source file does not exist".to_string());
+    }
+
+    if !is_image_file(&source_path) {
+        return Err("File is not a supported image format".to_string());
+    }
+
+    // Create assets directory for this project
+    let assets_dir = get_assets_dir(&app, &project_id);
+    fs::create_dir_all(&assets_dir)
+        .map_err(|e| format!("Failed to create assets directory: {}", e))?;
+
+    // Determine the file extension
+    let extension = source_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("jpg");
+
+    // Create the asset file path using element ID
+    let asset_filename = format!("{}.{}", element_id, extension);
+    let asset_path = assets_dir.join(&asset_filename);
+
+    // Copy the source file to the assets directory
+    fs::copy(&source_path, &asset_path)
+        .map_err(|e| format!("Failed to copy image to assets: {}", e))?;
+
+    Ok(asset_path.to_string_lossy().to_string())
+}
+
+/// Delete an element's embedded asset file
+#[command]
+pub fn delete_element_asset(
+    app: AppHandle,
+    project_id: String,
+    asset_path: String,
+) -> Result<(), String> {
+    let path = PathBuf::from(&asset_path);
+
+    // Verify the asset is within the project's assets directory (security check)
+    let assets_dir = get_assets_dir(&app, &project_id);
+    if !path.starts_with(&assets_dir) {
+        return Err("Invalid asset path".to_string());
+    }
+
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|e| format!("Failed to delete asset: {}", e))?;
+    }
+
+    Ok(())
 }

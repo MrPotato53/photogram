@@ -65,3 +65,18 @@ export async function relinkMedia(
 ): Promise<Project> {
   return invoke('relink_media', { projectId, mediaId, newFilePath });
 }
+
+export async function embedElementAsset(
+  projectId: string,
+  elementId: string,
+  sourceFilePath: string
+): Promise<string> {
+  return invoke('embed_element_asset', { projectId, elementId, sourceFilePath });
+}
+
+export async function deleteElementAsset(
+  projectId: string,
+  assetPath: string
+): Promise<void> {
+  return invoke('delete_element_asset', { projectId, assetPath });
+}
