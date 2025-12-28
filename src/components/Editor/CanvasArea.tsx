@@ -4,7 +4,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import type Konva from 'konva';
 import type { AspectRatio, Element } from '../../types';
 import { useEditorStore } from '../../stores/editorStore';
-import { calculateSnapLines, findSnap } from '../../utils/snapping';
+import { calculateSnapLines, findSnap, findTransformSnap, generateStaticGuides } from '../../utils/snapping';
 import { CropOverlay } from './CropOverlay';
 import { ContextMenu, ContextMenuItem } from '../common/ContextMenu';
 import { v4 as uuidv4 } from 'uuid';
@@ -54,6 +54,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     addElement,
     clearMediaSelection,
     snapEnabled,
+    snapSettings,
     activeGuides,
     setActiveGuides,
   } = useEditorStore();
@@ -67,6 +68,9 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
   // Track shift key for centered scaling
   const isShiftPressed = useRef(false);
+
+  // Track active anchor for transform snapping
+  const activeAnchorRef = useRef<string | null>(null);
 
   // Refs for drop handling (to avoid stale closures in always-attached listener)
   const dropStateRef = useRef({
@@ -468,23 +472,15 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
       // Apply snapping (snap to slide boundaries and other elements)
       if (snapEnabled) {
-        const snapLines = calculateSnapLines(elements, elementId, totalDesignWidth, designSize.height);
-
-        // Add per-slide snap lines (boundaries and centers)
-        for (let i = 0; i < numSlides; i++) {
-          const slideLeft = i * designSize.width;
-          const slideCenter = slideLeft + designSize.width / 2;
-          const slideRight = (i + 1) * designSize.width;
-
-          // Slide boundaries
-          snapLines.vertical.push({ position: slideLeft, type: 'edge' });
-          if (i === numSlides - 1) {
-            snapLines.vertical.push({ position: slideRight, type: 'edge' });
-          }
-
-          // Slide center (horizontal middle as vertical guide line)
-          snapLines.vertical.push({ position: slideCenter, type: 'center' });
-        }
+        const snapLines = calculateSnapLines(
+          elements,
+          elementId,
+          totalDesignWidth,
+          designSize.height,
+          snapSettings,
+          designSize.width,
+          numSlides
+        );
 
         const elementRect = {
           x: newX,
@@ -503,7 +499,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       node.x(clamped.x);
       node.y(clamped.y);
     },
-    [elements, snapEnabled, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds]
+    [elements, snapEnabled, snapSettings, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds]
   );
 
   // Handle drag end
@@ -543,6 +539,10 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       const newWidth = Math.max(20, node.width() * scaleX);
       const newHeight = Math.max(20, node.height() * scaleY);
 
+      // Clear guides and anchor ref
+      setActiveGuides([]);
+      activeAnchorRef.current = null;
+
       updateElement(elementId, {
         x: node.x(),
         y: node.y(),
@@ -551,22 +551,145 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         rotation: node.rotation(),
       });
     },
-    [updateElement]
+    [updateElement, setActiveGuides]
   );
 
-  const handleTransformStart = () => {
+  const handleTransformStart = useCallback((_e: Konva.KonvaEventObject<Event>) => {
     const transformer = transformerRef.current;
     if (transformer) {
       transformer.centeredScaling(isShiftPressed.current);
+      // Store the active anchor name
+      activeAnchorRef.current = transformer.getActiveAnchor() || null;
     }
-  };
+  }, []);
 
-  const handleTransform = () => {
+  const handleTransform = useCallback((e: Konva.KonvaEventObject<Event>) => {
     const transformer = transformerRef.current;
+    const isCenteredScaling = isShiftPressed.current;
     if (transformer) {
-      transformer.centeredScaling(isShiftPressed.current);
+      transformer.centeredScaling(isCenteredScaling);
     }
-  };
+
+    // Apply transform snapping
+    if (!snapEnabled || !selectedElementId) return;
+
+    const node = e.target;
+    const anchorName = activeAnchorRef.current;
+
+    // Skip snapping for rotation (rotater anchor) or if no anchor
+    if (!anchorName || anchorName === 'rotater') return;
+
+    const scaleX = node.scaleX();
+    const scaleY = node.scaleY();
+    const originalWidth = node.width();
+    const originalHeight = node.height();
+
+    // Get current bounds in design coordinates
+    // Note: node.x() and node.y() always return the top-left corner, even during centered scaling
+    // Konva's centeredScaling mode automatically adjusts the top-left to keep center fixed
+    const currentWidth = originalWidth * Math.abs(scaleX);
+    const currentHeight = originalHeight * Math.abs(scaleY);
+
+    // For centered scaling, calculate the center position (which should stay fixed)
+    // The node's current position is the top-left after Konva's centered scaling adjustment
+    const currentX = node.x();
+    const currentY = node.y();
+    const centerX = currentX + currentWidth / 2;
+    const centerY = currentY + currentHeight / 2;
+
+    // Bounds are always the top-left corner
+    const boundsX = currentX;
+    const boundsY = currentY;
+
+    const snapLines = calculateSnapLines(
+      elements,
+      selectedElementId,
+      totalDesignWidth,
+      designSize.height,
+      snapSettings,
+      designSize.width,
+      numSlides
+    );
+
+    // For centered scaling, check all edges (not just the ones being dragged)
+    const effectiveAnchor = isCenteredScaling ? 'top-left-bottom-right' : anchorName;
+
+    const snapResult = findTransformSnap(
+      { x: boundsX, y: boundsY, width: currentWidth, height: currentHeight },
+      effectiveAnchor,
+      snapLines,
+      10
+    );
+
+    // Apply snapped dimensions
+    if (snapResult.guides.length > 0) {
+      // Check if this is a corner anchor (aspect-ratio-locked resize)
+      const isCornerAnchor = anchorName.includes('-') &&
+        (anchorName.includes('top') || anchorName.includes('bottom')) &&
+        (anchorName.includes('left') || anchorName.includes('right'));
+
+      let finalWidth = snapResult.width;
+      let finalHeight = snapResult.height;
+      let finalX = snapResult.x;
+      let finalY = snapResult.y;
+
+      // For centered scaling or corner anchors, maintain aspect ratio
+      if (isCenteredScaling || isCornerAnchor) {
+        const aspectRatio = originalWidth / originalHeight;
+        const widthChanged = Math.abs(snapResult.width - currentWidth) > 0.1;
+        const heightChanged = Math.abs(snapResult.height - currentHeight) > 0.1;
+
+        if (widthChanged && !heightChanged) {
+          // Width was snapped - calculate height proportionally
+          finalHeight = finalWidth / aspectRatio;
+        } else if (heightChanged && !widthChanged) {
+          // Height was snapped - calculate width proportionally
+          finalWidth = finalHeight * aspectRatio;
+        } else if (widthChanged && heightChanged) {
+          // Both snapped - use the smaller scale factor to maintain aspect ratio
+          const widthScale = snapResult.width / currentWidth;
+          const heightScale = snapResult.height / currentHeight;
+
+          if (widthScale < heightScale) {
+            finalHeight = finalWidth / aspectRatio;
+          } else {
+            finalWidth = finalHeight * aspectRatio;
+          }
+        }
+
+        if (isCenteredScaling) {
+          // For centered scaling, recalculate position to keep center fixed
+          // centerX/centerY is where the center should stay, so new top-left is center minus half the new size
+          finalX = centerX - finalWidth / 2;
+          finalY = centerY - finalHeight / 2;
+        } else {
+          // For non-centered corner anchors, adjust position based on anchor
+          if (anchorName.includes('top')) {
+            finalY = boundsY + currentHeight - finalHeight;
+          }
+          if (anchorName.includes('left')) {
+            finalX = boundsX + currentWidth - finalWidth;
+          }
+        }
+      }
+
+      // Calculate and apply new scale factors
+      const newScaleX = (finalWidth / originalWidth) * Math.sign(scaleX);
+      const newScaleY = (finalHeight / originalHeight) * Math.sign(scaleY);
+
+      node.scaleX(newScaleX);
+      node.scaleY(newScaleY);
+
+      // For centered scaling, we need to set the position to keep the center fixed
+      // For non-centered scaling, we set position based on which anchor was dragged
+      node.x(finalX);
+      node.y(finalY);
+
+      setActiveGuides(snapResult.guides);
+    } else {
+      setActiveGuides([]);
+    }
+  }, [snapEnabled, selectedElementId, elements, totalDesignWidth, designSize.height, designSize.width, numSlides, snapSettings, setActiveGuides]);
 
   // Context menu handlers
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -921,7 +1044,31 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
                   );
                 })}
 
-                {/* Alignment guides */}
+                {/* Static guide visualization (always visible when enabled) */}
+                {generateStaticGuides(snapSettings, designSize.height, designSize.width, numSlides).map(
+                  (guide, index) => {
+                    // Different colors for different guide types
+                    const colors = {
+                      canvas: 'rgba(147, 197, 253, 0.4)', // blue-300 with opacity
+                      margin: 'rgba(252, 211, 77, 0.4)',  // amber-300 with opacity
+                      grid: 'rgba(167, 139, 250, 0.35)',  // violet-400 with opacity
+                    };
+                    return (
+                      <Line
+                        key={`static-guide-${index}`}
+                        points={
+                          guide.orientation === 'vertical'
+                            ? [guide.position, 0, guide.position, designSize.height]
+                            : [0, guide.position, totalDesignWidth, guide.position]
+                        }
+                        stroke={colors[guide.type]}
+                        strokeWidth={1 / scale}
+                      />
+                    );
+                  }
+                )}
+
+                {/* Active snap guides (shown during drag/resize) */}
                 {activeGuides.map((guide, index) => (
                   <Line
                     key={`guide-${index}`}
@@ -972,6 +1119,13 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
                     aspectRatio={cropAspectRatio}
                     onCropConfirm={handleCropConfirm}
                     onCancel={handleCropCancel}
+                    snapEnabled={snapEnabled}
+                    snapSettings={snapSettings}
+                    elements={elements}
+                    totalDesignWidth={totalDesignWidth}
+                    canvasHeight={designSize.height}
+                    slideWidth={designSize.width}
+                    numSlides={numSlides}
                   />
                 )}
               </Layer>
