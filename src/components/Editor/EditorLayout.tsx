@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { useEditorStore } from '../../stores/editorStore';
 import { EditorToolbar } from './EditorToolbar';
 import { CanvasArea } from './CanvasArea';
@@ -21,12 +22,14 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
     error,
     panels,
     loadProject,
+    refreshProject,
     draggingMediaId,
     setDraggingMedia,
     dragPosition,
     setDragPosition,
     addElement,
     currentSlideIndex,
+    clearMediaSelection,
   } = useEditorStore();
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -35,6 +38,17 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   useEffect(() => {
     loadProject(projectId);
   }, [projectId, loadProject]);
+
+  // Listen for thumbnails-ready event from Rust backend
+  useEffect(() => {
+    const unlisten = listen('thumbnails-ready', () => {
+      refreshProject();
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [refreshProject]);
 
   // Change cursor during drag
   useEffect(() => {
@@ -74,10 +88,15 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
       return;
     }
 
-    // Get canvas dimensions
+    // Design size is fixed - elements are stored in these coordinates
+    // Must match DESIGN_HEIGHT in CanvasArea.tsx
+    const DESIGN_HEIGHT = 1080;
     const aspectRatio = project.aspectRatio;
-    const containerRect = containerRef.current.getBoundingClientRect();
+    const designWidth = DESIGN_HEIGHT * (aspectRatio.width / aspectRatio.height);
+    const designHeight = DESIGN_HEIGHT;
 
+    // Calculate screen canvas dimensions (for coordinate conversion)
+    const containerRect = containerRef.current.getBoundingClientRect();
     const padding = 60;
     const availableWidth = containerRect.width - padding * 2;
     const availableHeight = containerRect.height - padding * 2;
@@ -94,16 +113,19 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
       canvasWidth = canvasHeight * targetRatio;
     }
 
+    // Scale factor from screen pixels to design coordinates
+    const scale = canvasHeight / designHeight;
+
     // Calculate canvas position (centered in container)
     const canvasLeft = containerRect.left + (containerRect.width - canvasWidth) / 2;
     const canvasTop = containerRect.top + (containerRect.height - canvasHeight) / 2;
 
-    // Get drop position relative to canvas
-    const dropX = dragPosition.x - canvasLeft;
-    const dropY = dragPosition.y - canvasTop;
+    // Get drop position relative to canvas (in screen pixels)
+    const dropScreenX = dragPosition.x - canvasLeft;
+    const dropScreenY = dragPosition.y - canvasTop;
 
-    // Check if drop is within canvas bounds
-    if (dropX < 0 || dropX > canvasWidth || dropY < 0 || dropY > canvasHeight) {
+    // Check if drop is within canvas bounds (screen coordinates)
+    if (dropScreenX < 0 || dropScreenX > canvasWidth || dropScreenY < 0 || dropScreenY > canvasHeight) {
       // Dropped outside canvas - cancel
       setDraggingMedia(null);
       setDragPosition(null);
@@ -111,19 +133,24 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
       return;
     }
 
-    // Calculate element size
+    // Convert drop position to design coordinates
+    const dropX = dropScreenX / scale;
+    const dropY = dropScreenY / scale;
+
+    // Calculate element size in design coordinates (consistent regardless of window size)
+    // Size element to fit within 50% of design canvas while maintaining aspect ratio
     const mediaRatio = media.width / media.height;
-    let elementWidth = Math.min(canvasWidth * 0.5, media.width);
+    let elementWidth = Math.min(designWidth * 0.5, media.width);
     let elementHeight = elementWidth / mediaRatio;
 
-    if (elementHeight > canvasHeight * 0.5) {
-      elementHeight = canvasHeight * 0.5;
+    if (elementHeight > designHeight * 0.5) {
+      elementHeight = designHeight * 0.5;
       elementWidth = elementHeight * mediaRatio;
     }
 
-    // Center on drop position, clamp to canvas bounds
-    const x = Math.max(0, Math.min(dropX - elementWidth / 2, canvasWidth - elementWidth));
-    const y = Math.max(0, Math.min(dropY - elementHeight / 2, canvasHeight - elementHeight));
+    // Center on drop position, clamp to design canvas bounds
+    const x = Math.max(0, Math.min(dropX - elementWidth / 2, designWidth - elementWidth));
+    const y = Math.max(0, Math.min(dropY - elementHeight / 2, designHeight - elementHeight));
 
     const currentSlide = project.slides[currentSlideIndex];
     const newElement: Element = {
@@ -140,14 +167,15 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
       zIndex: currentSlide?.elements.length || 0,
     };
 
-    // Clear drag state
+    // Clear drag state and media selection
     setDraggingMedia(null);
     setDragPosition(null);
     lastDragPositionRef.current = null;
+    clearMediaSelection();
 
     // Add the element
     addElement(newElement);
-  }, [dragPosition, draggingMediaId, project, currentSlideIndex, addElement, setDraggingMedia, setDragPosition]);
+  }, [dragPosition, draggingMediaId, project, currentSlideIndex, addElement, setDraggingMedia, setDragPosition, clearMediaSelection]);
 
   if (isLoading) {
     return (

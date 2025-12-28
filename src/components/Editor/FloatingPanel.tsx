@@ -35,9 +35,17 @@ export function FloatingPanel({
   const [isResizing, setIsResizing] = useState(false);
   const [resizeDirection, setResizeDirection] = useState<string | null>(null);
 
+  // Local size state for smooth resize (avoids store updates on every frame)
+  const [localSize, setLocalSize] = useState<{ width: number; height: number } | null>(null);
+
   const panelRef = useRef<HTMLDivElement>(null);
   const dragStartRef = useRef({ x: 0, y: 0, posX: 0, posY: 0 });
   const resizeStartRef = useRef({ x: 0, y: 0, width: 0, height: 0 });
+
+  // Ref to track pending store commit (for cancellation)
+  const commitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Ref to track the pending size to commit
+  const pendingSizeRef = useRef<{ width: number; height: number } | null>(null);
 
   // Dragging handlers
   const handleDragStart = useCallback(
@@ -77,16 +85,34 @@ export function FloatingPanel({
     (e: React.MouseEvent, direction: string) => {
       e.preventDefault();
       e.stopPropagation();
+
+      // Cancel any pending store commit from previous resize
+      if (commitTimeoutRef.current) {
+        clearTimeout(commitTimeoutRef.current);
+        commitTimeoutRef.current = null;
+      }
+
       setIsResizing(true);
       setResizeDirection(direction);
+
+      // Use pending size, local size, or panel state as starting point
+      const currentWidth = pendingSizeRef.current?.width ?? localSize?.width ?? panelState.width;
+      const currentHeight = pendingSizeRef.current?.height ?? localSize?.height ?? panelState.height;
+
+      // If there was a pending size, apply it to local state immediately
+      if (pendingSizeRef.current) {
+        setLocalSize(pendingSizeRef.current);
+        pendingSizeRef.current = null;
+      }
+
       resizeStartRef.current = {
         x: e.clientX,
         y: e.clientY,
-        width: panelState.width,
-        height: panelState.height,
+        width: currentWidth,
+        height: currentHeight,
       };
     },
-    [panelState.width, panelState.height]
+    [panelState.width, panelState.height, localSize]
   );
 
   const handleResize = useCallback(
@@ -112,15 +138,37 @@ export function FloatingPanel({
         newHeight = Math.max(minHeight, resizeStartRef.current.height - dy);
       }
 
-      setPanelSize(panelId, { width: newWidth, height: newHeight });
+      // Update local state during resize (fast, no store update)
+      setLocalSize({ width: newWidth, height: newHeight });
     },
-    [isResizing, resizeDirection, minWidth, minHeight, panelId, setPanelSize]
+    [isResizing, resizeDirection, minWidth, minHeight]
   );
 
   const handleResizeEnd = useCallback(() => {
+    if (localSize) {
+      // Store the size to commit and schedule a debounced commit
+      pendingSizeRef.current = localSize;
+
+      // Cancel any existing pending commit
+      if (commitTimeoutRef.current) {
+        clearTimeout(commitTimeoutRef.current);
+      }
+
+      // Debounce the store commit - if another resize starts within 150ms, this will be cancelled
+      commitTimeoutRef.current = setTimeout(() => {
+        if (pendingSizeRef.current) {
+          setPanelSize(panelId, pendingSizeRef.current);
+          pendingSizeRef.current = null;
+          // Clear local size so display uses store value
+          setLocalSize(null);
+        }
+        commitTimeoutRef.current = null;
+      }, 150);
+    }
     setIsResizing(false);
     setResizeDirection(null);
-  }, []);
+    // Keep localSize so it's used for display until store commits
+  }, [localSize, panelId, setPanelSize]);
 
   // Attach global listeners for drag and resize
   useEffect(() => {
@@ -143,6 +191,19 @@ export function FloatingPanel({
     };
   }, [handleDrag, handleResize, handleDragEnd, handleResizeEnd]);
 
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (commitTimeoutRef.current) {
+        clearTimeout(commitTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  // Calculate display size: prefer local (during resize), then pending (after resize, before commit), then store
+  const displayWidth = localSize?.width ?? pendingSizeRef.current?.width ?? panelState.width;
+  const displayHeight = localSize?.height ?? pendingSizeRef.current?.height ?? panelState.height;
+
   return (
     <div
       ref={panelRef}
@@ -154,8 +215,8 @@ export function FloatingPanel({
       style={{
         left: position.x,
         top: position.y,
-        width: panelState.width,
-        height: panelState.height,
+        width: displayWidth,
+        height: displayHeight,
         zIndex: 100,
       }}
       onDragOver={handleDragOver}

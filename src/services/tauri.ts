@@ -49,3 +49,19 @@ export async function getPreferences(): Promise<Preferences> {
 export async function savePreferences(preferences: Preferences): Promise<void> {
   return invoke('save_preferences', { preferences });
 }
+
+export async function showInFolder(path: string): Promise<void> {
+  return invoke('show_in_folder', { path });
+}
+
+export async function checkMediaExists(filePath: string): Promise<boolean> {
+  return invoke('check_media_exists', { filePath });
+}
+
+export async function relinkMedia(
+  projectId: string,
+  mediaId: string,
+  newFilePath: string
+): Promise<Project> {
+  return invoke('relink_media', { projectId, mediaId, newFilePath });
+}

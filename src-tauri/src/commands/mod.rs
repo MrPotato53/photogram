@@ -4,7 +4,7 @@ use exif::{In, Reader as ExifReader, Tag};
 use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::PathBuf;
-use tauri::{command, AppHandle, Manager};
+use tauri::{command, AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 fn get_projects_dir(app: &AppHandle) -> PathBuf {
@@ -14,12 +14,48 @@ fn get_projects_dir(app: &AppHandle) -> PathBuf {
         .join("projects")
 }
 
-fn get_media_dir(app: &AppHandle, project_id: &str) -> PathBuf {
+fn get_thumbnails_dir(app: &AppHandle, project_id: &str) -> PathBuf {
     app.path()
         .app_data_dir()
         .expect("Failed to get app data dir")
-        .join("media")
+        .join("thumbnails")
         .join(project_id)
+}
+
+// Generate a small thumbnail for the media pool (128x128, JPEG quality 80)
+fn generate_thumbnail(source_path: &PathBuf, thumb_path: &PathBuf) -> Result<(), String> {
+    use image::imageops::FilterType;
+
+    // Load image
+    let img = image::open(source_path)
+        .map_err(|e| format!("Failed to open image: {}", e))?;
+
+    // Get EXIF orientation and apply it
+    let orientation = get_exif_orientation(source_path).unwrap_or(1);
+    let img = apply_exif_orientation(img, orientation);
+
+    // Resize to thumbnail (128x128 max, maintaining aspect ratio)
+    let thumb = img.resize(128, 128, FilterType::Triangle);
+
+    // Save as JPEG with quality 80
+    thumb.save(thumb_path)
+        .map_err(|e| format!("Failed to save thumbnail: {}", e))?;
+
+    Ok(())
+}
+
+// Apply EXIF orientation to image
+fn apply_exif_orientation(img: image::DynamicImage, orientation: u32) -> image::DynamicImage {
+    match orientation {
+        2 => img.fliph(),
+        3 => img.rotate180(),
+        4 => img.flipv(),
+        5 => img.rotate90().fliph(),
+        6 => img.rotate90(),
+        7 => img.rotate270().fliph(),
+        8 => img.rotate270(),
+        _ => img, // 1 or unknown = no transformation
+    }
 }
 
 // Check if EXIF orientation requires swapping width/height
@@ -118,10 +154,6 @@ pub fn create_project(
     let projects_dir = get_projects_dir(&app);
     let project_path = projects_dir.join(format!("{}.json", project.id));
 
-    // Create media directory for this project
-    let media_dir = get_media_dir(&app, &project.id);
-    fs::create_dir_all(&media_dir).map_err(|e| format!("Failed to create media dir: {}", e))?;
-
     let json = serde_json::to_string_pretty(&project)
         .map_err(|e| format!("Failed to serialize project: {}", e))?;
     fs::write(&project_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
@@ -154,11 +186,11 @@ pub fn delete_project(app: AppHandle, id: String) -> Result<(), String> {
         fs::remove_file(&project_path).map_err(|e| format!("Failed to delete project: {}", e))?;
     }
 
-    // Delete media directory
-    let media_dir = get_media_dir(&app, &id);
-    if media_dir.exists() {
-        fs::remove_dir_all(&media_dir)
-            .map_err(|e| format!("Failed to delete media directory: {}", e))?;
+    // Delete thumbnails directory (original media files are not touched)
+    let thumbnails_dir = get_thumbnails_dir(&app, &id);
+    if thumbnails_dir.exists() {
+        fs::remove_dir_all(&thumbnails_dir)
+            .map_err(|e| format!("Failed to delete thumbnails directory: {}", e))?;
     }
 
     Ok(())
@@ -207,14 +239,24 @@ fn collect_image_files(paths: Vec<String>) -> Vec<PathBuf> {
     image_files
 }
 
+// Data for background thumbnail generation
+struct ThumbnailJob {
+    media_id: String,
+    source_path: PathBuf,
+    thumb_path: PathBuf,
+}
+
 #[command]
 pub fn import_media_files(
     app: AppHandle,
     project_id: String,
     file_paths: Vec<String>,
 ) -> Result<Vec<MediaItem>, String> {
-    let media_dir = get_media_dir(&app, &project_id);
-    fs::create_dir_all(&media_dir).map_err(|e| format!("Failed to create media dir: {}", e))?;
+    use rayon::prelude::*;
+
+    // Create thumbnails directory (only thumbnails are stored in app data)
+    let thumbnails_dir = get_thumbnails_dir(&app, &project_id);
+    fs::create_dir_all(&thumbnails_dir).map_err(|e| format!("Failed to create thumbnails dir: {}", e))?;
 
     // Load existing project to check for duplicates
     let projects_dir = get_projects_dir(&app);
@@ -233,6 +275,7 @@ pub fn import_media_files(
     let image_files = collect_image_files(file_paths);
 
     let mut media_items: Vec<MediaItem> = vec![];
+    let mut thumbnail_jobs: Vec<ThumbnailJob> = vec![];
 
     for source_path in image_files {
         let file_name = source_path
@@ -246,34 +289,32 @@ pub fn import_media_files(
         }
 
         let media_id = Uuid::new_v4().to_string();
-        let extension = source_path
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_else(|| "jpg".to_string());
-
-        let dest_filename = format!("{}.{}", media_id, extension);
-        let dest_path = media_dir.join(&dest_filename);
-
-        // Copy file to media directory
-        if let Err(e) = fs::copy(&source_path, &dest_path) {
-            eprintln!("Failed to copy file {}: {}", file_name, e);
-            continue;
-        }
 
         // Get image dimensions without loading full image into memory
-        let (width, height) = get_image_dimensions(&dest_path).unwrap_or((1080, 1080));
+        let (width, height) = get_image_dimensions(&source_path).unwrap_or((1080, 1080));
 
+        // Queue thumbnail generation for background processing
+        let thumb_filename = format!("{}.jpg", media_id);
+        let thumb_path = thumbnails_dir.join(&thumb_filename);
+        thumbnail_jobs.push(ThumbnailJob {
+            media_id: media_id.clone(),
+            source_path: source_path.clone(),
+            thumb_path,
+        });
+
+        // Store reference to original file path (no copying)
         media_items.push(MediaItem {
             id: media_id,
             file_name,
-            file_path: dest_path.to_string_lossy().to_string(),
-            thumbnail_path: None, // No thumbnails - use full image with lazy loading
+            file_path: source_path.to_string_lossy().to_string(),
+            thumbnail_path: None,
             width,
             height,
         });
     }
 
-    // Also update the project's media pool
+    // Update the project's media pool immediately (without thumbnails)
+    let project_path_clone = project_path.clone();
     if !media_items.is_empty() {
         if let Ok(contents) = fs::read_to_string(&project_path) {
             if let Ok(mut project) = serde_json::from_str::<Project>(&contents) {
@@ -285,6 +326,45 @@ pub fn import_media_files(
                 }
             }
         }
+    }
+
+    // Spawn background thread to generate thumbnails in parallel
+    if !thumbnail_jobs.is_empty() {
+        let app_handle = app.clone();
+        std::thread::spawn(move || {
+            // Generate thumbnails in parallel using rayon
+            let results: Vec<(String, Option<String>)> = thumbnail_jobs
+                .par_iter()
+                .map(|job| {
+                    let thumb_path_str = match generate_thumbnail(&job.source_path, &job.thumb_path) {
+                        Ok(_) => Some(job.thumb_path.to_string_lossy().to_string()),
+                        Err(e) => {
+                            eprintln!("Failed to generate thumbnail for {}: {}", job.media_id, e);
+                            None
+                        }
+                    };
+                    (job.media_id.clone(), thumb_path_str)
+                })
+                .collect();
+
+            // Update project with thumbnail paths
+            if let Ok(contents) = fs::read_to_string(&project_path_clone) {
+                if let Ok(mut project) = serde_json::from_str::<Project>(&contents) {
+                    for (media_id, thumb_path) in results {
+                        if let Some(media) = project.media_pool.iter_mut().find(|m| m.id == media_id) {
+                            media.thumbnail_path = thumb_path;
+                        }
+                    }
+
+                    if let Ok(json) = serde_json::to_string_pretty(&project) {
+                        let _ = fs::write(&project_path_clone, json);
+                    }
+
+                    // Emit event to notify frontend that thumbnails are ready
+                    let _ = app_handle.emit("thumbnails-ready", ());
+                }
+            }
+        });
     }
 
     Ok(media_items)
@@ -305,12 +385,14 @@ pub fn delete_media(
     let mut project: Project =
         serde_json::from_str(&contents).map_err(|e| format!("Failed to parse project: {}", e))?;
 
-    // Find and remove the media item
+    // Find and remove the media item (only delete thumbnail, not original file)
     if let Some(media_item) = project.media_pool.iter().find(|m| m.id == media_id) {
-        // Delete the actual file
-        let file_path = PathBuf::from(&media_item.file_path);
-        if file_path.exists() {
-            let _ = fs::remove_file(&file_path);
+        // Delete the thumbnail if it exists (original file is kept)
+        if let Some(ref thumb_path) = media_item.thumbnail_path {
+            let thumb_file = PathBuf::from(thumb_path);
+            if thumb_file.exists() {
+                let _ = fs::remove_file(&thumb_file);
+            }
         }
     }
 
@@ -348,4 +430,132 @@ pub fn save_preferences(app: AppHandle, preferences: Preferences) -> Result<(), 
     fs::write(&prefs_path, json).map_err(|e| format!("Failed to save preferences: {}", e))?;
 
     Ok(())
+}
+
+#[command]
+pub fn show_in_folder(path: String) -> Result<(), String> {
+    let path = PathBuf::from(&path);
+    if !path.exists() {
+        return Err("File does not exist".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", &path.to_string_lossy()])
+            .spawn()
+            .map_err(|e| format!("Failed to open Finder: {}", e))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .args(["/select,", &path.to_string_lossy()])
+            .spawn()
+            .map_err(|e| format!("Failed to open Explorer: {}", e))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try different file managers
+        let parent = path.parent().unwrap_or(&path);
+        std::process::Command::new("xdg-open")
+            .arg(parent)
+            .spawn()
+            .map_err(|e| format!("Failed to open file manager: {}", e))?;
+    }
+
+    Ok(())
+}
+
+#[command]
+pub fn check_media_exists(file_path: String) -> bool {
+    PathBuf::from(&file_path).exists()
+}
+
+#[command]
+pub fn relink_media(
+    app: AppHandle,
+    project_id: String,
+    media_id: String,
+    new_file_path: String,
+) -> Result<Project, String> {
+    let new_path = PathBuf::from(&new_file_path);
+    if !new_path.exists() {
+        return Err("New file does not exist".to_string());
+    }
+
+    if !is_image_file(&new_path) {
+        return Err("File is not a supported image format".to_string());
+    }
+
+    let projects_dir = get_projects_dir(&app);
+    let project_path = projects_dir.join(format!("{}.json", project_id));
+    let thumbnails_dir = get_thumbnails_dir(&app, &project_id);
+
+    let contents = fs::read_to_string(&project_path)
+        .map_err(|e| format!("Failed to read project: {}", e))?;
+
+    let mut project: Project =
+        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse project: {}", e))?;
+
+    // Find the media item to relink
+    let media_item = project
+        .media_pool
+        .iter_mut()
+        .find(|m| m.id == media_id)
+        .ok_or("Media item not found")?;
+
+    // Get new dimensions from the new file location
+    let (width, height) = get_image_dimensions(&new_path).unwrap_or((1080, 1080));
+
+    // Update media item to point to new location (no file copying)
+    media_item.file_path = new_file_path;
+    media_item.width = width;
+    media_item.height = height;
+
+    // Delete old thumbnail if exists
+    if let Some(ref thumb_path) = media_item.thumbnail_path {
+        let _ = fs::remove_file(thumb_path);
+    }
+
+    // Clear thumbnail path - will be regenerated in background
+    media_item.thumbnail_path = None;
+
+    project.updated_at = Utc::now();
+
+    let json = serde_json::to_string_pretty(&project)
+        .map_err(|e| format!("Failed to serialize project: {}", e))?;
+    fs::write(&project_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
+
+    // Generate new thumbnail in background
+    let thumb_filename = format!("{}.jpg", media_id);
+    let thumb_path = thumbnails_dir.join(&thumb_filename);
+    let project_path_clone = project_path.clone();
+    let media_id_clone = media_id.clone();
+    let app_handle = app.clone();
+
+    std::thread::spawn(move || {
+        fs::create_dir_all(&thumbnails_dir).ok();
+
+        if let Ok(_) = generate_thumbnail(&new_path, &thumb_path) {
+            // Update project with thumbnail path
+            if let Ok(contents) = fs::read_to_string(&project_path_clone) {
+                if let Ok(mut project) = serde_json::from_str::<Project>(&contents) {
+                    if let Some(media) = project.media_pool.iter_mut().find(|m| m.id == media_id_clone) {
+                        media.thumbnail_path = Some(thumb_path.to_string_lossy().to_string());
+                    }
+
+                    if let Ok(json) = serde_json::to_string_pretty(&project) {
+                        let _ = fs::write(&project_path_clone, json);
+                    }
+
+                    // Notify frontend
+                    let _ = app_handle.emit("thumbnails-ready", ());
+                }
+            }
+        }
+    });
+
+    Ok(project)
 }
