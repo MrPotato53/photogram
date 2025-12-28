@@ -376,151 +376,213 @@ export function CropOverlay({
   };
 
   // Handle corner handle drag (adjusts both incident edges)
-  // Corners ALWAYS maintain aspect ratio (like image resize)
-  // Shift = scale from center (like image resize)
+  // Free mode (no preset, no shift): corners freely change aspect ratio
+  // Locked mode (preset selected OR shift held): corners maintain aspect ratio
   const handleCornerDrag = (corner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right', e: Konva.KonvaEventObject<DragEvent>) => {
     const node = e.target;
     const nodeX = node.x() + handleSize / 2; // Center of handle
     const nodeY = node.y() + handleSize / 2;
 
-    // Always maintain aspect ratio (use locked preset or current crop ratio)
-    const currentRatio = aspectRatio ?? (cropRect.width / cropRect.height);
+    // Determine if aspect ratio is locked
+    // Locked when: preset is selected OR shift is held
+    const isLocked = aspectRatio !== null || isShiftPressed.current;
+    const lockedRatio = aspectRatio ?? (cropRect.width / cropRect.height);
 
-    // For shift (scale from center), we need the center point
-    const centerX = cropRect.x + cropRect.width / 2;
-    const centerY = cropRect.y + cropRect.height / 2;
+    const rightEdge = cropRect.x + cropRect.width;
+    const bottomEdge = cropRect.y + cropRect.height;
 
     let newRect = { ...cropRect };
 
-    if (isShiftPressed.current) {
-      // Scale from center: calculate distance from center to cursor
-      // and use that to determine new size
-      const dx = Math.abs(nodeX - centerX);
-      const dy = Math.abs(nodeY - centerY);
-
-      // Determine new half-dimensions based on cursor distance
-      let halfWidth: number;
-      let halfHeight: number;
-
-      // Use the dimension that gives the larger size, then constrain by aspect ratio
-      if (dx / currentRatio > dy) {
-        halfWidth = dx;
-        halfHeight = halfWidth / currentRatio;
-      } else {
-        halfHeight = dy;
-        halfWidth = halfHeight * currentRatio;
-      }
-
-      // Ensure minimum size
-      halfWidth = Math.max(10, halfWidth);
-      halfHeight = Math.max(10, halfHeight);
-
-      // Calculate new rect centered on the original center
-      let newX = centerX - halfWidth;
-      let newY = centerY - halfHeight;
-      let newWidth = halfWidth * 2;
-      let newHeight = halfHeight * 2;
-
-      // Clamp to full bounds
-      if (newX < 0) {
-        newX = 0;
-        newWidth = Math.min(centerX * 2, fullBounds.width);
-        newHeight = newWidth / currentRatio;
-        newY = centerY - newHeight / 2;
-      }
-      if (newY < 0) {
-        newY = 0;
-        newHeight = Math.min(centerY * 2, fullBounds.height);
-        newWidth = newHeight * currentRatio;
-        newX = centerX - newWidth / 2;
-      }
-      if (newX + newWidth > fullBounds.width) {
-        newWidth = (fullBounds.width - centerX) * 2;
-        newHeight = newWidth / currentRatio;
-        newX = centerX - newWidth / 2;
-        newY = centerY - newHeight / 2;
-      }
-      if (newY + newHeight > fullBounds.height) {
-        newHeight = (fullBounds.height - centerY) * 2;
-        newWidth = newHeight * currentRatio;
-        newX = centerX - newWidth / 2;
-        newY = centerY - newHeight / 2;
-      }
-
-      newRect = { x: newX, y: newY, width: newWidth, height: newHeight };
-    } else {
-      // Normal corner drag: maintain aspect ratio from the opposite corner
-      const rightEdge = cropRect.x + cropRect.width;
-      const bottomEdge = cropRect.y + cropRect.height;
-
+    if (!isLocked) {
+      // FREE MODE: corners freely change aspect ratio
+      // Each corner only affects its two incident edges
       switch (corner) {
         case 'top-left': {
-          let newX = Math.max(0, Math.min(nodeX, rightEdge - 20));
-          let newY = Math.max(0, Math.min(nodeY, bottomEdge - 20));
-          let newWidth = rightEdge - newX;
-          let newHeight = bottomEdge - newY;
-
-          // Maintain aspect ratio
-          const widthFromHeight = newHeight * currentRatio;
-          const heightFromWidth = newWidth / currentRatio;
-          if (widthFromHeight <= newWidth) {
-            newWidth = widthFromHeight;
-            newX = rightEdge - newWidth;
-          } else {
-            newHeight = heightFromWidth;
-            newY = bottomEdge - newHeight;
-          }
-
-          newRect = { x: newX, y: newY, width: newWidth, height: newHeight };
+          const newX = Math.max(0, Math.min(nodeX, rightEdge - 20));
+          const newY = Math.max(0, Math.min(nodeY, bottomEdge - 20));
+          newRect = {
+            x: newX,
+            y: newY,
+            width: rightEdge - newX,
+            height: bottomEdge - newY,
+          };
           break;
         }
         case 'top-right': {
-          let newWidth = Math.max(20, Math.min(nodeX - cropRect.x, fullBounds.width - cropRect.x));
-          let newY = Math.max(0, Math.min(nodeY, bottomEdge - 20));
-          let newHeight = bottomEdge - newY;
-
-          const widthFromHeight = newHeight * currentRatio;
-          const heightFromWidth = newWidth / currentRatio;
-          if (widthFromHeight <= newWidth) {
-            newWidth = widthFromHeight;
-          } else {
-            newHeight = heightFromWidth;
-            newY = bottomEdge - newHeight;
-          }
-
-          newRect = { x: cropRect.x, y: newY, width: newWidth, height: newHeight };
+          const newY = Math.max(0, Math.min(nodeY, bottomEdge - 20));
+          const newWidth = Math.max(20, Math.min(nodeX - cropRect.x, fullBounds.width - cropRect.x));
+          newRect = {
+            x: cropRect.x,
+            y: newY,
+            width: newWidth,
+            height: bottomEdge - newY,
+          };
           break;
         }
         case 'bottom-left': {
-          let newX = Math.max(0, Math.min(nodeX, rightEdge - 20));
-          let newWidth = rightEdge - newX;
-          let newHeight = Math.max(20, Math.min(nodeY - cropRect.y, fullBounds.height - cropRect.y));
-
-          const widthFromHeight = newHeight * currentRatio;
-          const heightFromWidth = newWidth / currentRatio;
-          if (widthFromHeight <= newWidth) {
-            newWidth = widthFromHeight;
-            newX = rightEdge - newWidth;
-          } else {
-            newHeight = heightFromWidth;
-          }
-
-          newRect = { x: newX, y: cropRect.y, width: newWidth, height: newHeight };
+          const newX = Math.max(0, Math.min(nodeX, rightEdge - 20));
+          const newHeight = Math.max(20, Math.min(nodeY - cropRect.y, fullBounds.height - cropRect.y));
+          newRect = {
+            x: newX,
+            y: cropRect.y,
+            width: rightEdge - newX,
+            height: newHeight,
+          };
           break;
         }
         case 'bottom-right': {
-          let newWidth = Math.max(20, Math.min(nodeX - cropRect.x, fullBounds.width - cropRect.x));
-          let newHeight = Math.max(20, Math.min(nodeY - cropRect.y, fullBounds.height - cropRect.y));
+          const newWidth = Math.max(20, Math.min(nodeX - cropRect.x, fullBounds.width - cropRect.x));
+          const newHeight = Math.max(20, Math.min(nodeY - cropRect.y, fullBounds.height - cropRect.y));
+          newRect = {
+            x: cropRect.x,
+            y: cropRect.y,
+            width: newWidth,
+            height: newHeight,
+          };
+          break;
+        }
+      }
+    } else {
+      // LOCKED MODE: maintain aspect ratio from the opposite corner
+      // When one edge hits bounds, the other must also stop proportionally
+      switch (corner) {
+        case 'top-left': {
+          // Calculate raw desired position
+          const rawX = Math.max(0, Math.min(nodeX, rightEdge - 20));
+          const rawY = Math.max(0, Math.min(nodeY, bottomEdge - 20));
+          const rawWidth = rightEdge - rawX;
+          const rawHeight = bottomEdge - rawY;
 
-          const widthFromHeight = newHeight * currentRatio;
-          const heightFromWidth = newWidth / currentRatio;
-          if (widthFromHeight <= newWidth) {
-            newWidth = widthFromHeight;
+          // Calculate max dimensions allowed by bounds
+          const maxWidth = rightEdge; // Can't go past x=0
+          const maxHeight = bottomEdge; // Can't go past y=0
+
+          // Determine which dimension is the constraint
+          const widthFromHeight = rawHeight * lockedRatio;
+
+          let finalWidth: number, finalHeight: number;
+          if (widthFromHeight <= rawWidth) {
+            // Height is the constraint
+            finalHeight = Math.min(rawHeight, maxHeight);
+            finalWidth = Math.min(finalHeight * lockedRatio, maxWidth);
+            // Recalculate height if width was clamped
+            if (finalWidth < finalHeight * lockedRatio) {
+              finalHeight = finalWidth / lockedRatio;
+            }
           } else {
-            newHeight = heightFromWidth;
+            // Width is the constraint
+            finalWidth = Math.min(rawWidth, maxWidth);
+            finalHeight = Math.min(finalWidth / lockedRatio, maxHeight);
+            // Recalculate width if height was clamped
+            if (finalHeight < finalWidth / lockedRatio) {
+              finalWidth = finalHeight * lockedRatio;
+            }
           }
 
-          newRect = { x: cropRect.x, y: cropRect.y, width: newWidth, height: newHeight };
+          newRect = {
+            x: rightEdge - finalWidth,
+            y: bottomEdge - finalHeight,
+            width: finalWidth,
+            height: finalHeight,
+          };
+          break;
+        }
+        case 'top-right': {
+          const rawWidth = Math.max(20, nodeX - cropRect.x);
+          const rawY = Math.max(0, Math.min(nodeY, bottomEdge - 20));
+          const rawHeight = bottomEdge - rawY;
+
+          const maxWidth = fullBounds.width - cropRect.x;
+          const maxHeight = bottomEdge;
+
+          const widthFromHeight = rawHeight * lockedRatio;
+
+          let finalWidth: number, finalHeight: number;
+          if (widthFromHeight <= rawWidth) {
+            finalHeight = Math.min(rawHeight, maxHeight);
+            finalWidth = Math.min(finalHeight * lockedRatio, maxWidth);
+            if (finalWidth < finalHeight * lockedRatio) {
+              finalHeight = finalWidth / lockedRatio;
+            }
+          } else {
+            finalWidth = Math.min(rawWidth, maxWidth);
+            finalHeight = Math.min(finalWidth / lockedRatio, maxHeight);
+            if (finalHeight < finalWidth / lockedRatio) {
+              finalWidth = finalHeight * lockedRatio;
+            }
+          }
+
+          newRect = {
+            x: cropRect.x,
+            y: bottomEdge - finalHeight,
+            width: finalWidth,
+            height: finalHeight,
+          };
+          break;
+        }
+        case 'bottom-left': {
+          const rawX = Math.max(0, Math.min(nodeX, rightEdge - 20));
+          const rawWidth = rightEdge - rawX;
+          const rawHeight = Math.max(20, nodeY - cropRect.y);
+
+          const maxWidth = rightEdge;
+          const maxHeight = fullBounds.height - cropRect.y;
+
+          const widthFromHeight = rawHeight * lockedRatio;
+
+          let finalWidth: number, finalHeight: number;
+          if (widthFromHeight <= rawWidth) {
+            finalHeight = Math.min(rawHeight, maxHeight);
+            finalWidth = Math.min(finalHeight * lockedRatio, maxWidth);
+            if (finalWidth < finalHeight * lockedRatio) {
+              finalHeight = finalWidth / lockedRatio;
+            }
+          } else {
+            finalWidth = Math.min(rawWidth, maxWidth);
+            finalHeight = Math.min(finalWidth / lockedRatio, maxHeight);
+            if (finalHeight < finalWidth / lockedRatio) {
+              finalWidth = finalHeight * lockedRatio;
+            }
+          }
+
+          newRect = {
+            x: rightEdge - finalWidth,
+            y: cropRect.y,
+            width: finalWidth,
+            height: finalHeight,
+          };
+          break;
+        }
+        case 'bottom-right': {
+          const rawWidth = Math.max(20, nodeX - cropRect.x);
+          const rawHeight = Math.max(20, nodeY - cropRect.y);
+
+          const maxWidth = fullBounds.width - cropRect.x;
+          const maxHeight = fullBounds.height - cropRect.y;
+
+          const widthFromHeight = rawHeight * lockedRatio;
+
+          let finalWidth: number, finalHeight: number;
+          if (widthFromHeight <= rawWidth) {
+            finalHeight = Math.min(rawHeight, maxHeight);
+            finalWidth = Math.min(finalHeight * lockedRatio, maxWidth);
+            if (finalWidth < finalHeight * lockedRatio) {
+              finalHeight = finalWidth / lockedRatio;
+            }
+          } else {
+            finalWidth = Math.min(rawWidth, maxWidth);
+            finalHeight = Math.min(finalWidth / lockedRatio, maxHeight);
+            if (finalHeight < finalWidth / lockedRatio) {
+              finalWidth = finalHeight * lockedRatio;
+            }
+          }
+
+          newRect = {
+            x: cropRect.x,
+            y: cropRect.y,
+            width: finalWidth,
+            height: finalHeight,
+          };
           break;
         }
       }
@@ -534,30 +596,42 @@ export function CropOverlay({
       // Use transform snap to snap the corner being dragged
       const snapResult = findTransformSnap(canvasRect, corner, snapLines, 10);
 
-      // For corner drags, we need to maintain aspect ratio after snapping
-      // Take the snapped dimensions but recalculate to maintain ratio
-      const currentRatioAfterSnap = aspectRatio ?? (cropRect.width / cropRect.height);
       let finalWidth = snapResult.width;
       let finalHeight = snapResult.height;
-
-      // Check which dimension changed more and adjust the other
-      const widthDiff = Math.abs(snapResult.width - canvasRect.width);
-      const heightDiff = Math.abs(snapResult.height - canvasRect.height);
-
-      if (widthDiff > heightDiff) {
-        finalHeight = finalWidth / currentRatioAfterSnap;
-      } else if (heightDiff > widthDiff) {
-        finalWidth = finalHeight * currentRatioAfterSnap;
-      }
-
-      // Adjust position based on corner
       let finalX = snapResult.x;
       let finalY = snapResult.y;
-      if (corner.includes('left')) {
-        finalX = canvasRect.x + canvasRect.width - finalWidth;
-      }
-      if (corner.includes('top')) {
-        finalY = canvasRect.y + canvasRect.height - finalHeight;
+
+      if (isLocked) {
+        // For locked mode, maintain aspect ratio after snapping
+        // Take the snapped dimensions but recalculate to maintain ratio
+        const currentRatioAfterSnap = aspectRatio ?? (cropRect.width / cropRect.height);
+
+        // Check which dimension changed more and adjust the other
+        const widthDiff = Math.abs(snapResult.width - canvasRect.width);
+        const heightDiff = Math.abs(snapResult.height - canvasRect.height);
+
+        if (widthDiff > heightDiff) {
+          finalHeight = finalWidth / currentRatioAfterSnap;
+        } else if (heightDiff > widthDiff) {
+          finalWidth = finalHeight * currentRatioAfterSnap;
+        }
+
+        // Adjust position based on corner to maintain opposite corner position
+        if (corner.includes('left')) {
+          finalX = canvasRect.x + canvasRect.width - finalWidth;
+        }
+        if (corner.includes('top')) {
+          finalY = canvasRect.y + canvasRect.height - finalHeight;
+        }
+      } else {
+        // Free mode: use snapped dimensions directly without aspect ratio adjustment
+        // Adjust position based on corner to maintain opposite corner position
+        if (corner.includes('left')) {
+          finalX = canvasRect.x + canvasRect.width - finalWidth;
+        }
+        if (corner.includes('top')) {
+          finalY = canvasRect.y + canvasRect.height - finalHeight;
+        }
       }
 
       // Convert back to crop coordinates

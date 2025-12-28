@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useEditorStore } from '../../stores/editorStore';
 import { EditorToolbar } from './EditorToolbar';
+import { EditBar } from './EditBar';
 import { CanvasArea } from './CanvasArea';
 import { FloatingPanel } from './FloatingPanel';
 import { MediaPoolPanel } from './panels/MediaPoolPanel';
@@ -73,6 +74,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   return (
     <div className="h-full flex flex-col bg-theme-bg-tertiary select-none">
       <EditorToolbar projectName={project.name} />
+      <EditBar />
 
       <div className="flex-1 flex flex-col min-h-0">
         {/* Canvas area - takes remaining space */}
@@ -117,12 +119,10 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
           )}
         </div>
 
-        {/* Slides panel - fixed at bottom when open */}
-        {panels.slides.isOpen && (
-          <div className="flex-shrink-0" style={{ height: 120 }}>
-            <SlidesPanel />
-          </div>
-        )}
+        {/* Slides panel - fixed at bottom (shows collapsed strip or full panel) */}
+        <div className="flex-shrink-0" style={panels.slides.isOpen ? { height: 120 } : undefined}>
+          <SlidesPanel />
+        </div>
 
         {/* Bottom info bar - below slides panel */}
         <div className="flex-shrink-0 flex items-center justify-center gap-4 py-1.5 bg-gray-800/50 border-t border-theme-border">
