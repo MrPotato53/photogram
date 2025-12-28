@@ -3,9 +3,9 @@ mod models;
 
 use tauri::Manager;
 use commands::{
-    check_media_exists, create_project, delete_media, delete_project, get_all_projects,
-    get_preferences, get_project, import_media_files, relink_media, rename_project,
-    save_preferences, show_in_folder, update_project,
+    check_media_exists, create_project, delete_element_asset, delete_media, delete_project,
+    embed_element_asset, get_all_projects, get_preferences, get_project, import_media_files,
+    relink_media, rename_project, save_preferences, show_in_folder, update_project,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -28,6 +28,7 @@ pub fn run() {
                 .expect("Failed to get app data dir");
             std::fs::create_dir_all(app_data_dir.join("projects"))?;
             std::fs::create_dir_all(app_data_dir.join("thumbnails"))?;
+            std::fs::create_dir_all(app_data_dir.join("assets"))?;
             std::fs::create_dir_all(app_data_dir.join("templates"))?;
             Ok(())
         })
@@ -45,6 +46,8 @@ pub fn run() {
             show_in_folder,
             check_media_exists,
             relink_media,
+            embed_element_asset,
+            delete_element_asset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

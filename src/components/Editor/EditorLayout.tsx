@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useEditorStore } from '../../stores/editorStore';
 import { EditorToolbar } from './EditorToolbar';
@@ -7,9 +7,8 @@ import { FloatingPanel } from './FloatingPanel';
 import { MediaPoolPanel } from './panels/MediaPoolPanel';
 import { LayersPanel } from './panels/LayersPanel';
 import { TemplatesPanel } from './panels/TemplatesPanel';
+import { SlidesPanel } from './panels/SlidesPanel';
 import { DragPreview } from './DragPreview';
-import type { Element } from '../../types';
-import { v4 as uuidv4 } from 'uuid';
 
 interface EditorLayoutProps {
   projectId: string;
@@ -24,16 +23,8 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
     loadProject,
     refreshProject,
     draggingMediaId,
-    setDraggingMedia,
-    dragPosition,
-    setDragPosition,
-    addElement,
     currentSlideIndex,
-    clearMediaSelection,
   } = useEditorStore();
-
-  const containerRef = useRef<HTMLDivElement>(null);
-  const lastDragPositionRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     loadProject(projectId);
@@ -63,120 +54,6 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
     };
   }, [draggingMediaId]);
 
-  // Handle drop when mouse is released (dragPosition is set on mouseup)
-  useEffect(() => {
-    // Only process if we have a media being dragged and a new position
-    if (!draggingMediaId || !dragPosition || !project || !containerRef.current) {
-      return;
-    }
-
-    // Avoid processing the same position twice
-    if (
-      lastDragPositionRef.current &&
-      lastDragPositionRef.current.x === dragPosition.x &&
-      lastDragPositionRef.current.y === dragPosition.y
-    ) {
-      return;
-    }
-
-    lastDragPositionRef.current = dragPosition;
-
-    const media = project.mediaPool.find((m) => m.id === draggingMediaId);
-    if (!media) {
-      setDraggingMedia(null);
-      setDragPosition(null);
-      return;
-    }
-
-    // Design size is fixed - elements are stored in these coordinates
-    // Must match DESIGN_HEIGHT in CanvasArea.tsx
-    const DESIGN_HEIGHT = 1080;
-    const aspectRatio = project.aspectRatio;
-    const designWidth = DESIGN_HEIGHT * (aspectRatio.width / aspectRatio.height);
-    const designHeight = DESIGN_HEIGHT;
-
-    // Calculate screen canvas dimensions (for coordinate conversion)
-    const containerRect = containerRef.current.getBoundingClientRect();
-    const padding = 60;
-    const availableWidth = containerRect.width - padding * 2;
-    const availableHeight = containerRect.height - padding * 2;
-    const targetRatio = aspectRatio.width / aspectRatio.height;
-
-    let canvasWidth: number;
-    let canvasHeight: number;
-
-    if (targetRatio > availableWidth / availableHeight) {
-      canvasWidth = availableWidth;
-      canvasHeight = canvasWidth / targetRatio;
-    } else {
-      canvasHeight = availableHeight;
-      canvasWidth = canvasHeight * targetRatio;
-    }
-
-    // Scale factor from screen pixels to design coordinates
-    const scale = canvasHeight / designHeight;
-
-    // Calculate canvas position (centered in container)
-    const canvasLeft = containerRect.left + (containerRect.width - canvasWidth) / 2;
-    const canvasTop = containerRect.top + (containerRect.height - canvasHeight) / 2;
-
-    // Get drop position relative to canvas (in screen pixels)
-    const dropScreenX = dragPosition.x - canvasLeft;
-    const dropScreenY = dragPosition.y - canvasTop;
-
-    // Check if drop is within canvas bounds (screen coordinates)
-    if (dropScreenX < 0 || dropScreenX > canvasWidth || dropScreenY < 0 || dropScreenY > canvasHeight) {
-      // Dropped outside canvas - cancel
-      setDraggingMedia(null);
-      setDragPosition(null);
-      lastDragPositionRef.current = null;
-      return;
-    }
-
-    // Convert drop position to design coordinates
-    const dropX = dropScreenX / scale;
-    const dropY = dropScreenY / scale;
-
-    // Calculate element size in design coordinates (consistent regardless of window size)
-    // Size element to fit within 50% of design canvas while maintaining aspect ratio
-    const mediaRatio = media.width / media.height;
-    let elementWidth = Math.min(designWidth * 0.5, media.width);
-    let elementHeight = elementWidth / mediaRatio;
-
-    if (elementHeight > designHeight * 0.5) {
-      elementHeight = designHeight * 0.5;
-      elementWidth = elementHeight * mediaRatio;
-    }
-
-    // Center on drop position, clamp to design canvas bounds
-    const x = Math.max(0, Math.min(dropX - elementWidth / 2, designWidth - elementWidth));
-    const y = Math.max(0, Math.min(dropY - elementHeight / 2, designHeight - elementHeight));
-
-    const currentSlide = project.slides[currentSlideIndex];
-    const newElement: Element = {
-      id: uuidv4(),
-      type: 'photo',
-      mediaId: media.id,
-      x,
-      y,
-      width: elementWidth,
-      height: elementHeight,
-      rotation: 0,
-      scale: 1,
-      locked: false,
-      zIndex: currentSlide?.elements.length || 0,
-    };
-
-    // Clear drag state and media selection
-    setDraggingMedia(null);
-    setDragPosition(null);
-    lastDragPositionRef.current = null;
-    clearMediaSelection();
-
-    // Add the element
-    addElement(newElement);
-  }, [dragPosition, draggingMediaId, project, currentSlideIndex, addElement, setDraggingMedia, setDragPosition, clearMediaSelection]);
-
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center bg-theme-bg">
@@ -197,48 +74,66 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
     <div className="h-full flex flex-col bg-theme-bg-tertiary select-none">
       <EditorToolbar projectName={project.name} />
 
-      <div
-        ref={containerRef}
-        className="flex-1 relative overflow-hidden"
-      >
-        <CanvasArea aspectRatio={project.aspectRatio} />
+      <div className="flex-1 flex flex-col min-h-0">
+        {/* Canvas area - takes remaining space */}
+        <div className="flex-1 relative overflow-hidden min-h-0">
+          <CanvasArea aspectRatio={project.aspectRatio} />
 
-        {/* Floating Panels */}
-        {panels.mediaPool.isOpen && (
-          <FloatingPanel
-            title="Media Pool"
-            panelId="mediaPool"
-            defaultPosition={{ x: 20, y: 20 }}
-            minWidth={200}
-            minHeight={150}
-          >
-            <MediaPoolPanel />
-          </FloatingPanel>
+          {/* Floating Panels */}
+          {panels.mediaPool.isOpen && (
+            <FloatingPanel
+              title="Media Pool"
+              panelId="mediaPool"
+              defaultPosition={{ x: 20, y: 20 }}
+              minWidth={200}
+              minHeight={150}
+            >
+              <MediaPoolPanel />
+            </FloatingPanel>
+          )}
+
+          {panels.layers.isOpen && (
+            <FloatingPanel
+              title="Layers"
+              panelId="layers"
+              defaultPosition={{ x: window.innerWidth - 290, y: 20 }}
+              minWidth={180}
+              minHeight={200}
+            >
+              <LayersPanel />
+            </FloatingPanel>
+          )}
+
+          {panels.templates.isOpen && (
+            <FloatingPanel
+              title="Templates"
+              panelId="templates"
+              defaultPosition={{ x: 20, y: 250 }}
+              minWidth={200}
+              minHeight={200}
+            >
+              <TemplatesPanel />
+            </FloatingPanel>
+          )}
+        </div>
+
+        {/* Slides panel - fixed at bottom when open */}
+        {panels.slides.isOpen && (
+          <div className="flex-shrink-0" style={{ height: 120 }}>
+            <SlidesPanel />
+          </div>
         )}
 
-        {panels.layers.isOpen && (
-          <FloatingPanel
-            title="Layers"
-            panelId="layers"
-            defaultPosition={{ x: window.innerWidth - 290, y: 20 }}
-            minWidth={180}
-            minHeight={200}
-          >
-            <LayersPanel />
-          </FloatingPanel>
-        )}
-
-        {panels.templates.isOpen && (
-          <FloatingPanel
-            title="Templates"
-            panelId="templates"
-            defaultPosition={{ x: 20, y: 250 }}
-            minWidth={200}
-            minHeight={200}
-          >
-            <TemplatesPanel />
-          </FloatingPanel>
-        )}
+        {/* Bottom info bar - below slides panel */}
+        <div className="flex-shrink-0 flex items-center justify-center gap-4 py-1.5 bg-gray-800/50 border-t border-theme-border">
+          <span className="text-white text-xs">
+            {project.aspectRatio.name}
+          </span>
+          <span className="text-gray-500">•</span>
+          <span className="text-white text-xs">
+            Slide {currentSlideIndex + 1} of {project.slides.length}
+          </span>
+        </div>
       </div>
 
       {/* Drag preview that follows cursor */}

@@ -2,43 +2,42 @@ import { useRef, useEffect, useState, useCallback } from 'react';
 import { Stage, Layer, Image as KonvaImage, Transformer, Line } from 'react-konva';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type Konva from 'konva';
-import type { AspectRatio } from '../../types';
+import type { AspectRatio, Element } from '../../types';
 import { useEditorStore } from '../../stores/editorStore';
 import { calculateSnapLines, findSnap } from '../../utils/snapping';
-import { ContextMenu, ContextMenuItem } from '../common/ContextMenu';
 import { CropOverlay } from './CropOverlay';
+import { ContextMenu, ContextMenuItem } from '../common/ContextMenu';
+import { v4 as uuidv4 } from 'uuid';
 
 interface CanvasAreaProps {
   aspectRatio: AspectRatio;
 }
 
-interface LoadedImage {
-  id: string;
-  image: HTMLImageElement;
-}
-
 // Fixed design height for consistent element sizing
 const DESIGN_HEIGHT = 1080;
+const MAX_SLIDES = 20;
 
 export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const stageContainerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
   const transformerRef = useRef<Konva.Transformer>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
-  const [loadedImages, setLoadedImages] = useState<LoadedImage[]>([]);
+  const [loadedImages, setLoadedImages] = useState<Map<string, HTMLImageElement>>(new Map());
 
-  // Design size is fixed based on aspect ratio - elements are stored in these coordinates
+  // Design size is fixed based on aspect ratio (per slide)
   const designSize = {
     width: DESIGN_HEIGHT * (aspectRatio.width / aspectRatio.height),
     height: DESIGN_HEIGHT,
   };
 
-  // Scale factor to fit design size into actual canvas size
   const scale = canvasSize.height > 0 ? canvasSize.height / DESIGN_HEIGHT : 1;
 
   const {
     project,
     currentSlideIndex,
+    setCurrentSlide,
     selectedElementId,
     selectElement,
     updateElement,
@@ -46,16 +45,57 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     sendToFront,
     sendToBack,
     draggingMediaId,
-    snapEnabled,
-    activeGuides,
-    setActiveGuides,
+    setDraggingMedia,
+    setDragMousePosition,
     cropModeElementId,
     enterCropMode,
     exitCropMode,
+    addSlide,
+    addElement,
+    clearMediaSelection,
+    snapEnabled,
+    activeGuides,
+    setActiveGuides,
   } = useEditorStore();
+
+  const slides = project?.slides || [];
+  const elements = project?.elements || [];
+  const numSlides = slides.length;
+
+  // Total canvas width in design coordinates
+  const totalDesignWidth = numSlides * designSize.width;
 
   // Track shift key for centered scaling
   const isShiftPressed = useRef(false);
+
+  // Refs for drop handling (to avoid stale closures in always-attached listener)
+  const dropStateRef = useRef({
+    draggingMediaId: null as string | null,
+    project: null as typeof project,
+    numSlides: 0,
+    canvasSize: { width: 0, height: 0 },
+    scale: 1,
+    designSize: { width: 0, height: 0 },
+    totalDesignWidth: 0,
+    elements: [] as Element[],
+  });
+
+  // Keep refs updated
+  useEffect(() => {
+    dropStateRef.current = {
+      draggingMediaId,
+      project,
+      numSlides,
+      canvasSize,
+      scale,
+      designSize,
+      totalDesignWidth,
+      elements,
+    };
+  }, [draggingMediaId, project, numSlides, canvasSize, scale, designSize, totalDesignWidth, elements]);
+
+  // Crop aspect ratio state
+  const [cropAspectRatio, setCropAspectRatio] = useState<number | null>(null);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{
@@ -64,44 +104,22 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     elementId: string | null;
   }>({ isOpen: false, position: { x: 0, y: 0 }, elementId: null });
 
-  // Crop aspect ratio state (null = free, number = w/h ratio)
-  const [cropAspectRatio, setCropAspectRatio] = useState<number | null>(null);
-
-  // Reset crop aspect ratio when exiting crop mode
-  useEffect(() => {
-    if (!cropModeElementId) {
-      setCropAspectRatio(null);
-    }
-  }, [cropModeElementId]);
-
-  const currentSlide = project?.slides[currentSlideIndex];
-  const elements = currentSlide?.elements || [];
-
-  // Calculate canvas size
+  // Calculate canvas size based on container - maximize vertical space
   useEffect(() => {
     const updateCanvasSize = () => {
       if (!containerRef.current) return;
 
       const container = containerRef.current;
-      const containerWidth = container.clientWidth;
       const containerHeight = container.clientHeight;
 
       const targetRatio = aspectRatio.width / aspectRatio.height;
 
+      // Use most of the available height (leaving minimal padding)
       const padding = 60;
-      const availableWidth = containerWidth - padding * 2;
-      const availableHeight = containerHeight - padding * 2;
+      const availableHeight = containerHeight - padding;
 
-      let width: number;
-      let height: number;
-
-      if (targetRatio > availableWidth / availableHeight) {
-        width = availableWidth;
-        height = width / targetRatio;
-      } else {
-        height = availableHeight;
-        width = height * targetRatio;
-      }
+      const height = Math.max(200, availableHeight);
+      const width = height * targetRatio;
 
       setCanvasSize({ width, height });
     };
@@ -116,27 +134,37 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     return () => resizeObserver.disconnect();
   }, [aspectRatio]);
 
-  // Load images for elements
+  // Load images for all elements
   useEffect(() => {
     const loadImages = async () => {
-      const newLoadedImages: LoadedImage[] = [];
+      const newLoadedImages = new Map<string, HTMLImageElement>();
 
       for (const element of elements) {
         if (element.type === 'photo' && element.mediaId) {
-          const media = project?.mediaPool.find((m) => m.id === element.mediaId);
-          if (media) {
-            const existingLoaded = loadedImages.find((li) => li.id === element.id);
-            if (existingLoaded) {
-              newLoadedImages.push(existingLoaded);
+          let imagePath: string | null = null;
+
+          if (element.assetPath) {
+            imagePath = element.assetPath;
+          } else {
+            const media = project?.mediaPool.find((m) => m.id === element.mediaId);
+            if (media) {
+              imagePath = media.filePath;
+            }
+          }
+
+          if (imagePath) {
+            const existingImage = loadedImages.get(element.id);
+            if (existingImage) {
+              newLoadedImages.set(element.id, existingImage);
             } else {
               const img = new window.Image();
               img.crossOrigin = 'anonymous';
-              img.src = convertFileSrc(media.filePath);
+              img.src = convertFileSrc(imagePath);
               await new Promise<void>((resolve) => {
                 img.onload = () => resolve();
                 img.onerror = () => resolve();
               });
-              newLoadedImages.push({ id: element.id, image: img });
+              newLoadedImages.set(element.id, img);
             }
           }
         }
@@ -155,7 +183,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     const stage = stageRef.current;
     const transformer = transformerRef.current;
 
-    if (selectedElementId) {
+    if (selectedElementId && !cropModeElementId) {
       const selectedNode = stage.findOne(`#${selectedElementId}`);
       if (selectedNode) {
         transformer.nodes([selectedNode]);
@@ -165,9 +193,9 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       transformer.nodes([]);
       transformer.getLayer()?.batchDraw();
     }
-  }, [selectedElementId, loadedImages]);
+  }, [selectedElementId, cropModeElementId, loadedImages]);
 
-  // Track shift key for centered scaling
+  // Track shift key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Shift') isShiftPressed.current = true;
@@ -186,7 +214,11 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
   // Handle keyboard events
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Exit crop mode with Escape
+      // Don't handle if typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
       if (e.key === 'Escape') {
         if (cropModeElementId) {
           exitCropMode();
@@ -196,7 +228,6 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         return;
       }
 
-      // Enter crop mode with 'C'
       if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey) {
         if (selectedElementId && !cropModeElementId) {
           e.preventDefault();
@@ -241,53 +272,191 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedElementId, elements, removeElement, updateElement, selectElement, cropModeElementId, enterCropMode, exitCropMode]);
 
+  useEffect(() => {
+    if (!cropModeElementId) {
+      setCropAspectRatio(null);
+    }
+  }, [cropModeElementId]);
 
-  // Handle stage click to deselect
+  // Scroll to current slide when it changes (only if not fully visible)
+  useEffect(() => {
+    if (scrollContainerRef.current && canvasSize.width > 0) {
+      const container = scrollContainerRef.current;
+      const padding = 24; // Left/right padding on stage container
+
+      // Calculate the slide's position in screen coordinates
+      const slideLeft = padding + currentSlideIndex * canvasSize.width;
+      const slideRight = slideLeft + canvasSize.width;
+
+      // Get the visible area
+      const visibleLeft = container.scrollLeft;
+      const visibleRight = container.scrollLeft + container.clientWidth;
+
+      // Check if slide is off-screen in either direction
+      const isOffLeft = slideLeft < visibleLeft;
+      const isOffRight = slideRight > visibleRight;
+
+      if (isOffLeft) {
+        // Slide is off to the left - align to left edge
+        container.scrollTo({
+          left: slideLeft - padding,
+          behavior: 'smooth',
+        });
+      } else if (isOffRight) {
+        // Slide is off to the right - align to right edge
+        container.scrollTo({
+          left: Math.max(0, slideRight - container.clientWidth + padding),
+          behavior: 'smooth',
+        });
+      }
+    }
+  }, [currentSlideIndex, canvasSize.width]);
+
+  // Handle drop of media onto canvas via window mouseup (always attached, reads from refs)
+  useEffect(() => {
+    const handleMouseUp = (e: MouseEvent) => {
+      const state = dropStateRef.current;
+
+      // Only handle if we're dragging
+      if (!state.draggingMediaId) return;
+
+      if (!state.project || !stageContainerRef.current) {
+        setDraggingMedia(null);
+        setDragMousePosition(null);
+        return;
+      }
+
+      const media = state.project.mediaPool.find((m) => m.id === state.draggingMediaId);
+      if (!media) {
+        setDraggingMedia(null);
+        setDragMousePosition(null);
+        return;
+      }
+
+      // Get the stage container's bounding rect
+      const stageRect = stageContainerRef.current.getBoundingClientRect();
+
+      // Calculate drop position relative to the stage container (accounting for padding)
+      const dropScreenX = e.clientX - stageRect.left - 24; // 24px left padding
+      const dropScreenY = e.clientY - stageRect.top;
+
+      // Check if drop is within canvas bounds
+      const totalScreenWidth = state.numSlides * state.canvasSize.width;
+      if (dropScreenX < 0 || dropScreenX > totalScreenWidth || dropScreenY < 0 || dropScreenY > state.canvasSize.height) {
+        // Dropped outside canvas - just cancel
+        setDraggingMedia(null);
+        setDragMousePosition(null);
+        return;
+      }
+
+      // Convert to design coordinates (global across all slides)
+      const dropX = dropScreenX / state.scale;
+      const dropY = dropScreenY / state.scale;
+
+      // Calculate element size (50% of slide while maintaining aspect ratio)
+      const mediaRatio = media.width / media.height;
+      let elementWidth = Math.min(state.designSize.width * 0.5, media.width);
+      let elementHeight = elementWidth / mediaRatio;
+
+      if (elementHeight > state.designSize.height * 0.5) {
+        elementHeight = state.designSize.height * 0.5;
+        elementWidth = elementHeight * mediaRatio;
+      }
+
+      // Center on drop position, clamp to total canvas bounds
+      const x = Math.max(0, Math.min(dropX - elementWidth / 2, state.totalDesignWidth - elementWidth));
+      const y = Math.max(0, Math.min(dropY - elementHeight / 2, state.designSize.height - elementHeight));
+
+      // Calculate max zIndex
+      const maxZIndex = state.elements.length > 0
+        ? Math.max(...state.elements.map(el => el.zIndex)) + 1
+        : 0;
+
+      const newElement: Element = {
+        id: uuidv4(),
+        type: 'photo',
+        mediaId: media.id,
+        x,
+        y,
+        width: elementWidth,
+        height: elementHeight,
+        rotation: 0,
+        scale: 1,
+        locked: false,
+        zIndex: maxZIndex,
+      };
+
+      // Clear drag state
+      setDraggingMedia(null);
+      setDragMousePosition(null);
+      clearMediaSelection();
+
+      // Add element
+      addElement(newElement);
+
+      // Update current slide based on drop position
+      const slideIndex = Math.floor(dropX / state.designSize.width);
+      if (slideIndex >= 0 && slideIndex < state.numSlides) {
+        setCurrentSlide(slideIndex);
+      }
+    };
+
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => window.removeEventListener('mouseup', handleMouseUp);
+  }, [setDraggingMedia, setDragMousePosition, clearMediaSelection, addElement, setCurrentSlide]);
+
+  // Handle stage click - deselect if clicking empty space
   const handleStageClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
     if (e.target === e.target.getStage()) {
       selectElement(null);
+      // Update current slide based on click position
+      const stage = stageRef.current;
+      if (stage) {
+        const pointerPos = stage.getPointerPosition();
+        if (pointerPos) {
+          const designX = pointerPos.x / scale;
+          const slideIndex = Math.floor(designX / designSize.width);
+          if (slideIndex >= 0 && slideIndex < numSlides) {
+            setCurrentSlide(slideIndex);
+          }
+        }
+      }
     }
   };
 
-  // Handle element click to select
-  const handleElementClick = (elementId: string) => {
+  const handleElementClick = (elementId: string, e: Konva.KonvaEventObject<MouseEvent>) => {
+    e.cancelBubble = true;
     selectElement(elementId);
+
+    // Update current slide based on element position
+    const element = elements.find((el) => el.id === elementId);
+    if (element) {
+      const elementCenterX = element.x + element.width / 2;
+      const slideIndex = Math.floor(elementCenterX / designSize.width);
+      if (slideIndex >= 0 && slideIndex < numSlides) {
+        setCurrentSlide(slideIndex);
+      }
+    }
   };
 
-  // Clamp element position to keep minimum visibility within allowed bounds
-  // Currently bounds = single canvas, but structured for future multi-canvas support
+  // Clamp element to visible bounds (can span across entire canvas)
   const clampToVisibleBounds = useCallback(
     (x: number, y: number, elementWidth: number, elementHeight: number) => {
-      // Minimum pixels of element that must remain visible
       const minVisible = 50;
-
-      // Define allowed bounds - currently just the single canvas
-      // Future: This could be the union of all canvas bounds, or a larger workspace
-      const allowedBounds = {
-        left: 0,
-        top: 0,
-        right: designSize.width,
-        bottom: designSize.height,
-      };
-
-      // Clamp so at least minVisible pixels remain within allowed bounds
-      // Element right edge must be at least minVisible inside from left bound
-      // Element left edge must be at least minVisible inside from right bound
       const clampedX = Math.max(
-        allowedBounds.left - elementWidth + minVisible,
-        Math.min(x, allowedBounds.right - minVisible)
+        -elementWidth + minVisible,
+        Math.min(x, totalDesignWidth - minVisible)
       );
       const clampedY = Math.max(
-        allowedBounds.top - elementHeight + minVisible,
-        Math.min(y, allowedBounds.bottom - minVisible)
+        -elementHeight + minVisible,
+        Math.min(y, designSize.height - minVisible)
       );
-
       return { x: clampedX, y: clampedY };
     },
-    [designSize.width, designSize.height]
+    [totalDesignWidth, designSize.height]
   );
 
-  // Handle element drag move (for snapping and bounds clamping)
+  // Handle drag with snapping
   const handleDragMove = useCallback(
     (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
       const node = e.target;
@@ -297,87 +466,119 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       let newX = node.x();
       let newY = node.y();
 
-      // Apply snapping if enabled
+      // Apply snapping (snap to slide boundaries and other elements)
       if (snapEnabled) {
-        const rect = {
+        const snapLines = calculateSnapLines(elements, elementId, totalDesignWidth, designSize.height);
+
+        // Add per-slide snap lines (boundaries and centers)
+        for (let i = 0; i < numSlides; i++) {
+          const slideLeft = i * designSize.width;
+          const slideCenter = slideLeft + designSize.width / 2;
+          const slideRight = (i + 1) * designSize.width;
+
+          // Slide boundaries
+          snapLines.vertical.push({ position: slideLeft, type: 'edge' });
+          if (i === numSlides - 1) {
+            snapLines.vertical.push({ position: slideRight, type: 'edge' });
+          }
+
+          // Slide center (horizontal middle as vertical guide line)
+          snapLines.vertical.push({ position: slideCenter, type: 'center' });
+        }
+
+        const elementRect = {
           x: newX,
           y: newY,
           width: element.width,
           height: element.height,
         };
-
-        const snapLines = calculateSnapLines(elements, elementId, designSize.width, designSize.height);
-        const snapResult = findSnap(rect, snapLines);
-
+        const snapResult = findSnap(elementRect, snapLines, 10);
         newX = snapResult.x;
         newY = snapResult.y;
-
-        // Update visible guides
         setActiveGuides(snapResult.guides);
       }
 
-      // Clamp to keep element visible
+      // Clamp to bounds
       const clamped = clampToVisibleBounds(newX, newY, element.width, element.height);
       node.x(clamped.x);
       node.y(clamped.y);
     },
-    [snapEnabled, elements, designSize.width, designSize.height, setActiveGuides, clampToVisibleBounds]
+    [elements, snapEnabled, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds]
   );
 
-  // Handle element drag end
-  const handleDragEnd = (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
-    const node = e.target;
-    const element = elements.find((el) => el.id === elementId);
-    if (!element) return;
+  // Handle drag end
+  const handleDragEnd = useCallback(
+    (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
+      const node = e.target;
+      const element = elements.find((el) => el.id === elementId);
+      if (!element) return;
 
-    // Final clamp to ensure element stays visible
-    const clamped = clampToVisibleBounds(node.x(), node.y(), element.width, element.height);
+      const newX = node.x();
+      const newY = node.y();
 
-    updateElement(elementId, {
-      x: clamped.x,
-      y: clamped.y,
-    });
-    // Clear guides on drag end
-    setActiveGuides([]);
-  };
+      setActiveGuides([]);
+      const clamped = clampToVisibleBounds(newX, newY, element.width, element.height);
+      updateElement(elementId, { x: clamped.x, y: clamped.y });
+
+      // Update current slide based on where element was dropped
+      const elementCenterX = clamped.x + element.width / 2;
+      const slideIndex = Math.floor(elementCenterX / designSize.width);
+      if (slideIndex >= 0 && slideIndex < numSlides) {
+        setCurrentSlide(slideIndex);
+      }
+    },
+    [elements, updateElement, setActiveGuides, clampToVisibleBounds, designSize.width, numSlides, setCurrentSlide]
+  );
 
   // Handle transform end
-  const handleTransformEnd = (elementId: string, e: Konva.KonvaEventObject<Event>) => {
-    const node = e.target as Konva.Image;
-    const element = elements.find((el) => el.id === elementId);
-    if (!element) return;
+  const handleTransformEnd = useCallback(
+    (elementId: string, e: Konva.KonvaEventObject<Event>) => {
+      const node = e.target;
+      const scaleX = node.scaleX();
+      const scaleY = node.scaleY();
 
-    const scaleX = node.scaleX();
-    const scaleY = node.scaleY();
+      node.scaleX(1);
+      node.scaleY(1);
 
-    // Preserve flip state (negative scale) when resetting
-    const flipX = element.flipX ?? false;
-    const flipY = element.flipY ?? false;
-    node.scaleX(flipX ? -1 : 1);
-    node.scaleY(flipY ? -1 : 1);
+      const newWidth = Math.max(20, node.width() * scaleX);
+      const newHeight = Math.max(20, node.height() * scaleY);
 
-    // Calculate new dimensions using absolute scale values
-    updateElement(elementId, {
-      x: node.x(),
-      y: node.y(),
-      width: Math.max(20, node.width() * Math.abs(scaleX)),
-      height: Math.max(20, node.height() * Math.abs(scaleY)),
-      rotation: node.rotation(),
-    });
+      updateElement(elementId, {
+        x: node.x(),
+        y: node.y(),
+        width: newWidth,
+        height: newHeight,
+        rotation: node.rotation(),
+      });
+    },
+    [updateElement]
+  );
+
+  const handleTransformStart = () => {
+    const transformer = transformerRef.current;
+    if (transformer) {
+      transformer.centeredScaling(isShiftPressed.current);
+    }
+  };
+
+  const handleTransform = () => {
+    const transformer = transformerRef.current;
+    if (transformer) {
+      transformer.centeredScaling(isShiftPressed.current);
+    }
   };
 
   // Context menu handlers
-  const handleContextMenu = (elementId: string, e: Konva.KonvaEventObject<PointerEvent>) => {
-    e.evt.preventDefault();
-    const stage = stageRef.current;
-    if (!stage) return;
-
-    setContextMenu({
-      isOpen: true,
-      position: { x: e.evt.clientX, y: e.evt.clientY },
-      elementId,
-    });
-  };
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    if (selectedElementId) {
+      setContextMenu({
+        isOpen: true,
+        position: { x: e.clientX, y: e.clientY },
+        elementId: selectedElementId,
+      });
+    }
+  }, [selectedElementId]);
 
   const handleFlipHorizontal = () => {
     if (!contextMenu.elementId) return;
@@ -399,7 +600,9 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     if (!contextMenu.elementId) return;
     const element = elements.find((el) => el.id === contextMenu.elementId);
     if (!element) return;
-    const centerX = (designSize.width - element.width) / 2;
+    // Center on current slide
+    const slideOffsetX = currentSlideIndex * designSize.width;
+    const centerX = slideOffsetX + (designSize.width - element.width) / 2;
     const centerY = (designSize.height - element.height) / 2;
     updateElement(contextMenu.elementId, { x: centerX, y: centerY });
     setContextMenu({ ...contextMenu, isOpen: false });
@@ -434,25 +637,21 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     const element = elements.find((el) => el.id === contextMenu.elementId);
     if (!element) return;
 
-    // Calculate full bounds to determine new element size
     const existingCropX = element.cropX ?? 0;
     const existingCropY = element.cropY ?? 0;
     const existingCropW = element.cropWidth ?? 1;
     const existingCropH = element.cropHeight ?? 1;
 
-    // If already fully uncropped, nothing to do
     if (existingCropX === 0 && existingCropY === 0 && existingCropW === 1 && existingCropH === 1) {
       setContextMenu({ ...contextMenu, isOpen: false });
       return;
     }
 
-    // Calculate full bounds dimensions
     const fullWidth = element.width / existingCropW;
     const fullHeight = element.height / existingCropH;
     const fullX = element.x - existingCropX * fullWidth;
     const fullY = element.y - existingCropY * fullHeight;
 
-    // Reset crop and update element dimensions to full size
     updateElement(contextMenu.elementId, {
       cropX: 0,
       cropY: 0,
@@ -471,19 +670,14 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     const element = elements.find((el) => el.id === contextMenu.elementId);
     if (!element) return;
 
-    // Get the loaded image to find original dimensions
-    const loadedImage = loadedImages.find((li) => li.id === element.id);
+    const loadedImage = loadedImages.get(element.id);
     if (!loadedImage) return;
 
-    const sourceImage = loadedImage.image;
-    const originalRatio = sourceImage.naturalWidth / sourceImage.naturalHeight;
-
-    // Keep the same area, adjust dimensions to match original aspect ratio
+    const originalRatio = loadedImage.naturalWidth / loadedImage.naturalHeight;
     const currentArea = element.width * element.height;
     const newHeight = Math.sqrt(currentArea / originalRatio);
     const newWidth = newHeight * originalRatio;
 
-    // Center the new dimensions around the old center
     const centerX = element.x + element.width / 2;
     const centerY = element.y + element.height / 2;
     const newX = centerX - newWidth / 2;
@@ -498,23 +692,13 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     setContextMenu({ ...contextMenu, isOpen: false });
   };
 
-  // Handle transform start (for centered scaling with Shift)
-  const handleTransformStart = () => {
-    const transformer = transformerRef.current;
-    if (transformer) {
-      transformer.centeredScaling(isShiftPressed.current);
+  const handleAddSlide = () => {
+    if (slides.length < MAX_SLIDES) {
+      addSlide();
     }
   };
 
-  // Handle transform (update centered scaling dynamically)
-  const handleTransform = () => {
-    const transformer = transformerRef.current;
-    if (transformer) {
-      transformer.centeredScaling(isShiftPressed.current);
-    }
-  };
-
-  // Crop mode handlers
+  // Crop handlers
   const handleCropConfirm = async (crop: {
     cropX: number;
     cropY: number;
@@ -527,7 +711,6 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       const element = elements.find((el) => el.id === cropModeElementId);
       if (!element) return;
 
-      // Calculate the full bounds position to determine new element position
       const existingCropX = element.cropX ?? 0;
       const existingCropY = element.cropY ?? 0;
       const existingCropW = element.cropWidth ?? 1;
@@ -537,11 +720,9 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       const fullBoundsX = element.x - existingCropX * fullBoundsWidth;
       const fullBoundsY = element.y - existingCropY * fullBoundsHeight;
 
-      // New element position is where the crop selection starts within full bounds
       const newX = fullBoundsX + crop.cropX * fullBoundsWidth;
       const newY = fullBoundsY + crop.cropY * fullBoundsHeight;
 
-      // Update crop values and element dimensions/position
       await updateElement(cropModeElementId, {
         cropX: crop.cropX,
         cropY: crop.cropY,
@@ -560,12 +741,10 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     exitCropMode();
   };
 
-  // Get element being cropped and calculate full bounds
   const croppingElement = cropModeElementId
     ? elements.find((el) => el.id === cropModeElementId)
     : null;
 
-  // Full bounds = what the element would be if showing the entire source at current scale
   const croppingFullBounds = croppingElement
     ? {
         width: croppingElement.width / (croppingElement.cropWidth ?? 1),
@@ -573,299 +752,245 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       }
     : null;
 
-  // Show drop zone when media is being dragged from the media pool
   const showDropZone = draggingMediaId !== null;
+  const totalCanvasWidth = numSlides * canvasSize.width;
+
+  // Check if content should be centered (when it doesn't overflow)
+  const containerWidth = containerRef.current?.clientWidth || 0;
+  const contentFits = totalCanvasWidth + 48 < containerWidth;
 
   return (
     <div
       ref={containerRef}
-      className="absolute inset-0 flex items-center justify-center overflow-hidden"
+      className="absolute inset-0 flex flex-col overflow-hidden"
+      onContextMenu={handleContextMenu}
     >
-      {/* Drop overlay - visual feedback only (pointer-events-none), z-index above FloatingPanel */}
-      {showDropZone && (
-        <div
-          className="absolute inset-0 bg-blue-500/10 pointer-events-none"
-          style={{ zIndex: 150 }}
-        >
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-blue-500 text-center bg-white/80 px-8 py-6 rounded-lg shadow-lg">
-              <svg
-                className="w-12 h-12 mx-auto mb-2"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={1.5}
-                  d="M12 4v16m8-8H4"
-                />
-              </svg>
-              <p className="text-sm font-medium">Drop to add to canvas</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Canvas wrapper */}
+      {/* Horizontal scrolling canvas container */}
       <div
-        className={`bg-white shadow-lg rounded-sm transition-all relative ${
-          showDropZone ? 'ring-4 ring-blue-500 ring-opacity-50' : ''
-        }`}
-        style={{
-          width: canvasSize.width,
-          height: canvasSize.height,
-        }}
+        ref={scrollContainerRef}
+        className={`flex-1 overflow-x-auto overflow-y-hidden flex items-center ${contentFits ? 'justify-center' : ''}`}
+        style={{ paddingTop: 30, paddingBottom: 10 }}
       >
-        {canvasSize.width > 0 && canvasSize.height > 0 && (
-          <Stage
-            ref={stageRef}
-            width={canvasSize.width}
-            height={canvasSize.height}
-            onClick={handleStageClick}
-          >
-            <Layer scaleX={scale} scaleY={scale}>
-              {/* Render elements sorted by zIndex */}
-              {[...elements]
-                .sort((a, b) => a.zIndex - b.zIndex)
-                .map((element) => {
-                  if (element.type !== 'photo') return null;
+        <div
+          ref={stageContainerRef}
+          className="relative"
+          style={{
+            width: totalCanvasWidth + 48,
+            height: canvasSize.height,
+            paddingLeft: 24,
+            paddingRight: 24,
+            flexShrink: 0,
+          }}
+        >
+          {/* Slide number indicators */}
+          {slides.map((_, index) => (
+            <div
+              key={index}
+              className={`absolute -top-5 text-xs px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                index === currentSlideIndex
+                  ? 'bg-blue-500 text-white'
+                  : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+              }`}
+              style={{
+                left: 24 + index * canvasSize.width + canvasSize.width / 2,
+                transform: 'translateX(-50%)',
+              }}
+              onClick={() => setCurrentSlide(index)}
+            >
+              {index + 1}
+            </div>
+          ))}
 
-                  const loadedImage = loadedImages.find((li) => li.id === element.id);
-                  if (!loadedImage) return null;
+          {/* Canvas background (white slides) */}
+          <div
+            className={`absolute bg-white shadow-lg transition-all ${showDropZone ? 'ring-2 ring-blue-400 ring-opacity-50' : ''}`}
+            style={{
+              left: 24,
+              top: 0,
+              width: totalCanvasWidth,
+              height: canvasSize.height,
+            }}
+          />
 
-                  const isSelected = selectedElementId === element.id;
-                  const isBeingCropped = cropModeElementId === element.id;
+          {/* Konva Stage */}
+          {canvasSize.width > 0 && canvasSize.height > 0 && (
+            <Stage
+              ref={stageRef}
+              width={totalCanvasWidth}
+              height={canvasSize.height}
+              style={{ position: 'absolute', left: 24, top: 0 }}
+              onClick={handleStageClick}
+            >
+              <Layer scaleX={scale} scaleY={scale}>
+                {/* Render all elements sorted by zIndex */}
+                {[...elements]
+                  .sort((a, b) => a.zIndex - b.zIndex)
+                  .map((element) => {
+                    if (element.type !== 'photo') return null;
 
-                  // Calculate flip scales and offset
-                  const flipScaleX = element.flipX ? -1 : 1;
-                  const flipScaleY = element.flipY ? -1 : 1;
+                    const loadedImage = loadedImages.get(element.id);
+                    if (!loadedImage) return null;
 
-                  // Calculate crop in source image pixels
-                  const sourceImage = loadedImage.image;
-                  const existingCropX = element.cropX ?? 0;
-                  const existingCropY = element.cropY ?? 0;
-                  const existingCropW = element.cropWidth ?? 1;
-                  const existingCropH = element.cropHeight ?? 1;
+                    const isSelected = selectedElementId === element.id;
+                    const isBeingCropped = cropModeElementId === element.id;
 
-                  // Check if any crop is applied (not default values)
-                  const hasCrop = existingCropX > 0 || existingCropY > 0 || existingCropW < 1 || existingCropH < 1;
+                    const flipScaleX = element.flipX ? -1 : 1;
+                    const flipScaleY = element.flipY ? -1 : 1;
 
-                  // When being cropped, show the FULL uncropped image so user can expand selection
-                  if (isBeingCropped) {
-                    // Calculate full bounds
-                    const fullWidth = element.width / existingCropW;
-                    const fullHeight = element.height / existingCropH;
-                    const fullX = element.x - existingCropX * fullWidth;
-                    const fullY = element.y - existingCropY * fullHeight;
+                    const existingCropX = element.cropX ?? 0;
+                    const existingCropY = element.cropY ?? 0;
+                    const existingCropW = element.cropWidth ?? 1;
+                    const existingCropH = element.cropHeight ?? 1;
+                    const hasCrop = existingCropX > 0 || existingCropY > 0 || existingCropW < 1 || existingCropH < 1;
 
-                    // Flip offset for full size
-                    const fullOffsetX = element.flipX ? fullWidth : 0;
-                    const fullOffsetY = element.flipY ? fullHeight : 0;
+                    if (isBeingCropped) {
+                      const fullWidth = element.width / existingCropW;
+                      const fullHeight = element.height / existingCropH;
+                      const fullX = element.x - existingCropX * fullWidth;
+                      const fullY = element.y - existingCropY * fullHeight;
+                      const fullOffsetX = element.flipX ? fullWidth : 0;
+                      const fullOffsetY = element.flipY ? fullHeight : 0;
+
+                      return (
+                        <KonvaImage
+                          key={element.id}
+                          id={element.id}
+                          image={loadedImage}
+                          x={fullX}
+                          y={fullY}
+                          width={fullWidth}
+                          height={fullHeight}
+                          rotation={element.rotation}
+                          scaleX={flipScaleX}
+                          scaleY={flipScaleY}
+                          offsetX={fullOffsetX}
+                          offsetY={fullOffsetY}
+                          draggable={false}
+                          listening={false}
+                        />
+                      );
+                    }
+
+                    const offsetX = element.flipX ? element.width : 0;
+                    const offsetY = element.flipY ? element.height : 0;
+                    const cropConfig = hasCrop ? {
+                      x: existingCropX * loadedImage.naturalWidth,
+                      y: existingCropY * loadedImage.naturalHeight,
+                      width: existingCropW * loadedImage.naturalWidth,
+                      height: existingCropH * loadedImage.naturalHeight,
+                    } : undefined;
 
                     return (
                       <KonvaImage
                         key={element.id}
                         id={element.id}
-                        image={loadedImage.image}
-                        x={fullX}
-                        y={fullY}
-                        width={fullWidth}
-                        height={fullHeight}
+                        image={loadedImage}
+                        x={element.x}
+                        y={element.y}
+                        width={element.width}
+                        height={element.height}
                         rotation={element.rotation}
                         scaleX={flipScaleX}
                         scaleY={flipScaleY}
-                        offsetX={fullOffsetX}
-                        offsetY={fullOffsetY}
-                        // No crop - show full image
-                        draggable={false}
-                        listening={false}
+                        offsetX={offsetX}
+                        offsetY={offsetY}
+                        crop={cropConfig}
+                        draggable={!element.locked && !cropModeElementId}
+                        onClick={(e) => handleElementClick(element.id, e)}
+                        onTap={(e) => handleElementClick(element.id, e as unknown as Konva.KonvaEventObject<MouseEvent>)}
+                        onDragMove={(e) => handleDragMove(element.id, e)}
+                        onDragEnd={(e) => handleDragEnd(element.id, e)}
+                        onTransformEnd={(e) => handleTransformEnd(element.id, e)}
+                        stroke={isSelected ? '#3b82f6' : undefined}
+                        strokeWidth={isSelected ? 2 : 0}
+                        strokeScaleEnabled={false}
                       />
                     );
-                  }
+                  })}
 
-                  // Normal rendering with crop
-                  const offsetX = element.flipX ? element.width : 0;
-                  const offsetY = element.flipY ? element.height : 0;
-                  const cropConfig = hasCrop ? {
-                    x: existingCropX * sourceImage.naturalWidth,
-                    y: existingCropY * sourceImage.naturalHeight,
-                    width: existingCropW * sourceImage.naturalWidth,
-                    height: existingCropH * sourceImage.naturalHeight,
-                  } : undefined;
-
+                {/* Slide separator lines (thin dark lines) */}
+                {slides.slice(1).map((_, index) => {
+                  const slideX = (index + 1) * designSize.width;
                   return (
-                    <KonvaImage
-                      key={element.id}
-                      id={element.id}
-                      image={loadedImage.image}
-                      x={element.x}
-                      y={element.y}
-                      width={element.width}
-                      height={element.height}
-                      rotation={element.rotation}
-                      scaleX={flipScaleX}
-                      scaleY={flipScaleY}
-                      offsetX={offsetX}
-                      offsetY={offsetY}
-                      crop={cropConfig}
-                      draggable={!element.locked && !cropModeElementId}
-                      onClick={() => handleElementClick(element.id)}
-                      onTap={() => handleElementClick(element.id)}
-                      onDragMove={(e) => handleDragMove(element.id, e)}
-                      onDragEnd={(e) => handleDragEnd(element.id, e)}
-                      onTransformEnd={(e) => handleTransformEnd(element.id, e)}
-                      onContextMenu={(e) => handleContextMenu(element.id, e)}
-                      stroke={isSelected ? '#3b82f6' : undefined}
-                      strokeWidth={isSelected ? 2 : 0}
-                      strokeScaleEnabled={false}
+                    <Line
+                      key={`separator-${index}`}
+                      points={[slideX, 0, slideX, designSize.height]}
+                      stroke="#374151"
+                      strokeWidth={2 / scale}
                     />
                   );
                 })}
 
-              {/* Alignment guides */}
-              {activeGuides.map((guide, index) => (
-                <Line
-                  key={index}
-                  points={
-                    guide.orientation === 'vertical'
-                      ? [guide.position, 0, guide.position, designSize.height]
-                      : [0, guide.position, designSize.width, guide.position]
-                  }
-                  stroke="#3b82f6"
-                  strokeWidth={1 / scale}
-                  dash={[4 / scale, 4 / scale]}
-                />
-              ))}
-
-              {/* Transformer for selected element (hidden during crop mode) */}
-              {!cropModeElementId && (
-                <Transformer
-                  ref={transformerRef}
-                  boundBoxFunc={(oldBox, newBox) => {
-                    // Limit minimum size
-                    if (newBox.width < 20 || newBox.height < 20) {
-                      return oldBox;
+                {/* Alignment guides */}
+                {activeGuides.map((guide, index) => (
+                  <Line
+                    key={`guide-${index}`}
+                    points={
+                      guide.orientation === 'vertical'
+                        ? [guide.position, 0, guide.position, designSize.height]
+                        : [0, guide.position, totalDesignWidth, guide.position]
                     }
-                    return newBox;
-                  }}
-                  rotateEnabled={true}
-                  rotationSnaps={[0, 90, 180, 270]}
-                  rotationSnapTolerance={5}
-                  onTransformStart={handleTransformStart}
-                  onTransform={handleTransform}
-                  enabledAnchors={[
-                    'top-left',
-                    'top-right',
-                    'bottom-left',
-                    'bottom-right',
-                    'middle-left',
-                    'middle-right',
-                    'top-center',
-                    'bottom-center',
-                  ]}
-                />
-              )}
+                    stroke="#3b82f6"
+                    strokeWidth={1 / scale}
+                    dash={[4 / scale, 4 / scale]}
+                  />
+                ))}
 
-              {/* Crop overlay when in crop mode */}
-              {croppingElement && croppingFullBounds && (
-                <CropOverlay
-                  element={croppingElement}
-                  fullBounds={croppingFullBounds}
-                  aspectRatio={cropAspectRatio}
-                  onCropConfirm={handleCropConfirm}
-                  onCancel={handleCropCancel}
-                />
-              )}
-            </Layer>
-          </Stage>
-        )}
+                {/* Transformer */}
+                {!cropModeElementId && (
+                  <Transformer
+                    ref={transformerRef}
+                    boundBoxFunc={(oldBox, newBox) => {
+                      if (newBox.width < 20 || newBox.height < 20) {
+                        return oldBox;
+                      }
+                      return newBox;
+                    }}
+                    rotateEnabled={true}
+                    rotationSnaps={[0, 90, 180, 270]}
+                    rotationSnapTolerance={5}
+                    onTransformStart={handleTransformStart}
+                    onTransform={handleTransform}
+                    enabledAnchors={[
+                      'top-left',
+                      'top-right',
+                      'bottom-left',
+                      'bottom-right',
+                      'middle-left',
+                      'middle-right',
+                      'top-center',
+                      'bottom-center',
+                    ]}
+                  />
+                )}
 
-        {/* Crop toolbar - appears at top when in crop mode */}
-        {cropModeElementId && croppingFullBounds && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-1 px-2 py-1.5 bg-gray-900/90 backdrop-blur-sm rounded-lg shadow-lg z-10">
-            <span className="text-xs text-gray-400 mr-2">Ratio:</span>
-            {[
-              { label: 'Free', ratio: null },
-              { label: 'Original', ratio: croppingFullBounds.width / croppingFullBounds.height },
-              { label: '1:1', ratio: 1 },
-              { label: '4:5', ratio: 4 / 5 },
-              { label: '16:9', ratio: 16 / 9 },
-            ].map((preset) => {
-              // Check if this preset matches (accounting for swapped ratios)
-              const isSelected = cropAspectRatio === preset.ratio ||
-                (preset.ratio !== null && cropAspectRatio !== null &&
-                 Math.abs(cropAspectRatio - 1 / preset.ratio) < 0.001);
-              // For display, show the actual orientation
-              let displayLabel = preset.label;
-              if (preset.label !== 'Free' && preset.label !== 'Original' && preset.label !== '1:1' && preset.ratio !== null) {
-                if (cropAspectRatio !== null && Math.abs(cropAspectRatio - 1 / preset.ratio) < 0.001) {
-                  // Currently showing swapped version
-                  displayLabel = preset.label.split(':').reverse().join(':');
-                }
-              }
-              return (
-                <button
-                  key={preset.label}
-                  onClick={() => setCropAspectRatio(preset.ratio)}
-                  className={`px-2 py-1 text-xs rounded transition-colors ${
-                    isSelected
-                      ? 'bg-blue-500 text-white'
-                      : 'text-gray-300 hover:bg-gray-700'
-                  }`}
-                >
-                  {isSelected && preset.label !== 'Free' && preset.label !== 'Original' && preset.label !== '1:1'
-                    ? displayLabel
-                    : preset.label}
-                </button>
-              );
-            })}
-            {/* Swap orientation button */}
+                {/* Crop overlay */}
+                {croppingElement && croppingFullBounds && (
+                  <CropOverlay
+                    element={croppingElement}
+                    fullBounds={croppingFullBounds}
+                    aspectRatio={cropAspectRatio}
+                    onCropConfirm={handleCropConfirm}
+                    onCancel={handleCropCancel}
+                  />
+                )}
+              </Layer>
+            </Stage>
+          )}
+
+          {/* Add slide button - small circle */}
+          {slides.length < MAX_SLIDES && (
             <button
-              onClick={() => {
-                if (cropAspectRatio !== null && cropAspectRatio !== 1) {
-                  setCropAspectRatio(1 / cropAspectRatio);
-                }
+              onClick={handleAddSlide}
+              className="absolute flex items-center justify-center w-8 h-8 bg-gray-700 hover:bg-gray-600 text-white rounded-full shadow-md transition-colors"
+              style={{
+                left: 24 + totalCanvasWidth + 8,
+                top: canvasSize.height / 2 - 16,
               }}
-              disabled={cropAspectRatio === null || cropAspectRatio === 1}
-              className={`px-2 py-1 text-xs rounded transition-colors ${
-                cropAspectRatio === null || cropAspectRatio === 1
-                  ? 'text-gray-600 cursor-not-allowed'
-                  : 'text-gray-300 hover:bg-gray-700'
-              }`}
-              title="Swap orientation"
+              title="Add slide"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
-              </svg>
-            </button>
-            <div className="w-px h-4 bg-gray-600 mx-1" />
-            <button
-              onClick={handleCropCancel}
-              className="px-2 py-1 text-xs text-gray-300 hover:bg-gray-700 rounded transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={() => {
-                // Trigger confirm via the CropOverlay's Enter key handler
-                const event = new KeyboardEvent('keydown', { key: 'Enter' });
-                window.dispatchEvent(event);
-              }}
-              className="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
-            >
-              Apply
-            </button>
-          </div>
-        )}
-
-        {/* Empty state */}
-        {elements.length === 0 && !showDropZone && (
-          <div className="absolute inset-0 flex items-center justify-center text-gray-300 pointer-events-none">
-            <div className="text-center">
               <svg
-                className="w-16 h-16 mx-auto mb-2 opacity-50"
+                className="w-5 h-5"
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
@@ -873,22 +998,58 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
                 <path
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  strokeWidth={0.5}
-                  d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                  strokeWidth={2}
+                  d="M12 4v16m8-8H4"
                 />
               </svg>
-              <p className="text-sm opacity-50">
-                Drag media here to add to canvas
-              </p>
-            </div>
-          </div>
-        )}
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Aspect ratio indicator */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-2 py-1 bg-black/50 text-white text-xs rounded">
-        {aspectRatio.name} ({aspectRatio.width}:{aspectRatio.height})
-      </div>
+
+      {/* Crop toolbar */}
+      {cropModeElementId && croppingFullBounds && (
+        <div className="absolute top-12 left-1/2 -translate-x-1/2 flex items-center gap-1 px-2 py-1 bg-gray-900/90 backdrop-blur-sm rounded-lg shadow-lg z-10">
+          <span className="text-xs text-gray-400 mr-1">Ratio:</span>
+          {[
+            { label: 'Free', ratio: null },
+            { label: 'Original', ratio: croppingFullBounds.width / croppingFullBounds.height },
+            { label: '1:1', ratio: 1 },
+            { label: '4:5', ratio: 4 / 5 },
+            { label: '16:9', ratio: 16 / 9 },
+          ].map((preset) => {
+            const isSelected = cropAspectRatio === preset.ratio;
+            return (
+              <button
+                key={preset.label}
+                onClick={() => setCropAspectRatio(preset.ratio)}
+                className={`px-1.5 py-0.5 text-xs rounded transition-colors ${
+                  isSelected ? 'bg-blue-500 text-white' : 'text-gray-300 hover:bg-gray-700'
+                }`}
+              >
+                {preset.label}
+              </button>
+            );
+          })}
+          <div className="w-px h-3 bg-gray-600 mx-1" />
+          <button
+            onClick={handleCropCancel}
+            className="px-1.5 py-0.5 text-xs text-gray-300 hover:bg-gray-700 rounded"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => {
+              const event = new KeyboardEvent('keydown', { key: 'Enter' });
+              window.dispatchEvent(event);
+            }}
+            className="px-1.5 py-0.5 text-xs bg-blue-500 text-white rounded hover:bg-blue-600"
+          >
+            Apply
+          </button>
+        </div>
+      )}
 
       {/* Element context menu */}
       <ContextMenu
