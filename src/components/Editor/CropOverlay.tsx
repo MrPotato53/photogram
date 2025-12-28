@@ -1,7 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
-import { Group, Rect } from 'react-konva';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Group, Rect, Line } from 'react-konva';
 import type Konva from 'konva';
-import type { Element } from '../../types';
+import type { Element, Guide } from '../../types';
+import type { SnapSettings } from '../../stores/editorStore';
+import { calculateSnapLines, findSnap, findTransformSnap } from '../../utils/snapping';
 
 interface CropOverlayProps {
   element: Element;
@@ -18,9 +20,30 @@ interface CropOverlayProps {
     newHeight: number;
   }) => void;
   onCancel: () => void;
+  // Snapping context
+  snapEnabled: boolean;
+  snapSettings: SnapSettings;
+  elements: Element[];
+  totalDesignWidth: number;
+  canvasHeight: number;
+  slideWidth: number;
+  numSlides: number;
 }
 
-export function CropOverlay({ element, fullBounds, aspectRatio, onCropConfirm, onCancel }: CropOverlayProps) {
+export function CropOverlay({
+  element,
+  fullBounds,
+  aspectRatio,
+  onCropConfirm,
+  onCancel,
+  snapEnabled,
+  snapSettings,
+  elements,
+  totalDesignWidth,
+  canvasHeight,
+  slideWidth,
+  numSlides,
+}: CropOverlayProps) {
   // Store the existing crop values
   const existingCropX = element.cropX ?? 0;
   const existingCropY = element.cropY ?? 0;
@@ -32,6 +55,42 @@ export function CropOverlay({ element, fullBounds, aspectRatio, onCropConfirm, o
 
   // Track previous aspect ratio to detect swaps
   const prevAspectRatio = useRef<number | null>(null);
+
+  // Active snap guides during crop operations
+  const [activeGuides, setActiveGuides] = useState<Guide[]>([]);
+
+  // Calculate full bounds position in canvas coordinates
+  const fullBoundsX = element.x - existingCropX * fullBounds.width;
+  const fullBoundsY = element.y - existingCropY * fullBounds.height;
+
+  // Helper to convert crop rect to canvas coordinates
+  const cropToCanvas = useCallback((rect: { x: number; y: number; width: number; height: number }) => ({
+    x: fullBoundsX + rect.x,
+    y: fullBoundsY + rect.y,
+    width: rect.width,
+    height: rect.height,
+  }), [fullBoundsX, fullBoundsY]);
+
+  // Helper to convert canvas coordinates back to crop rect coordinates
+  const canvasToCrop = useCallback((rect: { x: number; y: number; width: number; height: number }) => ({
+    x: rect.x - fullBoundsX,
+    y: rect.y - fullBoundsY,
+    width: rect.width,
+    height: rect.height,
+  }), [fullBoundsX, fullBoundsY]);
+
+  // Get snap lines for the current context (excluding the element being cropped)
+  const getSnapLines = useCallback(() => {
+    return calculateSnapLines(
+      elements,
+      element.id,
+      totalDesignWidth,
+      canvasHeight,
+      snapSettings,
+      slideWidth,
+      numSlides
+    );
+  }, [elements, element.id, totalDesignWidth, canvasHeight, snapSettings, slideWidth, numSlides]);
 
   // The crop rectangle in PIXELS relative to the FULL bounds (not just current element)
   // This allows expanding the crop back to show more of the image
@@ -279,6 +338,27 @@ export function CropOverlay({ element, fullBounds, aspectRatio, onCropConfirm, o
       }
     }
 
+    // Apply snapping if enabled
+    if (snapEnabled) {
+      const canvasRect = cropToCanvas(newRect);
+      const snapLines = getSnapLines();
+
+      // Use transform snap to snap the specific edge being dragged
+      const snapResult = findTransformSnap(canvasRect, edge, snapLines, 10);
+
+      // Convert back to crop coordinates
+      const snappedCrop = canvasToCrop(snapResult);
+      newRect = {
+        x: snappedCrop.x,
+        y: snappedCrop.y,
+        width: snapResult.width,
+        height: snapResult.height,
+      };
+      setActiveGuides(snapResult.guides);
+    } else {
+      setActiveGuides([]);
+    }
+
     const clamped = clampCropRect(newRect);
     setCropRect(clamped);
 
@@ -288,6 +368,11 @@ export function CropOverlay({ element, fullBounds, aspectRatio, onCropConfirm, o
     const isHorizontal = edge === 'left' || edge === 'right';
     node.x(handlePos.x - (isHorizontal ? handleSize / 4 : handleSize));
     node.y(handlePos.y - (isHorizontal ? handleSize : handleSize / 4));
+  };
+
+  // Handle edge drag end - clear guides
+  const handleEdgeDragEnd = () => {
+    setActiveGuides([]);
   };
 
   // Handle corner handle drag (adjusts both incident edges)
@@ -441,6 +526,52 @@ export function CropOverlay({ element, fullBounds, aspectRatio, onCropConfirm, o
       }
     }
 
+    // Apply snapping if enabled
+    if (snapEnabled) {
+      const canvasRect = cropToCanvas(newRect);
+      const snapLines = getSnapLines();
+
+      // Use transform snap to snap the corner being dragged
+      const snapResult = findTransformSnap(canvasRect, corner, snapLines, 10);
+
+      // For corner drags, we need to maintain aspect ratio after snapping
+      // Take the snapped dimensions but recalculate to maintain ratio
+      const currentRatioAfterSnap = aspectRatio ?? (cropRect.width / cropRect.height);
+      let finalWidth = snapResult.width;
+      let finalHeight = snapResult.height;
+
+      // Check which dimension changed more and adjust the other
+      const widthDiff = Math.abs(snapResult.width - canvasRect.width);
+      const heightDiff = Math.abs(snapResult.height - canvasRect.height);
+
+      if (widthDiff > heightDiff) {
+        finalHeight = finalWidth / currentRatioAfterSnap;
+      } else if (heightDiff > widthDiff) {
+        finalWidth = finalHeight * currentRatioAfterSnap;
+      }
+
+      // Adjust position based on corner
+      let finalX = snapResult.x;
+      let finalY = snapResult.y;
+      if (corner.includes('left')) {
+        finalX = canvasRect.x + canvasRect.width - finalWidth;
+      }
+      if (corner.includes('top')) {
+        finalY = canvasRect.y + canvasRect.height - finalHeight;
+      }
+
+      // Convert back to crop coordinates
+      newRect = {
+        x: finalX - fullBoundsX,
+        y: finalY - fullBoundsY,
+        width: finalWidth,
+        height: finalHeight,
+      };
+      setActiveGuides(snapResult.guides);
+    } else {
+      setActiveGuides([]);
+    }
+
     const clamped = clampCropRect(newRect);
     setCropRect(clamped);
 
@@ -450,18 +581,52 @@ export function CropOverlay({ element, fullBounds, aspectRatio, onCropConfirm, o
     node.y(handlePos.y - handleSize / 2);
   };
 
+  // Handle corner drag end - clear guides
+  const handleCornerDragEnd = () => {
+    setActiveGuides([]);
+  };
+
   // Handle crop rect drag (move the whole selection)
   const handleCropRectDrag = (e: Konva.KonvaEventObject<DragEvent>) => {
     const node = e.target;
+    let newX = node.x();
+    let newY = node.y();
+
+    // Apply snapping if enabled
+    if (snapEnabled) {
+      // Convert crop rect position to canvas coordinates
+      const canvasRect = {
+        x: fullBoundsX + newX,
+        y: fullBoundsY + newY,
+        width: cropRect.width,
+        height: cropRect.height,
+      };
+
+      const snapLines = getSnapLines();
+      const snapResult = findSnap(canvasRect, snapLines, 10);
+
+      // Convert snapped position back to crop coordinates
+      newX = snapResult.x - fullBoundsX;
+      newY = snapResult.y - fullBoundsY;
+      setActiveGuides(snapResult.guides);
+    } else {
+      setActiveGuides([]);
+    }
+
     const newRect = clampCropRect({
-      x: node.x(),
-      y: node.y(),
+      x: newX,
+      y: newY,
       width: cropRect.width,
       height: cropRect.height,
     });
     setCropRect(newRect);
     node.x(newRect.x);
     node.y(newRect.y);
+  };
+
+  // Handle crop rect drag end - clear guides
+  const handleCropRectDragEnd = () => {
+    setActiveGuides([]);
   };
 
   // Get handle position for an edge
@@ -510,11 +675,6 @@ export function CropOverlay({ element, fullBounds, aspectRatio, onCropConfirm, o
 
   const edges: Array<'top' | 'bottom' | 'left' | 'right'> = ['top', 'bottom', 'left', 'right'];
   const corners: Array<'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'> = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
-
-  // Calculate the position of full bounds relative to canvas
-  // The full image area extends beyond the current element if cropped
-  const fullBoundsX = element.x - existingCropX * fullBounds.width;
-  const fullBoundsY = element.y - existingCropY * fullBounds.height;
 
   return (
     <Group x={fullBoundsX} y={fullBoundsY}>
@@ -566,6 +726,7 @@ export function CropOverlay({ element, fullBounds, aspectRatio, onCropConfirm, o
         dash={[5, 5]}
         draggable
         onDragMove={handleCropRectDrag}
+        onDragEnd={handleCropRectDragEnd}
       />
 
       {/* Edge handles */}
@@ -586,6 +747,7 @@ export function CropOverlay({ element, fullBounds, aspectRatio, onCropConfirm, o
             cornerRadius={2}
             draggable
             onDragMove={(e) => handleEdgeDrag(edge, e)}
+            onDragEnd={handleEdgeDragEnd}
           />
         );
       })}
@@ -607,6 +769,7 @@ export function CropOverlay({ element, fullBounds, aspectRatio, onCropConfirm, o
             cornerRadius={2}
             draggable
             onDragMove={(e) => handleCornerDrag(corner, e)}
+            onDragEnd={handleCornerDragEnd}
           />
         );
       })}
@@ -644,6 +807,22 @@ export function CropOverlay({ element, fullBounds, aspectRatio, onCropConfirm, o
         fill="rgba(255,255,255,0.4)"
         listening={false}
       />
+
+      {/* Active snap guides */}
+      {activeGuides.map((guide, index) => (
+        <Line
+          key={`crop-guide-${index}`}
+          points={
+            guide.orientation === 'vertical'
+              ? [guide.position - fullBoundsX, -1000, guide.position - fullBoundsX, fullBounds.height + 1000]
+              : [-1000, guide.position - fullBoundsY, fullBounds.width + 1000, guide.position - fullBoundsY]
+          }
+          stroke="#3b82f6"
+          strokeWidth={1}
+          dash={[4, 4]}
+          listening={false}
+        />
+      ))}
     </Group>
   );
 }

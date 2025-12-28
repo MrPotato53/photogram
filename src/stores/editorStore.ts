@@ -18,6 +18,41 @@ interface PanelState {
   height: number;
 }
 
+export interface SnapSettings {
+  canvas: {
+    enabled: boolean;   // Snap to canvas edges and center
+    show: boolean;      // Show canvas center guides
+  };
+  elements: boolean;    // Snap to other element edges and centers
+  margin: {
+    enabled: boolean;
+    show: boolean;      // Show margin guides
+    value: number;      // Margin in design pixels
+  };
+  grid: {
+    enabled: boolean;
+    show: boolean;      // Show grid guides
+    horizontal: number; // Number of horizontal divisions
+    vertical: number;   // Number of vertical divisions
+    margin: number;     // Gutter/margin between grid cells in pixels
+  };
+}
+
+const defaultSnapSettings: SnapSettings = {
+  canvas: { enabled: true, show: false },
+  elements: true,
+  margin: { enabled: false, show: false, value: 50 },
+  grid: { enabled: false, show: false, horizontal: 3, vertical: 3, margin: 0 },
+};
+
+// Deep partial type for snap settings updates
+export type SnapSettingsUpdate = {
+  canvas?: Partial<SnapSettings['canvas']>;
+  elements?: boolean;
+  margin?: Partial<SnapSettings['margin']>;
+  grid?: Partial<SnapSettings['grid']>;
+};
+
 interface EditorState {
   project: Project | null;
   isLoading: boolean;
@@ -32,6 +67,7 @@ interface EditorState {
   panels: Record<PanelId, PanelState>;
   // Snapping
   snapEnabled: boolean;
+  snapSettings: SnapSettings;
   activeGuides: Guide[];
   // Cropping
   cropModeElementId: string | null;
@@ -75,6 +111,7 @@ interface EditorState {
   // Snap operations
   setSnapEnabled: (enabled: boolean) => void;
   setActiveGuides: (guides: Guide[]) => void;
+  updateSnapSettings: (updates: SnapSettingsUpdate) => void;
 
   // Crop operations
   enterCropMode: (elementId: string) => void;
@@ -101,6 +138,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   dragMousePosition: null,
   panels: { ...defaultPanelState },
   snapEnabled: true,
+  snapSettings: { ...defaultSnapSettings },
   activeGuides: [],
   cropModeElementId: null,
 
@@ -594,6 +632,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   setActiveGuides: (guides: Guide[]) => {
     set({ activeGuides: guides });
+  },
+
+  updateSnapSettings: (updates: SnapSettingsUpdate) => {
+    set((state) => ({
+      snapSettings: {
+        ...state.snapSettings,
+        ...(updates.elements !== undefined && { elements: updates.elements }),
+        canvas: updates.canvas
+          ? { ...state.snapSettings.canvas, ...updates.canvas }
+          : state.snapSettings.canvas,
+        margin: updates.margin
+          ? { ...state.snapSettings.margin, ...updates.margin }
+          : state.snapSettings.margin,
+        grid: updates.grid
+          ? { ...state.snapSettings.grid, ...updates.grid }
+          : state.snapSettings.grid,
+      },
+    }));
   },
 
   // Crop operations
