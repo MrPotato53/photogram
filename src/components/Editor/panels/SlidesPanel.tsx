@@ -1,8 +1,11 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import { Stage, Layer, Image as KonvaImage, Rect } from 'react-konva';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import type { Element } from '../../../types';
+import type { Element, Template } from '../../../types';
 import { useEditorStore } from '../../../stores/editorStore';
+import { useTemplatesStore } from '../../../stores/templatesStore';
+import { ContextMenu, ContextMenuItem } from '../../common/ContextMenu';
+import { TemplatePickerModal } from '../TemplatePickerModal';
 
 const DESIGN_HEIGHT = 1080;
 const THUMBNAIL_HEIGHT = 80;
@@ -206,11 +209,22 @@ export function SlidesPanel() {
     currentSlideIndex,
     setCurrentSlide,
     addSlide,
+    addSlideWithTemplate,
     removeSlide,
     reorderSlides,
     togglePanel,
     panels,
   } = useEditorStore();
+
+  const { templates, saveSlideAsTemplate } = useTemplatesStore();
+
+  // Template picker modal state
+  const [isTemplatePickerOpen, setIsTemplatePickerOpen] = useState(false);
+
+  const handleSelectTemplate = useCallback((template: Template) => {
+    addSlideWithTemplate(template);
+    setIsTemplatePickerOpen(false);
+  }, [addSlideWithTemplate]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const slidesContainerRef = useRef<HTMLDivElement>(null);
@@ -220,6 +234,11 @@ export function SlidesPanel() {
   const [renderVersion, setRenderVersion] = useState(0);
   const [shouldCenter, setShouldCenter] = useState(true);
   const [contextMenuSlideIndex, setContextMenuSlideIndex] = useState<number | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    isOpen: boolean;
+    position: { x: number; y: number };
+    slideIndex: number;
+  }>({ isOpen: false, position: { x: 0, y: 0 }, slideIndex: 0 });
   const [dragPosition, setDragPosition] = useState<{ x: number; y: number } | null>(null);
   const [hasFocus, setHasFocus] = useState(false);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -439,10 +458,15 @@ export function SlidesPanel() {
 
   const handleContextMenu = useCallback((e: React.MouseEvent, index: number) => {
     e.preventDefault();
-    // Set focus, select the slide and show delete button
+    // Set focus, select the slide and show context menu
     setHasFocus(true);
     setCurrentSlide(index);
     setContextMenuSlideIndex(index);
+    setContextMenu({
+      isOpen: true,
+      position: { x: e.clientX, y: e.clientY },
+      slideIndex: index,
+    });
   }, [setCurrentSlide]);
 
   const handleAddSlide = useCallback(() => {
@@ -456,6 +480,26 @@ export function SlidesPanel() {
       removeSlide(index);
     }
   }, [slides.length, removeSlide]);
+
+  const handleSaveAsTemplate = useCallback(() => {
+    if (!project) return;
+    const templateName = `Template ${templates.length + 1}`;
+    saveSlideAsTemplate(
+      contextMenu.slideIndex,
+      templateName,
+      project.aspectRatio,
+      elements,
+      designSize.width
+    );
+    setContextMenu({ ...contextMenu, isOpen: false });
+  }, [contextMenu, saveSlideAsTemplate, templates.length, project, elements, designSize.width]);
+
+  const handleDeleteFromContextMenu = useCallback(() => {
+    if (slides.length > 1) {
+      removeSlide(contextMenu.slideIndex);
+    }
+    setContextMenu({ ...contextMenu, isOpen: false });
+  }, [contextMenu, slides.length, removeSlide]);
 
   // Get drop indicator for a specific slide
   const getDropIndicator = (index: number): 'left' | 'right' | null => {
@@ -483,16 +527,34 @@ export function SlidesPanel() {
     );
   }
 
-  const addButton = slides.length < MAX_SLIDES && (
-    <button
-      onClick={handleAddSlide}
-      className="flex-shrink-0 flex items-center justify-center w-8 h-8 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors"
-      title="Add slide"
-    >
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-      </svg>
-    </button>
+  const addButtons = slides.length < MAX_SLIDES && (
+    <div className="flex-shrink-0 flex flex-col items-center gap-1">
+      {/* Add empty slide button */}
+      <button
+        onClick={handleAddSlide}
+        className="flex items-center justify-center w-8 h-8 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors"
+        title="Add empty slide"
+      >
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+        </svg>
+      </button>
+      {/* Add slide with template button */}
+      <button
+        onClick={() => setIsTemplatePickerOpen(true)}
+        className="flex items-center justify-center w-8 h-8 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors"
+        title="Add slide with template"
+      >
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"
+          />
+        </svg>
+      </button>
+    </div>
   );
 
   return (
@@ -533,12 +595,12 @@ export function SlidesPanel() {
             renderVersion={renderVersion}
           />
         ))}
-        {/* Add button inline when centered (not overflowing) */}
-        {shouldCenter && addButton}
+        {/* Add buttons inline when centered (not overflowing) */}
+        {shouldCenter && addButtons}
       </div>
 
-      {/* Add button fixed on right when overflowing */}
-      {!shouldCenter && addButton}
+      {/* Add buttons fixed on right when overflowing */}
+      {!shouldCenter && addButtons}
 
       {/* Drag preview - follows cursor */}
       {draggedIndex !== null && dragPosition && (
@@ -558,6 +620,32 @@ export function SlidesPanel() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Slide context menu */}
+      <ContextMenu
+        isOpen={contextMenu.isOpen}
+        onClose={() => setContextMenu({ ...contextMenu, isOpen: false })}
+        position={contextMenu.position}
+      >
+        <ContextMenuItem onClick={handleSaveAsTemplate}>
+          Save as Template
+        </ContextMenuItem>
+        {slides.length > 1 && (
+          <ContextMenuItem onClick={handleDeleteFromContextMenu} danger>
+            Delete Slide
+          </ContextMenuItem>
+        )}
+      </ContextMenu>
+
+      {/* Template picker modal */}
+      {project && (
+        <TemplatePickerModal
+          isOpen={isTemplatePickerOpen}
+          onClose={() => setIsTemplatePickerOpen(false)}
+          onSelect={handleSelectTemplate}
+          aspectRatio={project.aspectRatio}
+        />
       )}
     </div>
   );

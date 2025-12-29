@@ -1,12 +1,14 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { Stage, Layer, Image as KonvaImage, Transformer, Line } from 'react-konva';
+import { Stage, Layer, Image as KonvaImage, Transformer, Line, Rect, Group } from 'react-konva';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type Konva from 'konva';
-import type { AspectRatio, Element } from '../../types';
+import type { AspectRatio, Element, Template } from '../../types';
 import { useEditorStore } from '../../stores/editorStore';
+import { useTemplatesStore } from '../../stores/templatesStore';
 import { calculateSnapLines, findSnap, findTransformSnap, generateStaticGuides } from '../../utils/snapping';
 import { CropOverlay } from './CropOverlay';
 import { ContextMenu, ContextMenuItem } from '../common/ContextMenu';
+import { TemplatePickerModal } from './TemplatePickerModal';
 import { v4 as uuidv4 } from 'uuid';
 
 interface CanvasAreaProps {
@@ -51,6 +53,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     enterCropMode,
     exitCropMode,
     addSlide,
+    addSlideWithTemplate,
     addElement,
     clearMediaSelection,
     snapEnabled,
@@ -58,6 +61,16 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     activeGuides,
     setActiveGuides,
   } = useEditorStore();
+
+  const { templates, saveSlideAsTemplate } = useTemplatesStore();
+
+  // Template picker modal state
+  const [isTemplatePickerOpen, setIsTemplatePickerOpen] = useState(false);
+
+  const handleSelectTemplate = useCallback((template: Template) => {
+    addSlideWithTemplate(template);
+    setIsTemplatePickerOpen(false);
+  }, [addSlideWithTemplate]);
 
   const slides = project?.slides || [];
   const elements = project?.elements || [];
@@ -106,6 +119,8 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     isOpen: boolean;
     position: { x: number; y: number };
     elementId: string | null;
+    designPosition?: { x: number; y: number }; // For canvas context menu
+    slideIndex?: number; // For "Save as Template" on canvas context menu
   }>({ isOpen: false, position: { x: 0, y: 0 }, elementId: null });
 
   // Calculate canvas size based on container - maximize vertical space
@@ -357,6 +372,60 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       const dropX = dropScreenX / state.scale;
       const dropY = dropScreenY / state.scale;
 
+      // Check if dropping on a placeholder frame
+      const placeholderFrame = state.elements.find((el) => {
+        if (el.type !== 'placeholder') return false;
+        // Check if drop point is inside the element's bounds
+        // Account for rotation by using simple bounding box for now
+        const inX = dropX >= el.x && dropX <= el.x + el.width;
+        const inY = dropY >= el.y && dropY <= el.y + el.height;
+        return inX && inY;
+      });
+
+      if (placeholderFrame) {
+        // Fill the placeholder with the image, calculating crop to cover the frame
+        const frameRatio = placeholderFrame.width / placeholderFrame.height;
+        const mediaRatio = media.width / media.height;
+
+        // Calculate crop to fill the frame (cover mode)
+        let cropX = 0;
+        let cropY = 0;
+        let cropWidth = 1;
+        let cropHeight = 1;
+
+        if (mediaRatio > frameRatio) {
+          // Image is wider than frame - crop horizontally
+          cropWidth = frameRatio / mediaRatio;
+          cropX = (1 - cropWidth) / 2; // Center horizontally
+        } else if (mediaRatio < frameRatio) {
+          // Image is taller than frame - crop vertically
+          cropHeight = mediaRatio / frameRatio;
+          cropY = (1 - cropHeight) / 2; // Center vertically
+        }
+
+        // Clear drag state
+        setDraggingMedia(null);
+        setDragMousePosition(null);
+        clearMediaSelection();
+
+        // Update the placeholder to become a photo element
+        updateElement(placeholderFrame.id, {
+          type: 'photo',
+          mediaId: media.id,
+          cropX,
+          cropY,
+          cropWidth,
+          cropHeight,
+        });
+
+        // Update current slide based on frame position
+        const slideIndex = Math.floor((placeholderFrame.x + placeholderFrame.width / 2) / state.designSize.width);
+        if (slideIndex >= 0 && slideIndex < state.numSlides) {
+          setCurrentSlide(slideIndex);
+        }
+        return;
+      }
+
       // Calculate element size (50% of slide while maintaining aspect ratio)
       const mediaRatio = media.width / media.height;
       let elementWidth = Math.min(state.designSize.width * 0.5, media.width);
@@ -407,7 +476,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
     window.addEventListener('mouseup', handleMouseUp);
     return () => window.removeEventListener('mouseup', handleMouseUp);
-  }, [setDraggingMedia, setDragMousePosition, clearMediaSelection, addElement, setCurrentSlide]);
+  }, [setDraggingMedia, setDragMousePosition, clearMediaSelection, addElement, updateElement, setCurrentSlide]);
 
   // Handle stage click - deselect if clicking empty space
   const handleStageClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
@@ -703,6 +772,36 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     }
   }, [selectedElementId]);
 
+  // Canvas context menu for empty space right-clicks
+  const handleStageContextMenu = useCallback((e: Konva.KonvaEventObject<PointerEvent>) => {
+    // Only show menu if clicking on empty stage area
+    if (e.target === e.target.getStage()) {
+      e.evt.preventDefault();
+      e.evt.stopPropagation(); // Prevent bubbling to wrapper div's handleContextMenu
+
+      // Deselect any selected element first
+      selectElement(null);
+
+      const stage = e.target.getStage();
+      const pointerPos = stage?.getPointerPosition();
+      const designPos = pointerPos ? {
+        x: pointerPos.x / scale,
+        y: pointerPos.y / scale,
+      } : { x: 0, y: 0 };
+
+      // Calculate which slide was clicked
+      const clickedSlideIndex = Math.floor(designPos.x / designSize.width);
+
+      setContextMenu({
+        isOpen: true,
+        position: { x: e.evt.clientX, y: e.evt.clientY },
+        elementId: null, // null means canvas context menu
+        designPosition: designPos,
+        slideIndex: clickedSlideIndex >= 0 && clickedSlideIndex < numSlides ? clickedSlideIndex : currentSlideIndex,
+      });
+    }
+  }, [scale, selectElement, designSize.width, numSlides, currentSlideIndex]);
+
   const handleFlipHorizontal = () => {
     if (!contextMenu.elementId) return;
     const element = elements.find((el) => el.id === contextMenu.elementId);
@@ -812,6 +911,70 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       width: newWidth,
       height: newHeight,
     });
+    setContextMenu({ ...contextMenu, isOpen: false });
+  };
+
+  const handleCreateFrame = async () => {
+    if (!contextMenu.elementId) return;
+    const element = elements.find((el) => el.id === contextMenu.elementId);
+    if (!element) return;
+
+    // Create a placeholder frame with same dimensions, offset diagonally
+    const newFrame: Element = {
+      id: uuidv4(),
+      type: 'placeholder',
+      x: element.x + 30,
+      y: element.y + 30,
+      width: element.width,
+      height: element.height,
+      rotation: element.rotation,
+      scale: 1,
+      locked: false,
+      zIndex: Math.max(...elements.map((el) => el.zIndex), 0) + 1,
+    };
+
+    await addElement(newFrame);
+    selectElement(newFrame.id);
+    setContextMenu({ ...contextMenu, isOpen: false });
+  };
+
+  const handleAddFrame = async () => {
+    if (!contextMenu.designPosition) return;
+
+    // Default frame size (reasonable starting size)
+    const frameWidth = 300;
+    const frameHeight = 200;
+
+    // Center the frame on the click position
+    const newFrame: Element = {
+      id: uuidv4(),
+      type: 'placeholder',
+      x: contextMenu.designPosition.x - frameWidth / 2,
+      y: contextMenu.designPosition.y - frameHeight / 2,
+      width: frameWidth,
+      height: frameHeight,
+      rotation: 0,
+      scale: 1,
+      locked: false,
+      zIndex: Math.max(...elements.map((el) => el.zIndex), 0) + 1,
+    };
+
+    await addElement(newFrame);
+    selectElement(newFrame.id);
+    setContextMenu({ ...contextMenu, isOpen: false });
+  };
+
+  const handleSaveSlideAsTemplate = () => {
+    if (!project) return;
+    const slideIndex = contextMenu.slideIndex ?? currentSlideIndex;
+    const templateName = `Template ${templates.length + 1}`;
+    saveSlideAsTemplate(
+      slideIndex,
+      templateName,
+      project.aspectRatio,
+      elements,
+      designSize.width
+    );
     setContextMenu({ ...contextMenu, isOpen: false });
   };
 
@@ -943,18 +1106,73 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
               height={canvasSize.height}
               style={{ position: 'absolute', left: 24, top: 0 }}
               onClick={handleStageClick}
+              onContextMenu={handleStageContextMenu}
             >
               <Layer scaleX={scale} scaleY={scale}>
                 {/* Render all elements sorted by zIndex */}
                 {[...elements]
                   .sort((a, b) => a.zIndex - b.zIndex)
                   .map((element) => {
+                    const isSelected = selectedElementId === element.id;
+
+                    // Render placeholder/frame elements
+                    if (element.type === 'placeholder') {
+                      const plusSize = Math.min(element.width, element.height) * 0.3;
+                      const centerX = element.width / 2;
+                      const centerY = element.height / 2;
+
+                      return (
+                        <Group
+                          key={element.id}
+                          id={element.id}
+                          x={element.x}
+                          y={element.y}
+                          width={element.width}
+                          height={element.height}
+                          rotation={element.rotation}
+                          draggable={!element.locked && !cropModeElementId}
+                          onClick={(e) => handleElementClick(element.id, e)}
+                          onTap={(e) => handleElementClick(element.id, e as unknown as Konva.KonvaEventObject<MouseEvent>)}
+                          onDragMove={(e) => handleDragMove(element.id, e)}
+                          onDragEnd={(e) => handleDragEnd(element.id, e)}
+                          onTransformEnd={(e) => handleTransformEnd(element.id, e)}
+                        >
+                          {/* Gray background */}
+                          <Rect
+                            width={element.width}
+                            height={element.height}
+                            fill="#e5e7eb"
+                            stroke={isSelected ? '#3b82f6' : '#d1d5db'}
+                            strokeWidth={isSelected ? 2 : 1}
+                            strokeScaleEnabled={false}
+                            dash={isSelected ? undefined : [8, 4]}
+                          />
+                          {/* Plus icon - horizontal line */}
+                          <Rect
+                            x={centerX - plusSize / 2}
+                            y={centerY - plusSize / 12}
+                            width={plusSize}
+                            height={plusSize / 6}
+                            fill="#9ca3af"
+                          />
+                          {/* Plus icon - vertical line */}
+                          <Rect
+                            x={centerX - plusSize / 12}
+                            y={centerY - plusSize / 2}
+                            width={plusSize / 6}
+                            height={plusSize}
+                            fill="#9ca3af"
+                          />
+                        </Group>
+                      );
+                    }
+
+                    // Render photo elements
                     if (element.type !== 'photo') return null;
 
                     const loadedImage = loadedImages.get(element.id);
                     if (!loadedImage) return null;
 
-                    const isSelected = selectedElementId === element.id;
                     const isBeingCropped = cropModeElementId === element.id;
 
                     const flipScaleX = element.flipX ? -1 : 1;
@@ -1132,31 +1350,56 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
             </Stage>
           )}
 
-          {/* Add slide button - small circle */}
+          {/* Add slide buttons */}
           {slides.length < MAX_SLIDES && (
-            <button
-              onClick={handleAddSlide}
-              className="absolute flex items-center justify-center w-8 h-8 bg-gray-700 hover:bg-gray-600 text-white rounded-full shadow-md transition-colors"
+            <div
+              className="absolute flex flex-col gap-2"
               style={{
                 left: 24 + totalCanvasWidth + 8,
-                top: canvasSize.height / 2 - 16,
+                top: canvasSize.height / 2 - 36,
               }}
-              title="Add slide"
             >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
+              {/* Add empty slide button */}
+              <button
+                onClick={handleAddSlide}
+                className="flex items-center justify-center w-8 h-8 bg-gray-700 hover:bg-gray-600 text-white rounded-full shadow-md transition-colors"
+                title="Add empty slide"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 4v16m8-8H4"
-                />
-              </svg>
-            </button>
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 4v16m8-8H4"
+                  />
+                </svg>
+              </button>
+              {/* Add slide with template button */}
+              <button
+                onClick={() => setIsTemplatePickerOpen(true)}
+                className="flex items-center justify-center w-8 h-8 bg-gray-700 hover:bg-gray-600 text-white rounded-full shadow-md transition-colors"
+                title="Add slide with template"
+              >
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"
+                  />
+                </svg>
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -1205,40 +1448,64 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         </div>
       )}
 
-      {/* Element context menu */}
+      {/* Context menu - shows different items for elements vs empty canvas */}
       <ContextMenu
         isOpen={contextMenu.isOpen}
         onClose={() => setContextMenu({ ...contextMenu, isOpen: false })}
         position={contextMenu.position}
       >
-        <ContextMenuItem onClick={handleFlipHorizontal}>
-          Flip Horizontal
-        </ContextMenuItem>
-        <ContextMenuItem onClick={handleFlipVertical}>
-          Flip Vertical
-        </ContextMenuItem>
-        <ContextMenuItem onClick={handleCropFromMenu}>
-          Crop
-        </ContextMenuItem>
-        <ContextMenuItem onClick={handleResetCrop}>
-          Reset Crop
-        </ContextMenuItem>
-        <ContextMenuItem onClick={handleResetAspectRatio}>
-          Reset Aspect Ratio
-        </ContextMenuItem>
-        <ContextMenuItem onClick={handleCenterOnCanvas}>
-          Center on Canvas
-        </ContextMenuItem>
-        <ContextMenuItem onClick={handleSendToFront}>
-          Send to Front
-        </ContextMenuItem>
-        <ContextMenuItem onClick={handleSendToBack}>
-          Send to Back
-        </ContextMenuItem>
-        <ContextMenuItem onClick={handleDeleteFromMenu} danger>
-          Delete
-        </ContextMenuItem>
+        {contextMenu.elementId ? (
+          <>
+            <ContextMenuItem onClick={handleFlipHorizontal}>
+              Flip Horizontal
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleFlipVertical}>
+              Flip Vertical
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleCropFromMenu}>
+              Crop
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleResetCrop}>
+              Reset Crop
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleResetAspectRatio}>
+              Reset Aspect Ratio
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleCenterOnCanvas}>
+              Center on Canvas
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleSendToFront}>
+              Send to Front
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleSendToBack}>
+              Send to Back
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleCreateFrame}>
+              Create Frame
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleDeleteFromMenu} danger>
+              Delete
+            </ContextMenuItem>
+          </>
+        ) : (
+          <>
+            <ContextMenuItem onClick={handleAddFrame}>
+              Add Frame
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleSaveSlideAsTemplate}>
+              Save Slide as Template
+            </ContextMenuItem>
+          </>
+        )}
       </ContextMenu>
+
+      {/* Template picker modal */}
+      <TemplatePickerModal
+        isOpen={isTemplatePickerOpen}
+        onClose={() => setIsTemplatePickerOpen(false)}
+        onSelect={handleSelectTemplate}
+        aspectRatio={aspectRatio}
+      />
     </div>
   );
 }

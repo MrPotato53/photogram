@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { usePreferencesStore } from './stores/preferencesStore';
+import { useTemplatesStore } from './stores/templatesStore';
 import { useTabsStore } from './stores/tabsStore';
 import { TabBar } from './components/TabBar';
 import { HomePage } from './components/Home';
@@ -7,11 +8,13 @@ import { EditorLayout } from './components/Editor/EditorLayout';
 
 export default function App() {
   const { loadPreferences } = usePreferencesStore();
+  const { loadTemplates } = useTemplatesStore();
   const { tabs, activeTabId } = useTabsStore();
 
   useEffect(() => {
     loadPreferences();
-  }, [loadPreferences]);
+    loadTemplates();
+  }, [loadPreferences, loadTemplates]);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
 

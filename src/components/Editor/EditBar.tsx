@@ -399,13 +399,36 @@ export function EditBar() {
   const isElementSelected = !!selectedElement;
   const isCropping = !!cropModeElementId;
 
-  // Calculate scale percentage from element dimensions relative to original media
+  // Design dimensions (canvas size)
+  const DESIGN_HEIGHT = 1080;
+  const designWidth = project
+    ? DESIGN_HEIGHT * (project.aspectRatio.width / project.aspectRatio.height)
+    : 1920;
+
+  // Calculate the "fit size" - size the image would be if it filled the canvas (contain fit)
+  // This becomes our 100% baseline, making scale more intuitive
+  const getFitSize = () => {
+    if (!selectedMedia) return { width: designWidth, height: DESIGN_HEIGHT };
+
+    const mediaAspect = selectedMedia.width / selectedMedia.height;
+    const canvasAspect = designWidth / DESIGN_HEIGHT;
+
+    if (mediaAspect > canvasAspect) {
+      // Image is wider than canvas - fit to width
+      return { width: designWidth, height: designWidth / mediaAspect };
+    } else {
+      // Image is taller than canvas - fit to height
+      return { width: DESIGN_HEIGHT * mediaAspect, height: DESIGN_HEIGHT };
+    }
+  };
+
+  // Calculate scale percentage relative to "fit canvas" size
   const getScalePercent = () => {
     if (!selectedElement || !selectedMedia) return 100;
-    // Calculate based on width ratio to original image
-    const originalWidth = selectedMedia.width;
+    const fitSize = getFitSize();
+    // Current visible width (accounting for crop)
     const currentWidth = selectedElement.width / (selectedElement.cropWidth ?? 1);
-    return Math.round((currentWidth / originalWidth) * 100);
+    return Math.round((currentWidth / fitSize.width) * 100);
   };
 
   // Get rotation in degrees
@@ -445,14 +468,13 @@ export function EditBar() {
   const handleScaleChange = (percent: number) => {
     if (!selectedElement || !selectedMedia) return;
     const scale = percent / 100;
-    // Calculate new dimensions based on original media size
-    const originalWidth = selectedMedia.width;
-    const originalHeight = selectedMedia.height;
+    const fitSize = getFitSize();
     // Account for crop - the element shows cropWidth/cropHeight of the original
     const cropW = selectedElement.cropWidth ?? 1;
     const cropH = selectedElement.cropHeight ?? 1;
-    const newWidth = originalWidth * scale * cropW;
-    const newHeight = originalHeight * scale * cropH;
+    // Scale relative to fit size, then apply crop
+    const newWidth = fitSize.width * scale * cropW;
+    const newHeight = fitSize.height * scale * cropH;
     updateElement(selectedElement.id, { width: newWidth, height: newHeight });
   };
 
@@ -475,11 +497,12 @@ export function EditBar() {
 
   const handleResetScale = () => {
     if (!selectedElement || !selectedMedia) return;
-    // Reset to 100% of original size (accounting for crop)
+    // Reset to 100% = fits canvas (accounting for crop)
+    const fitSize = getFitSize();
     const cropW = selectedElement.cropWidth ?? 1;
     const cropH = selectedElement.cropHeight ?? 1;
-    const newWidth = selectedMedia.width * cropW;
-    const newHeight = selectedMedia.height * cropH;
+    const newWidth = fitSize.width * cropW;
+    const newHeight = fitSize.height * cropH;
     updateElement(selectedElement.id, { width: newWidth, height: newHeight });
   };
 
@@ -620,11 +643,11 @@ export function EditBar() {
               onDoubleClick={handleResetScale}
               min={1}
               max={500}
-              step={5}
+              step={1}
               disabled={!isElementSelected || isCropping}
               suffix="%"
               className="w-20"
-              title="Scale (double-click to reset)"
+              title="Scale (double-click to reset to 100%)"
             />
           </div>
 

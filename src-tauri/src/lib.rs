@@ -4,8 +4,9 @@ mod models;
 use tauri::Manager;
 use commands::{
     check_media_exists, create_project, delete_element_asset, delete_media, delete_project,
-    embed_element_asset, get_all_projects, get_preferences, get_project, import_media_files,
-    relink_media, rename_project, save_preferences, show_in_folder, update_project,
+    delete_template, embed_element_asset, get_all_projects, get_preferences, get_project,
+    get_templates, import_media_files, relink_media, rename_project, reorder_templates,
+    save_preferences, save_template, show_in_folder, update_project,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -48,6 +49,10 @@ pub fn run() {
             relink_media,
             embed_element_asset,
             delete_element_asset,
+            get_templates,
+            save_template,
+            delete_template,
+            reorder_templates,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

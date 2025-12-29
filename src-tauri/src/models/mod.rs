@@ -56,6 +56,40 @@ pub struct Slide {
     pub order: i32,
 }
 
+// Template element (same as Element but without media-specific fields)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateElement {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub element_type: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub rotation: f64,
+    pub scale: f64,
+    pub locked: bool,
+    pub z_index: i32,
+    pub span_frames: Option<Vec<String>>,
+    pub crop_x: Option<f64>,
+    pub crop_y: Option<f64>,
+    pub crop_width: Option<f64>,
+    pub crop_height: Option<f64>,
+    pub flip_x: Option<bool>,
+    pub flip_y: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Template {
+    pub id: String,
+    pub name: String,
+    pub aspect_ratio: AspectRatio,
+    pub elements: Vec<TemplateElement>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -66,6 +100,7 @@ pub struct Project {
     // Global elements - x coordinates span across all slides
     pub elements: Vec<Element>,
     pub media_pool: Vec<MediaItem>,
+    pub templates: Vec<Template>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub accessed_at: DateTime<Utc>,
@@ -87,6 +122,7 @@ impl Project {
             }],
             elements: vec![],
             media_pool: vec![],
+            templates: vec![],
             created_at: now,
             updated_at: now,
             accessed_at: now,
