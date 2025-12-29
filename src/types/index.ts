@@ -49,6 +49,16 @@ export interface Slide {
   order: number;
 }
 
+// Template for creating slides with pre-defined frame layouts
+export interface Template {
+  id: string;
+  name: string;
+  aspectRatio: AspectRatio;
+  // Elements with positions relative to a single slide (0 to designWidth)
+  elements: Omit<Element, 'mediaId' | 'assetPath'>[];
+  createdAt: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -58,6 +68,7 @@ export interface Project {
   // (e.g., x=1200 on 1080-wide slides means element is on slide 2)
   elements: Element[];
   mediaPool: MediaItem[];
+  templates: Template[];
   createdAt: string;
   updatedAt: string;
   accessedAt: string;

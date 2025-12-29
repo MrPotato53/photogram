@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
-import type { Element, Guide, Project, Slide } from '../types';
+import type { Element, Guide, Project, Slide, Template } from '../types';
 import {
   getProject,
   updateProject,
@@ -80,6 +80,7 @@ interface EditorState {
   // Slide operations
   setCurrentSlide: (index: number) => void;
   addSlide: () => Promise<void>;
+  addSlideWithTemplate: (template: Template) => Promise<void>;
   removeSlide: (slideIndex: number) => Promise<void>;
   reorderSlides: (fromIndex: number, toIndex: number) => Promise<void>;
 
@@ -116,6 +117,10 @@ interface EditorState {
   // Crop operations
   enterCropMode: (elementId: string) => void;
   exitCropMode: () => void;
+
+  // Template operations
+  saveSlideAsTemplate: (slideIndex: number, name: string) => Promise<void>;
+  deleteTemplate: (templateId: string) => Promise<void>;
 }
 
 const defaultPanelState: Record<PanelId, PanelState> = {
@@ -198,6 +203,58 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       set({ project: savedProject });
     } catch (error) {
       console.error('Failed to add slide:', error);
+    }
+  },
+
+  addSlideWithTemplate: async (template: Template) => {
+    const { project } = get();
+    if (!project) return;
+
+    // Maximum 20 slides
+    if (project.slides.length >= 20) return;
+
+    const DESIGN_HEIGHT = 1080;
+    const designWidth = DESIGN_HEIGHT * (project.aspectRatio.width / project.aspectRatio.height);
+    const newSlideIndex = project.slides.length;
+    const slideOffsetX = newSlideIndex * designWidth;
+
+    // Create new slide
+    const newSlide: Slide = {
+      id: uuidv4(),
+      order: newSlideIndex,
+    };
+
+    // Convert template elements to project elements with proper positioning
+    // Template elements have positions relative to a single slide (0 to designWidth)
+    // We need to offset them to the new slide's position
+    const maxZIndex = project.elements.length > 0
+      ? Math.max(...project.elements.map((el) => el.zIndex))
+      : -1;
+
+    const newElements: Element[] = template.elements.map((templateEl, index) => ({
+      id: uuidv4(),
+      type: templateEl.type as 'photo' | 'placeholder',
+      x: templateEl.x + slideOffsetX, // Offset to new slide position
+      y: templateEl.y,
+      width: templateEl.width,
+      height: templateEl.height,
+      rotation: templateEl.rotation,
+      scale: templateEl.scale,
+      locked: templateEl.locked,
+      zIndex: maxZIndex + 1 + index,
+    }));
+
+    const updatedProject = {
+      ...project,
+      slides: [...project.slides, newSlide],
+      elements: [...project.elements, ...newElements],
+    };
+
+    try {
+      const savedProject = await updateProject(updatedProject);
+      set({ project: savedProject, currentSlideIndex: newSlideIndex });
+    } catch (error) {
+      console.error('Failed to add slide with template:', error);
     }
   },
 
@@ -660,5 +717,75 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   exitCropMode: () => {
     set({ cropModeElementId: null });
+  },
+
+  // Template operations
+  saveSlideAsTemplate: async (slideIndex: number, name: string) => {
+    const { project } = get();
+    if (!project) return;
+
+    // Calculate design size (fixed height of 1080)
+    const DESIGN_HEIGHT = 1080;
+    const designWidth = DESIGN_HEIGHT * (project.aspectRatio.width / project.aspectRatio.height);
+
+    // Get elements on this slide
+    const slideStartX = slideIndex * designWidth;
+    const slideEndX = slideStartX + designWidth;
+
+    const slideElements = project.elements.filter((el) => {
+      const elCenterX = el.x + el.width / 2;
+      return elCenterX >= slideStartX && elCenterX < slideEndX;
+    });
+
+    // Convert elements to template elements (positions relative to slide, all become placeholders)
+    const templateElements = slideElements.map((el) => ({
+      id: uuidv4(),
+      type: 'placeholder' as const,
+      x: el.x - slideStartX, // Convert to slide-relative coordinates
+      y: el.y,
+      width: el.width,
+      height: el.height,
+      rotation: el.rotation,
+      scale: el.scale,
+      locked: false,
+      zIndex: el.zIndex,
+    }));
+
+    const newTemplate: Template = {
+      id: uuidv4(),
+      name,
+      aspectRatio: { ...project.aspectRatio },
+      elements: templateElements,
+      createdAt: new Date().toISOString(),
+    };
+
+    const updatedProject = {
+      ...project,
+      templates: [...project.templates, newTemplate],
+    };
+
+    try {
+      await updateProject(updatedProject);
+      set({ project: updatedProject });
+    } catch (error) {
+      console.error('Failed to save template:', error);
+    }
+  },
+
+  deleteTemplate: async (templateId: string) => {
+    const { project } = get();
+    if (!project) return;
+
+    const updatedProject = {
+      ...project,
+      templates: project.templates.filter((t) => t.id !== templateId),
+    };
+
+    try {
+      await updateProject(updatedProject);
+      set({ project: updatedProject });
+    } catch (error) {
+      console.error('Failed to delete template:', error);
+    }
   },
 }));

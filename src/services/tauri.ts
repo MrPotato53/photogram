@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AspectRatio, MediaItem, Preferences, Project, ProjectSummary } from '../types';
+import type { AspectRatio, MediaItem, Preferences, Project, ProjectSummary, Template } from '../types';
 
 export async function getAllProjects(): Promise<ProjectSummary[]> {
   return invoke('get_all_projects');
@@ -79,4 +79,22 @@ export async function deleteElementAsset(
   assetPath: string
 ): Promise<void> {
   return invoke('delete_element_asset', { projectId, assetPath });
+}
+
+// ============ Template Functions (App-level, shared across projects) ============
+
+export async function getTemplates(): Promise<Template[]> {
+  return invoke('get_templates');
+}
+
+export async function saveTemplate(template: Template): Promise<Template[]> {
+  return invoke('save_template', { template });
+}
+
+export async function deleteTemplateApi(templateId: string): Promise<Template[]> {
+  return invoke('delete_template', { templateId });
+}
+
+export async function reorderTemplates(templateIds: string[]): Promise<Template[]> {
+  return invoke('reorder_templates', { templateIds });
 }
