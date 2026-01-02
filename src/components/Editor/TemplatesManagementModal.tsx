@@ -30,9 +30,9 @@ function TemplateCard({
 
   return (
     <div
-      className={`relative rounded-lg overflow-hidden cursor-pointer transition-all ${
+      className={`relative rounded-lg cursor-pointer transition-all ${
         isSelected ? 'ring-2 ring-blue-500' : 'ring-1 ring-gray-600 hover:ring-gray-500'
-      } ${isDragging ? 'opacity-50' : ''}`}
+      } ${isDragging ? 'opacity-30 scale-95' : ''}`}
       style={{ width: previewWidth + 16, padding: 8 }}
       onClick={onSelect}
       onDoubleClick={onDoubleClick}
@@ -41,11 +41,11 @@ function TemplateCard({
     >
       {/* Drop indicator - left */}
       {dropIndicator === 'left' && (
-        <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-500 -translate-x-1 z-20 rounded" />
+        <div className="absolute -left-1.5 top-0 bottom-0 w-1 bg-blue-500 z-20 rounded-full shadow-[0_0_6px_rgba(59,130,246,0.7)]" />
       )}
       {/* Drop indicator - right */}
       {dropIndicator === 'right' && (
-        <div className="absolute right-0 top-0 bottom-0 w-1 bg-blue-500 translate-x-1 z-20 rounded" />
+        <div className="absolute -right-1.5 top-0 bottom-0 w-1 bg-blue-500 z-20 rounded-full shadow-[0_0_6px_rgba(59,130,246,0.7)]" />
       )}
 
       {/* Preview */}
@@ -403,7 +403,7 @@ export function TemplatesManagementModal({
               <p className="text-xs text-gray-500 mb-3">
                 Click to select. Double-click to rename. Drag to reorder. Press Delete to remove.
               </p>
-              <div ref={gridRef} className="flex flex-wrap gap-3">
+              <div ref={gridRef} className="flex flex-wrap gap-3 px-2">
                 {matchingTemplates.map((template) => (
                   <TemplateCard
                     key={template.id}

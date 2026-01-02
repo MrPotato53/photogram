@@ -560,6 +560,7 @@ export function SlidesPanel() {
   return (
     <div
       ref={containerRef}
+      data-panel="slides"
       className="h-full bg-theme-bg-secondary border-t border-theme-border flex items-center px-3 gap-2 relative"
     >
       {/* Collapse button - top right */}

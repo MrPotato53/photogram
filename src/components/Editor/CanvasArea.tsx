@@ -54,6 +54,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     exitCropMode,
     addSlide,
     addSlideWithTemplate,
+    removeSlide,
     addElement,
     clearMediaSelection,
     snapEnabled,
@@ -81,9 +82,14 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
   // Track shift key for centered scaling
   const isShiftPressed = useRef(false);
+  // State version for crop mode shift+pan (triggers re-renders)
+  const [cropShiftPressed, setCropShiftPressed] = useState(false);
 
   // Track active anchor for transform snapping
   const activeAnchorRef = useRef<string | null>(null);
+
+  // Track original element position when entering crop mode (for cancellation)
+  const cropOriginalPositionRef = useRef<{ x: number; y: number } | null>(null);
 
   // Refs for drop handling (to avoid stale closures in always-attached listener)
   const dropStateRef = useRef({
@@ -217,10 +223,19 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
   // Track shift key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Shift') isShiftPressed.current = true;
+      if (e.key === 'Shift') {
+        isShiftPressed.current = true;
+        // Update state for crop mode shift+pan
+        if (cropModeElementId) {
+          setCropShiftPressed(true);
+        }
+      }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.key === 'Shift') isShiftPressed.current = false;
+      if (e.key === 'Shift') {
+        isShiftPressed.current = false;
+        setCropShiftPressed(false);
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
@@ -228,7 +243,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, []);
+  }, [cropModeElementId]);
 
   // Handle keyboard events
   useEffect(() => {
@@ -343,6 +358,19 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         setDraggingMedia(null);
         setDragMousePosition(null);
         return;
+      }
+
+      // Check if mouse is over a panel or other drop-cancel zone
+      // If so, cancel the drop instead of placing the image
+      const elementUnderMouse = document.elementFromPoint(e.clientX, e.clientY);
+      if (elementUnderMouse) {
+        const isOverPanel = elementUnderMouse.closest('[data-panel]') !== null;
+        if (isOverPanel) {
+          // Dropped over a panel - cancel the drop
+          setDraggingMedia(null);
+          setDragMousePosition(null);
+          return;
+        }
       }
 
       const media = state.project.mediaPool.find((m) => m.id === state.draggingMediaId);
@@ -978,6 +1006,14 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     setContextMenu({ ...contextMenu, isOpen: false });
   };
 
+  const handleDeleteSlide = () => {
+    const slideIndex = contextMenu.slideIndex ?? currentSlideIndex;
+    if (slides.length > 1) {
+      removeSlide(slideIndex);
+    }
+    setContextMenu({ ...contextMenu, isOpen: false });
+  };
+
   const handleAddSlide = () => {
     if (slides.length < MAX_SLIDES) {
       addSlide();
@@ -1020,16 +1056,48 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         height: crop.newHeight,
       });
     }
-    exitCropMode();
-  };
-
-  const handleCropCancel = () => {
+    // Clear original position ref since crop was confirmed (not cancelled)
+    cropOriginalPositionRef.current = null;
+    setCropShiftPressed(false);
     exitCropMode();
   };
 
   const croppingElement = cropModeElementId
     ? elements.find((el) => el.id === cropModeElementId)
     : null;
+
+  // Capture original element position when entering crop mode
+  useEffect(() => {
+    if (cropModeElementId && croppingElement && !cropOriginalPositionRef.current) {
+      cropOriginalPositionRef.current = {
+        x: croppingElement.x,
+        y: croppingElement.y,
+      };
+    } else if (!cropModeElementId) {
+      // Only clear ref when actually exiting crop mode (not during transient state updates)
+      cropOriginalPositionRef.current = null;
+    }
+  }, [cropModeElementId, croppingElement]);
+
+  const handleCropCancel = () => {
+    // Restore original element position if it was moved during Shift+pan
+    if (cropModeElementId && cropOriginalPositionRef.current) {
+      const originalPos = cropOriginalPositionRef.current;
+      updateElement(cropModeElementId, {
+        x: originalPos.x,
+        y: originalPos.y,
+      });
+    }
+    cropOriginalPositionRef.current = null;
+    setCropShiftPressed(false);
+    exitCropMode();
+  };
+
+  const handleCropElementDrag = useCallback((x: number, y: number) => {
+    if (cropModeElementId) {
+      updateElement(cropModeElementId, { x, y });
+    }
+  }, [cropModeElementId, updateElement]);
 
   const croppingFullBounds = croppingElement
     ? {
@@ -1072,18 +1140,37 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
           {slides.map((_, index) => (
             <div
               key={index}
-              className={`absolute -top-5 text-xs px-2 py-0.5 rounded transition-colors cursor-pointer ${
-                index === currentSlideIndex
-                  ? 'bg-blue-500 text-white'
-                  : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
-              }`}
+              className="absolute -top-5 group"
               style={{
                 left: 24 + index * canvasSize.width + canvasSize.width / 2,
                 transform: 'translateX(-50%)',
               }}
-              onClick={() => setCurrentSlide(index)}
             >
-              {index + 1}
+              <div
+                className={`flex items-center gap-0.5 text-xs px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                  index === currentSlideIndex
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                }`}
+                onClick={() => setCurrentSlide(index)}
+              >
+                <span>{index + 1}</span>
+                {/* Delete button - appears on hover when there's more than 1 slide */}
+                {slides.length > 1 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeSlide(index);
+                    }}
+                    className="hidden group-hover:flex items-center justify-center w-3.5 h-3.5 -mr-1 ml-0.5 rounded-full hover:bg-black/20 transition-colors"
+                    title="Delete slide"
+                  >
+                    <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
             </div>
           ))}
 
@@ -1331,20 +1418,24 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
                 {/* Crop overlay */}
                 {croppingElement && croppingFullBounds && (
-                  <CropOverlay
-                    element={croppingElement}
-                    fullBounds={croppingFullBounds}
-                    aspectRatio={cropAspectRatio}
-                    onCropConfirm={handleCropConfirm}
-                    onCancel={handleCropCancel}
-                    snapEnabled={snapEnabled}
-                    snapSettings={snapSettings}
-                    elements={elements}
-                    totalDesignWidth={totalDesignWidth}
-                    canvasHeight={designSize.height}
-                    slideWidth={designSize.width}
-                    numSlides={numSlides}
-                  />
+                  <>
+                    <CropOverlay
+                      element={croppingElement}
+                      fullBounds={croppingFullBounds}
+                      aspectRatio={cropAspectRatio}
+                      onCropConfirm={handleCropConfirm}
+                      onCancel={handleCropCancel}
+                      shiftPressed={cropShiftPressed}
+                      onElementDrag={handleCropElementDrag}
+                      snapEnabled={snapEnabled}
+                      snapSettings={snapSettings}
+                      elements={elements}
+                      totalDesignWidth={totalDesignWidth}
+                      canvasHeight={designSize.height}
+                      slideWidth={designSize.width}
+                      numSlides={numSlides}
+                    />
+                  </>
                 )}
               </Layer>
             </Stage>
@@ -1495,6 +1586,11 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
             <ContextMenuItem onClick={handleSaveSlideAsTemplate}>
               Save Slide as Template
             </ContextMenuItem>
+            {slides.length > 1 && (
+              <ContextMenuItem onClick={handleDeleteSlide} danger>
+                Delete Slide
+              </ContextMenuItem>
+            )}
           </>
         )}
       </ContextMenu>
