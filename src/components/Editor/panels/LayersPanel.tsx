@@ -138,7 +138,7 @@ export function LayersPanel() {
   };
 
   return (
-    <div className="p-2 h-full flex flex-col">
+    <div data-panel="layers" className="p-2 h-full flex flex-col">
       {sortedElements.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center text-theme-text-muted">
           <svg

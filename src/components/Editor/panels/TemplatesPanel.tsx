@@ -35,7 +35,7 @@ function TemplatePreview({
   return (
     <div
       className={`relative rounded overflow-hidden bg-white cursor-grab transition-all hover:ring-2 hover:ring-blue-500 ${
-        isDragging ? 'opacity-50' : ''
+        isDragging ? 'opacity-30 scale-95' : ''
       }`}
       style={{ width: previewWidth, height: previewHeight }}
       onDoubleClick={onDoubleClick}
@@ -46,11 +46,11 @@ function TemplatePreview({
     >
       {/* Drop indicator - left */}
       {dropIndicator === 'left' && (
-        <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-500 -translate-x-2 z-20 rounded" />
+        <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-blue-500 -translate-x-1.5 z-20 rounded-full shadow-[0_0_4px_rgba(59,130,246,0.5)]" />
       )}
       {/* Drop indicator - right */}
       {dropIndicator === 'right' && (
-        <div className="absolute right-0 top-0 bottom-0 w-1 bg-blue-500 translate-x-2 z-20 rounded" />
+        <div className="absolute right-0 top-0 bottom-0 w-0.5 bg-blue-500 translate-x-1.5 z-20 rounded-full shadow-[0_0_4px_rgba(59,130,246,0.5)]" />
       )}
 
       {/* Render placeholder rectangles for each element */}

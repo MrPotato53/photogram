@@ -20,6 +20,10 @@ interface CropOverlayProps {
     newHeight: number;
   }) => void;
   onCancel: () => void;
+  // Whether shift is pressed (disables crop rect dragging for Shift+pan mode)
+  shiftPressed: boolean;
+  // Callback for shift+pan element dragging
+  onElementDrag: (x: number, y: number) => void;
   // Snapping context
   snapEnabled: boolean;
   snapSettings: SnapSettings;
@@ -36,6 +40,8 @@ export function CropOverlay({
   aspectRatio,
   onCropConfirm,
   onCancel,
+  shiftPressed,
+  onElementDrag,
   snapEnabled,
   snapSettings,
   elements,
@@ -55,6 +61,13 @@ export function CropOverlay({
 
   // Track previous aspect ratio to detect swaps
   const prevAspectRatio = useRef<number | null>(null);
+
+  // Track croprect at beginning of drag for absolute positioning
+  const dragSnapshot = useRef<{
+    rect: { x: number; y: number; width: number; height: number };
+    centerX: number;
+    centerY: number;
+  } | null>(null);
 
   // Active snap guides during crop operations
   const [activeGuides, setActiveGuides] = useState<Guide[]>([]);
@@ -213,37 +226,54 @@ export function CropOverlay({
     });
   };
 
+  const handleDragStart = () => {
+    dragSnapshot.current = {
+      rect: { ...cropRect },
+      centerX: cropRect.x + cropRect.width / 2,
+      centerY: cropRect.y + cropRect.height / 2,
+    };
+  }
+
   // Handle edge handle drag
   // When aspect ratio is locked, edges also maintain the ratio (scaling proportionally from opposite edge)
   // When free (aspectRatio is null), edges only adjust single dimension
   const handleEdgeDrag = (edge: 'top' | 'bottom' | 'left' | 'right', e: Konva.KonvaEventObject<DragEvent>) => {
     const node = e.target;
-    let newRect = { ...cropRect };
+
+    // Use snapshot for stable reference points to prevent oscillation
+    const snapshot = dragSnapshot.current;
+    if (!snapshot) return;
+
+    const snapRect = snapshot.rect;
+    let newRect = { ...snapRect };
 
     if (aspectRatio !== null) {
       // Locked mode: edge drag maintains aspect ratio
       // Scale proportionally from the opposite edge
+      // Use snapshot values for all reference points to prevent feedback loops
       const isHorizontal = edge === 'left' || edge === 'right';
 
       if (isHorizontal) {
         // Dragging left/right: width changes, height adjusts proportionally
-        const rightEdge = cropRect.x + cropRect.width;
+        // Use snapshot's right edge as fixed anchor
+        const rightEdge = snapRect.x + snapRect.width;
         let newWidth: number;
-        let newX = cropRect.x;
+        let newX = snapRect.x;
 
         if (edge === 'left') {
-          const dragX = node.x();
+          const dragX = node.x() + handleSize / 4; // Account for handle offset
           newX = Math.max(0, Math.min(dragX, rightEdge - 20));
           newWidth = rightEdge - newX;
         } else {
-          newWidth = Math.max(20, Math.min(node.x() - cropRect.x, fullBounds.width - cropRect.x));
+          const dragX = node.x() + handleSize / 4;
+          newWidth = Math.max(20, Math.min(dragX - snapRect.x, fullBounds.width - snapRect.x));
         }
 
         // Calculate new height to maintain aspect ratio
         let newHeight = newWidth / aspectRatio;
 
-        // Center the height change around the current vertical center
-        const centerY = cropRect.y + cropRect.height / 2;
+        // Use SNAPSHOT's center for stable vertical centering
+        const centerY = snapshot.centerY;
         let newY = centerY - newHeight / 2;
 
         // Clamp to bounds and readjust if needed
@@ -254,31 +284,37 @@ export function CropOverlay({
           if (edge === 'left') newX = rightEdge - newWidth;
         }
         if (newY + newHeight > fullBounds.height) {
-          newHeight = fullBounds.height - newY;
-          newWidth = newHeight * aspectRatio;
+          newY = fullBounds.height - newHeight;
+          if (newY < 0) {
+            newY = 0;
+            newHeight = fullBounds.height;
+            newWidth = newHeight * aspectRatio;
+          }
           if (edge === 'left') newX = rightEdge - newWidth;
         }
 
         newRect = { x: newX, y: newY, width: newWidth, height: newHeight };
       } else {
         // Dragging top/bottom: height changes, width adjusts proportionally
-        const bottomEdge = cropRect.y + cropRect.height;
+        // Use snapshot's bottom edge as fixed anchor
+        const bottomEdge = snapRect.y + snapRect.height;
         let newHeight: number;
-        let newY = cropRect.y;
+        let newY = snapRect.y;
 
         if (edge === 'top') {
-          const dragY = node.y();
+          const dragY = node.y() + handleSize / 4; // Account for handle offset
           newY = Math.max(0, Math.min(dragY, bottomEdge - 20));
           newHeight = bottomEdge - newY;
         } else {
-          newHeight = Math.max(20, Math.min(node.y() - cropRect.y, fullBounds.height - cropRect.y));
+          const dragY = node.y() + handleSize / 4;
+          newHeight = Math.max(20, Math.min(dragY - snapRect.y, fullBounds.height - snapRect.y));
         }
 
         // Calculate new width to maintain aspect ratio
         let newWidth = newHeight * aspectRatio;
 
-        // Center the width change around the current horizontal center
-        const centerX = cropRect.x + cropRect.width / 2;
+        // Use SNAPSHOT's center for stable horizontal centering
+        const centerX = snapshot.centerX;
         let newX = centerX - newWidth / 2;
 
         // Clamp to bounds and readjust if needed
@@ -289,8 +325,12 @@ export function CropOverlay({
           if (edge === 'top') newY = bottomEdge - newHeight;
         }
         if (newX + newWidth > fullBounds.width) {
-          newWidth = fullBounds.width - newX;
-          newHeight = newWidth / aspectRatio;
+          newX = fullBounds.width - newWidth;
+          if (newX < 0) {
+            newX = 0;
+            newWidth = fullBounds.width;
+            newHeight = newWidth / aspectRatio;
+          }
           if (edge === 'top') newY = bottomEdge - newHeight;
         }
 
@@ -298,40 +338,45 @@ export function CropOverlay({
       }
     } else {
       // Free mode: edges only adjust single dimension
+      // Still use snapshot for reference edges to prevent jitter
       switch (edge) {
         case 'left': {
-          const newX = node.x();
-          const rightEdge = cropRect.x + cropRect.width;
+          const dragX = node.x() + handleSize / 4;
+          const rightEdge = snapRect.x + snapRect.width;
+          const newX = Math.max(0, Math.min(dragX, rightEdge - 20));
           newRect = {
-            ...cropRect,
-            x: Math.max(0, Math.min(newX, rightEdge - 20)),
-            width: rightEdge - Math.max(0, Math.min(newX, rightEdge - 20)),
+            ...snapRect,
+            x: newX,
+            width: rightEdge - newX,
           };
           break;
         }
         case 'right': {
-          const newWidth = node.x() - cropRect.x;
+          const dragX = node.x() + handleSize / 4;
+          const newWidth = Math.max(20, Math.min(dragX - snapRect.x, fullBounds.width - snapRect.x));
           newRect = {
-            ...cropRect,
-            width: Math.max(20, Math.min(newWidth, fullBounds.width - cropRect.x)),
+            ...snapRect,
+            width: newWidth,
           };
           break;
         }
         case 'top': {
-          const newY = node.y();
-          const bottomEdge = cropRect.y + cropRect.height;
+          const dragY = node.y() + handleSize / 4;
+          const bottomEdge = snapRect.y + snapRect.height;
+          const newY = Math.max(0, Math.min(dragY, bottomEdge - 20));
           newRect = {
-            ...cropRect,
-            y: Math.max(0, Math.min(newY, bottomEdge - 20)),
-            height: bottomEdge - Math.max(0, Math.min(newY, bottomEdge - 20)),
+            ...snapRect,
+            y: newY,
+            height: bottomEdge - newY,
           };
           break;
         }
         case 'bottom': {
-          const newHeight = node.y() - cropRect.y;
+          const dragY = node.y() + handleSize / 4;
+          const newHeight = Math.max(20, Math.min(dragY - snapRect.y, fullBounds.height - snapRect.y));
           newRect = {
-            ...cropRect,
-            height: Math.max(20, Math.min(newHeight, fullBounds.height - cropRect.y)),
+            ...snapRect,
+            height: newHeight,
           };
           break;
         }
@@ -362,6 +407,13 @@ export function CropOverlay({
     const clamped = clampCropRect(newRect);
     setCropRect(clamped);
 
+    // Update snapshot with clamped values to prevent drift during continuous drag
+    dragSnapshot.current = {
+      rect: { ...clamped },
+      centerX: clamped.x + clamped.width / 2,
+      centerY: clamped.y + clamped.height / 2,
+    };
+
     // Reset handle position to match clamped values
     // Apply the same offsets used when rendering the handle
     const handlePos = getHandlePosition(edge, clamped);
@@ -370,9 +422,10 @@ export function CropOverlay({
     node.y(handlePos.y - (isHorizontal ? handleSize : handleSize / 4));
   };
 
-  // Handle edge drag end - clear guides
+  // Handle edge drag end - clear guides and snapshot
   const handleEdgeDragEnd = () => {
     setActiveGuides([]);
+    dragSnapshot.current = null;
   };
 
   // Handle corner handle drag (adjusts both incident edges)
@@ -660,12 +713,47 @@ export function CropOverlay({
     setActiveGuides([]);
   };
 
+  // Track element position for Shift+pan mode
+  // When element is dragged (either by our shift+pan handler or externally), adjust cropRect to compensate
+  const elementPositionRef = useRef({ x: element.x, y: element.y });
+
+  // Watch for element position changes and adjust cropRect to keep it visually stationary
+  useEffect(() => {
+    const deltaX = element.x - elementPositionRef.current.x;
+    const deltaY = element.y - elementPositionRef.current.y;
+
+    if (deltaX !== 0 || deltaY !== 0) {
+      // Element moved, adjust cropRect in opposite direction to keep visual position
+      setCropRect(prev => {
+        const newX = prev.x - deltaX;
+        const newY = prev.y - deltaY;
+        // Clamp within bounds
+        return {
+          ...prev,
+          x: Math.max(0, Math.min(newX, fullBounds.width - prev.width)),
+          y: Math.max(0, Math.min(newY, fullBounds.height - prev.height)),
+        };
+      });
+    }
+    // Always update the ref to track current position
+    elementPositionRef.current = { x: element.x, y: element.y };
+  }, [element.x, element.y, fullBounds.width, fullBounds.height]);
+
   // Handle crop rect drag (move the whole selection)
   const handleCropRectDrag = (e: Konva.KonvaEventObject<DragEvent>) => {
+    // When shift is pressed, don't handle drag - element dragging is handled by CanvasArea
+    if (shiftPressed) {
+      const node = e.target;
+      node.x(cropRect.x);
+      node.y(cropRect.y);
+      return;
+    }
+
     const node = e.target;
     let newX = node.x();
     let newY = node.y();
 
+    // Normal mode: move crop rect over the image
     // Apply snapping if enabled
     if (snapEnabled) {
       // Convert crop rect position to canvas coordinates
@@ -789,7 +877,7 @@ export function CropOverlay({
         listening={false}
       />
 
-      {/* Crop rectangle border - draggable to move selection */}
+      {/* Crop rectangle border - draggable to move selection (disabled when shift pressed for pan mode) */}
       <Rect
         x={cropRect.x}
         y={cropRect.y}
@@ -798,7 +886,7 @@ export function CropOverlay({
         stroke="#ffffff"
         strokeWidth={2}
         dash={[5, 5]}
-        draggable
+        draggable={!shiftPressed}
         onDragMove={handleCropRectDrag}
         onDragEnd={handleCropRectDragEnd}
       />
@@ -820,6 +908,7 @@ export function CropOverlay({
             strokeWidth={2}
             cornerRadius={2}
             draggable
+            onDragStart={() => handleDragStart()}
             onDragMove={(e) => handleEdgeDrag(edge, e)}
             onDragEnd={handleEdgeDragEnd}
           />
@@ -897,6 +986,43 @@ export function CropOverlay({
           listening={false}
         />
       ))}
+
+      {/* Shift+pan drag layer - transparent rect covering full image bounds */}
+      {shiftPressed && (
+        <Rect
+          x={0}
+          y={0}
+          width={fullBounds.width}
+          height={fullBounds.height}
+          fill="transparent"
+          draggable
+          dragBoundFunc={(pos) => {
+            // Constrain so crop rect stays within full bounds
+            // cropRect is relative to fullBounds (0,0)
+            const maxRightward = cropRect.x;
+            const maxLeftward = fullBounds.width - cropRect.x - cropRect.width;
+            const maxDownward = cropRect.y;
+            const maxUpward = fullBounds.height - cropRect.y - cropRect.height;
+
+            return {
+              x: Math.max(-maxLeftward, Math.min(pos.x, maxRightward)),
+              y: Math.max(-maxUpward, Math.min(pos.y, maxDownward)),
+            };
+          }}
+          onDragMove={(e) => {
+            const node = e.target;
+            const deltaX = node.x();
+            const deltaY = node.y();
+
+            // Update element position
+            onElementDrag(element.x + deltaX, element.y + deltaY);
+
+            // Reset node position (cropRect adjustment happens via useEffect)
+            node.x(0);
+            node.y(0);
+          }}
+        />
+      )}
     </Group>
   );
 }

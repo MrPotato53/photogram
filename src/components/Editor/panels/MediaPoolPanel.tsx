@@ -462,6 +462,7 @@ export function MediaPoolPanel() {
     <div
       ref={containerRef}
       tabIndex={0}
+      data-panel="mediaPool"
       className={clsx(
         'p-3 h-full flex flex-col outline-none',
         isDraggingOver && 'bg-blue-500/10'
