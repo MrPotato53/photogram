@@ -255,6 +255,16 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
       if (e.key === 'Escape') {
         if (cropModeElementId) {
+          // Restore original element position if it was moved during Shift+pan
+          if (cropOriginalPositionRef.current) {
+            const originalPos = cropOriginalPositionRef.current;
+            updateElement(cropModeElementId, {
+              x: originalPos.x,
+              y: originalPos.y,
+            });
+          }
+          cropOriginalPositionRef.current = null;
+          setCropShiftPressed(false);
           exitCropMode();
           return;
         }
