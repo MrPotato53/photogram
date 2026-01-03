@@ -72,9 +72,34 @@ export function CropOverlay({
   // Active snap guides during crop operations
   const [activeGuides, setActiveGuides] = useState<Guide[]>([]);
 
-  // Calculate full bounds position in canvas coordinates
+  // Shift+pan drag state - track starting positions to avoid feedback loops
+  const [shiftPanStart, setShiftPanStart] = useState<{
+    rectX: number;
+    rectY: number;
+    elementX: number;
+    elementY: number;
+    cropRect: { x: number; y: number; width: number; height: number };
+    // Full bounds position at drag start (in design coordinates)
+    fullBoundsX: number;
+    fullBoundsY: number;
+    // Canvas coordinates of crop rect for stationary overlay (in design coordinates)
+    cropCanvasX: number;
+    cropCanvasY: number;
+    // Layer scale at drag start (needed because dragBoundFunc works in screen coords)
+    layerScale: number;
+  } | null>(null);
+
+  // Calculate full bounds position in design coordinates
+  // IMPORTANT: These coordinates are in "design space" (fixed at DESIGN_HEIGHT = 1080px height per slide)
+  // They are NOT in screen/pixel coordinates. The Konva Layer applies a scale transform to convert
+  // design coordinates to screen coordinates. This scale can change when the container resizes
+  // (e.g., when panels open/close), but the design coordinates themselves should remain stable.
+  // 
+  // element.x and element.y are in global design coordinates (across all slides, not relative to a single slide)
+  // fullBoundsX/Y represent where the full (uncropped) image would be positioned in design coordinates
   const fullBoundsX = element.x - existingCropX * fullBounds.width;
   const fullBoundsY = element.y - existingCropY * fullBounds.height;
+  
 
   // Helper to convert crop rect to canvas coordinates
   const cropToCanvas = useCallback((rect: { x: number; y: number; width: number; height: number }) => ({
@@ -717,13 +742,26 @@ export function CropOverlay({
   // When element is dragged (either by our shift+pan handler or externally), adjust cropRect to compensate
   const elementPositionRef = useRef({ x: element.x, y: element.y });
 
+  // Ref to store shift+pan start data synchronously (state updates are async and cause dragBoundFunc issues)
+  const shiftPanStartRef = useRef<typeof shiftPanStart>(null);
+
   // Watch for element position changes and adjust cropRect to keep it visually stationary
+  // Skip during active shift+pan drag - we handle that in onDragEnd
   useEffect(() => {
+    // Skip adjustment during shift+pan drag - we'll finalize in onDragEnd
+    if (shiftPanStart) {
+      // Update ref to current position so we don't accumulate deltas after shift+pan ends
+      elementPositionRef.current = { x: element.x, y: element.y };
+      return;
+    }
+
     const deltaX = element.x - elementPositionRef.current.x;
     const deltaY = element.y - elementPositionRef.current.y;
 
     if (deltaX !== 0 || deltaY !== 0) {
       // Element moved, adjust cropRect in opposite direction to keep visual position
+      // Note: deltaX/deltaY are in design coordinates, cropRect is in pixels relative to fullBounds
+      // Since fullBounds.width is in design coordinates, the adjustment is correct
       setCropRect(prev => {
         const newX = prev.x - deltaX;
         const newY = prev.y - deltaY;
@@ -737,7 +775,8 @@ export function CropOverlay({
     }
     // Always update the ref to track current position
     elementPositionRef.current = { x: element.x, y: element.y };
-  }, [element.x, element.y, fullBounds.width, fullBounds.height]);
+  }, [element.x, element.y, fullBounds.width, fullBounds.height, shiftPanStart]);
+
 
   // Handle crop rect drag (move the whole selection)
   const handleCropRectDrag = (e: Konva.KonvaEventObject<DragEvent>) => {
@@ -838,191 +877,310 @@ export function CropOverlay({
   const edges: Array<'top' | 'bottom' | 'left' | 'right'> = ['top', 'bottom', 'left', 'right'];
   const corners: Array<'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'> = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
 
+  // During shift+pan, calculate crop rect position relative to current full bounds
+  // The crop rect stays stationary in canvas coordinates, but full bounds moves
+  const getCropRectForOverlay = () => {
+    if (shiftPanStart) {
+      // Stationary crop rect position in canvas coordinates
+      const stationaryCropX = shiftPanStart.cropCanvasX;
+      const stationaryCropY = shiftPanStart.cropCanvasY;
+      
+      // Current full bounds position in canvas coordinates
+      const currentFullBoundsX = fullBoundsX;
+      const currentFullBoundsY = fullBoundsY;
+      
+      // Crop rect position relative to current full bounds
+      const relativeCropX = stationaryCropX - currentFullBoundsX;
+      const relativeCropY = stationaryCropY - currentFullBoundsY;
+      
+      return {
+        x: relativeCropX,
+        y: relativeCropY,
+        width: shiftPanStart.cropRect.width,
+        height: shiftPanStart.cropRect.height,
+      };
+    }
+    return cropRect;
+  };
+
+  // Render dark overlay - always positioned at current full bounds
+  const overlayCropRect = getCropRectForOverlay();
+
   return (
+    <>
+    {/* Dark overlay - always positioned at current full bounds, crop rect calculated relative to it */}
     <Group x={fullBoundsX} y={fullBoundsY}>
       {/* Dark overlay - top */}
       <Rect
         x={0}
         y={0}
         width={fullBounds.width}
-        height={cropRect.y}
+        height={overlayCropRect.y}
         fill="rgba(0,0,0,0.6)"
         listening={false}
       />
       {/* Dark overlay - bottom */}
       <Rect
         x={0}
-        y={cropRect.y + cropRect.height}
+        y={overlayCropRect.y + overlayCropRect.height}
         width={fullBounds.width}
-        height={fullBounds.height - cropRect.y - cropRect.height}
+        height={fullBounds.height - overlayCropRect.y - overlayCropRect.height}
         fill="rgba(0,0,0,0.6)"
         listening={false}
       />
       {/* Dark overlay - left */}
       <Rect
         x={0}
-        y={cropRect.y}
-        width={cropRect.x}
-        height={cropRect.height}
+        y={overlayCropRect.y}
+        width={overlayCropRect.x}
+        height={overlayCropRect.height}
         fill="rgba(0,0,0,0.6)"
         listening={false}
       />
       {/* Dark overlay - right */}
       <Rect
-        x={cropRect.x + cropRect.width}
-        y={cropRect.y}
-        width={fullBounds.width - cropRect.x - cropRect.width}
-        height={cropRect.height}
+        x={overlayCropRect.x + overlayCropRect.width}
+        y={overlayCropRect.y}
+        width={fullBounds.width - overlayCropRect.x - overlayCropRect.width}
+        height={overlayCropRect.height}
         fill="rgba(0,0,0,0.6)"
         listening={false}
       />
+    </Group>
 
-      {/* Crop rectangle border - draggable to move selection (disabled when shift pressed for pan mode) */}
-      <Rect
-        x={cropRect.x}
-        y={cropRect.y}
-        width={cropRect.width}
-        height={cropRect.height}
-        stroke="#ffffff"
-        strokeWidth={2}
-        dash={[5, 5]}
-        draggable={!shiftPressed}
-        onDragMove={handleCropRectDrag}
-        onDragEnd={handleCropRectDragEnd}
-      />
+    {/* Crop interface Group - only shown when NOT in shift+pan */}
+    {!shiftPanStart && (
+      <Group x={fullBoundsX} y={fullBoundsY}>
+        {/* Crop rectangle border and handles - hide during shift+pan (stationary overlay shows instead) */}
+        <Rect
+          x={cropRect.x}
+          y={cropRect.y}
+          width={cropRect.width}
+          height={cropRect.height}
+          stroke="#ffffff"
+          strokeWidth={2}
+          dash={[5, 5]}
+          draggable={!shiftPressed}
+          onDragMove={handleCropRectDrag}
+          onDragEnd={handleCropRectDragEnd}
+        />
 
-      {/* Edge handles */}
-      {edges.map((edge) => {
-        const pos = getHandlePosition(edge, cropRect);
-        const isHorizontal = edge === 'left' || edge === 'right';
+        {/* Edge handles */}
+        {edges.map((edge) => {
+          const pos = getHandlePosition(edge, cropRect);
+          const isHorizontal = edge === 'left' || edge === 'right';
 
-        return (
-          <Rect
-            key={edge}
-            x={pos.x - (isHorizontal ? handleSize / 4 : handleSize)}
-            y={pos.y - (isHorizontal ? handleSize : handleSize / 4)}
-            width={isHorizontal ? handleSize / 2 : handleSize * 2}
-            height={isHorizontal ? handleSize * 2 : handleSize / 2}
-            fill={handleColor}
-            stroke={handleStroke}
-            strokeWidth={2}
-            cornerRadius={2}
-            draggable
-            onDragStart={() => handleDragStart()}
-            onDragMove={(e) => handleEdgeDrag(edge, e)}
-            onDragEnd={handleEdgeDragEnd}
-          />
-        );
-      })}
+          return (
+            <Rect
+              key={edge}
+              x={pos.x - (isHorizontal ? handleSize / 4 : handleSize)}
+              y={pos.y - (isHorizontal ? handleSize : handleSize / 4)}
+              width={isHorizontal ? handleSize / 2 : handleSize * 2}
+              height={isHorizontal ? handleSize * 2 : handleSize / 2}
+              fill={handleColor}
+              stroke={handleStroke}
+              strokeWidth={2}
+              cornerRadius={2}
+              draggable
+              onDragStart={() => handleDragStart()}
+              onDragMove={(e) => handleEdgeDrag(edge, e)}
+              onDragEnd={handleEdgeDragEnd}
+            />
+          );
+        })}
 
-      {/* Corner handles */}
-      {corners.map((corner) => {
-        const pos = getCornerPosition(corner, cropRect);
+        {/* Corner handles */}
+        {corners.map((corner) => {
+          const pos = getCornerPosition(corner, cropRect);
 
-        return (
-          <Rect
-            key={corner}
-            x={pos.x - handleSize / 2}
-            y={pos.y - handleSize / 2}
-            width={handleSize}
-            height={handleSize}
-            fill={handleColor}
-            stroke={handleStroke}
-            strokeWidth={2}
-            cornerRadius={2}
-            draggable
-            onDragMove={(e) => handleCornerDrag(corner, e)}
-            onDragEnd={handleCornerDragEnd}
-          />
-        );
-      })}
+          return (
+            <Rect
+              key={corner}
+              x={pos.x - handleSize / 2}
+              y={pos.y - handleSize / 2}
+              width={handleSize}
+              height={handleSize}
+              fill={handleColor}
+              stroke={handleStroke}
+              strokeWidth={2}
+              cornerRadius={2}
+              draggable
+              onDragMove={(e) => handleCornerDrag(corner, e)}
+              onDragEnd={handleCornerDragEnd}
+            />
+          );
+        })}
 
-      {/* Rule of thirds grid lines inside crop area */}
-      <Rect
-        x={cropRect.x + cropRect.width / 3}
-        y={cropRect.y}
-        width={1}
-        height={cropRect.height}
-        fill="rgba(255,255,255,0.4)"
-        listening={false}
-      />
-      <Rect
-        x={cropRect.x + (cropRect.width * 2) / 3}
-        y={cropRect.y}
-        width={1}
-        height={cropRect.height}
-        fill="rgba(255,255,255,0.4)"
-        listening={false}
-      />
-      <Rect
-        x={cropRect.x}
-        y={cropRect.y + cropRect.height / 3}
-        width={cropRect.width}
-        height={1}
-        fill="rgba(255,255,255,0.4)"
-        listening={false}
-      />
-      <Rect
-        x={cropRect.x}
-        y={cropRect.y + (cropRect.height * 2) / 3}
-        width={cropRect.width}
-        height={1}
-        fill="rgba(255,255,255,0.4)"
-        listening={false}
-      />
-
-      {/* Active snap guides */}
-      {activeGuides.map((guide, index) => (
-        <Line
-          key={`crop-guide-${index}`}
-          points={
-            guide.orientation === 'vertical'
-              ? [guide.position - fullBoundsX, -1000, guide.position - fullBoundsX, fullBounds.height + 1000]
-              : [-1000, guide.position - fullBoundsY, fullBounds.width + 1000, guide.position - fullBoundsY]
-          }
-          stroke="#3b82f6"
-          strokeWidth={1}
-          dash={[4, 4]}
+        {/* Rule of thirds grid lines inside crop area */}
+        <Rect
+          x={cropRect.x + cropRect.width / 3}
+          y={cropRect.y}
+          width={1}
+          height={cropRect.height}
+          fill="rgba(255,255,255,0.4)"
           listening={false}
         />
-      ))}
+        <Rect
+          x={cropRect.x + (cropRect.width * 2) / 3}
+          y={cropRect.y}
+          width={1}
+          height={cropRect.height}
+          fill="rgba(255,255,255,0.4)"
+          listening={false}
+        />
+        <Rect
+          x={cropRect.x}
+          y={cropRect.y + cropRect.height / 3}
+          width={cropRect.width}
+          height={1}
+          fill="rgba(255,255,255,0.4)"
+          listening={false}
+        />
+        <Rect
+          x={cropRect.x}
+          y={cropRect.y + (cropRect.height * 2) / 3}
+          width={cropRect.width}
+          height={1}
+          fill="rgba(255,255,255,0.4)"
+          listening={false}
+        />
 
-      {/* Shift+pan drag layer - transparent rect covering full image bounds */}
-      {shiftPressed && (
+        {/* Active snap guides */}
+        {activeGuides.map((guide, index) => (
+          <Line
+            key={`crop-guide-${index}`}
+            points={
+              guide.orientation === 'vertical'
+                ? [guide.position - fullBoundsX, -1000, guide.position - fullBoundsX, fullBounds.height + 1000]
+                : [-1000, guide.position - fullBoundsY, fullBounds.width + 1000, guide.position - fullBoundsY]
+            }
+            stroke="#3b82f6"
+            strokeWidth={1}
+            dash={[4, 4]}
+            listening={false}
+          />
+        ))}
+      </Group>
+    )}
+
+    {/* Shift+pan drag layer - OUTSIDE the Group to avoid position feedback loops */}
+    {shiftPressed && (
+      <Rect
+        x={shiftPanStart?.rectX ?? (element.x - existingCropX * fullBounds.width)}
+        y={shiftPanStart?.rectY ?? (element.y - existingCropY * fullBounds.height)}
+        width={fullBounds.width}
+        height={fullBounds.height}
+        fill="transparent"
+        draggable
+        onDragStart={(e) => {
+          const node = e.target;
+          const layer = node.getLayer();
+          const layerScale = layer?.scaleX() ?? 1;
+          const actualRectX = node.x();
+          const actualRectY = node.y();
+
+          const startData = {
+            rectX: actualRectX,
+            rectY: actualRectY,
+            elementX: element.x,
+            elementY: element.y,
+            cropRect: { ...cropRect },
+            fullBoundsX: actualRectX,
+            fullBoundsY: actualRectY,
+            cropCanvasX: actualRectX + cropRect.x,
+            cropCanvasY: actualRectY + cropRect.y,
+            layerScale,
+          };
+
+          // Set ref SYNCHRONOUSLY so dragBoundFunc has immediate access
+          shiftPanStartRef.current = startData;
+          // Also set state for React re-renders (async, but needed for UI)
+          setShiftPanStart(startData);
+        }}
+        dragBoundFunc={(pos) => {
+          // CRITICAL: dragBoundFunc receives and returns SCREEN coordinates (stage space)
+          // But our design values (startX, cropRect, fullBounds) are in DESIGN coordinates
+          // We must convert everything to screen coords, do the math, then return screen coords
+          const start = shiftPanStartRef.current;
+          if (!start) return pos;
+
+          const scale = start.layerScale;
+          const startXScreen = start.rectX * scale;
+          const startYScreen = start.rectY * scale;
+          const startCrop = start.cropRect;
+
+          // Calculate bounds in design coords, then convert to screen
+          const minDeltaXScreen = (startCrop.x + startCrop.width - fullBounds.width) * scale;
+          const maxDeltaXScreen = startCrop.x * scale;
+          const minDeltaYScreen = (startCrop.y + startCrop.height - fullBounds.height) * scale;
+          const maxDeltaYScreen = startCrop.y * scale;
+
+          // Calculate and clamp delta in screen coordinates
+          const deltaXScreen = pos.x - startXScreen;
+          const deltaYScreen = pos.y - startYScreen;
+          const clampedDeltaXScreen = Math.max(minDeltaXScreen, Math.min(deltaXScreen, maxDeltaXScreen));
+          const clampedDeltaYScreen = Math.max(minDeltaYScreen, Math.min(deltaYScreen, maxDeltaYScreen));
+
+          return {
+            x: startXScreen + clampedDeltaXScreen,
+            y: startYScreen + clampedDeltaYScreen,
+          };
+        }}
+        onDragMove={(e) => {
+          const start = shiftPanStartRef.current;
+          if (!start) return;
+
+          const node = e.target;
+          const deltaX = node.x() - start.rectX;
+          const deltaY = node.y() - start.rectY;
+
+          // Update element position: when full bounds moves by delta, element moves by same delta
+          onElementDrag(start.elementX + deltaX, start.elementY + deltaY);
+        }}
+        onDragEnd={(e) => {
+          const start = shiftPanStartRef.current;
+          if (start) {
+            const node = e.target;
+            const deltaX = node.x() - start.rectX;
+            const deltaY = node.y() - start.rectY;
+
+            // Finalize cropRect: when full bounds moves by delta, crop rect moves opposite
+            const startCrop = start.cropRect;
+            setCropRect({
+              ...startCrop,
+              x: Math.max(0, Math.min(startCrop.x - deltaX, fullBounds.width - startCrop.width)),
+              y: Math.max(0, Math.min(startCrop.y - deltaY, fullBounds.height - startCrop.height)),
+            });
+
+            elementPositionRef.current = { x: element.x, y: element.y };
+          }
+          shiftPanStartRef.current = null;
+          setShiftPanStart(null);
+        }}
+      />
+    )}
+
+    {/* Stationary crop overlay during shift+pan drag - rendered at fixed canvas position */}
+    {shiftPanStart && (
+      <Group x={shiftPanStart.cropCanvasX} y={shiftPanStart.cropCanvasY}>
+        {/* Crop rect border - stationary during drag */}
         <Rect
           x={0}
           y={0}
-          width={fullBounds.width}
-          height={fullBounds.height}
-          fill="transparent"
-          draggable
-          dragBoundFunc={(pos) => {
-            // Constrain so crop rect stays within full bounds
-            // cropRect is relative to fullBounds (0,0)
-            const maxRightward = cropRect.x;
-            const maxLeftward = fullBounds.width - cropRect.x - cropRect.width;
-            const maxDownward = cropRect.y;
-            const maxUpward = fullBounds.height - cropRect.y - cropRect.height;
-
-            return {
-              x: Math.max(-maxLeftward, Math.min(pos.x, maxRightward)),
-              y: Math.max(-maxUpward, Math.min(pos.y, maxDownward)),
-            };
-          }}
-          onDragMove={(e) => {
-            const node = e.target;
-            const deltaX = node.x();
-            const deltaY = node.y();
-
-            // Update element position
-            onElementDrag(element.x + deltaX, element.y + deltaY);
-
-            // Reset node position (cropRect adjustment happens via useEffect)
-            node.x(0);
-            node.y(0);
-          }}
+          width={shiftPanStart.cropRect.width}
+          height={shiftPanStart.cropRect.height}
+          stroke="#ffffff"
+          strokeWidth={2}
+          dash={[5, 5]}
+          listening={false}
         />
-      )}
-    </Group>
+        {/* Rule of thirds grid */}
+        <Rect x={shiftPanStart.cropRect.width / 3} y={0} width={1} height={shiftPanStart.cropRect.height} fill="rgba(255,255,255,0.4)" listening={false} />
+        <Rect x={(shiftPanStart.cropRect.width * 2) / 3} y={0} width={1} height={shiftPanStart.cropRect.height} fill="rgba(255,255,255,0.4)" listening={false} />
+        <Rect x={0} y={shiftPanStart.cropRect.height / 3} width={shiftPanStart.cropRect.width} height={1} fill="rgba(255,255,255,0.4)" listening={false} />
+        <Rect x={0} y={(shiftPanStart.cropRect.height * 2) / 3} width={shiftPanStart.cropRect.width} height={1} fill="rgba(255,255,255,0.4)" listening={false} />
+      </Group>
+    )}
+  </>
   );
 }
