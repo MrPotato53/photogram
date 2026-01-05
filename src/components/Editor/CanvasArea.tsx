@@ -19,6 +19,11 @@ interface CanvasAreaProps {
 const DESIGN_HEIGHT = 1080;
 const MAX_SLIDES = 20;
 
+// Zoom constraints
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 3;
+const ZOOM_STEP = 0.1;
+
 export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -88,8 +93,43 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
   // Track active anchor for transform snapping
   const activeAnchorRef = useRef<string | null>(null);
 
+  // Auto-scroll on drag refs
+  const autoScrollRef = useRef<number | null>(null); // Animation frame ID
+  const dragScrollSpeedRef = useRef<number>(0); // Current scroll speed (pixels per frame)
+  const isDraggingRef = useRef<boolean>(false); // Track if we're currently dragging
+  const lastMouseXRef = useRef<number | null>(null); // Last known mouse X position
+
+  // Auto-scroll animation loop
+  const animateScroll = useCallback(() => {
+    if (dragScrollSpeedRef.current !== 0 && scrollContainerRef.current) {
+      scrollContainerRef.current.scrollLeft += dragScrollSpeedRef.current;
+      autoScrollRef.current = requestAnimationFrame(animateScroll);
+    } else {
+      autoScrollRef.current = null;
+    }
+  }, []);
+
+  // Start auto-scroll animation if not already running
+  const startAutoScroll = useCallback(() => {
+    if (autoScrollRef.current === null && dragScrollSpeedRef.current !== 0) {
+      autoScrollRef.current = requestAnimationFrame(animateScroll);
+    }
+  }, [animateScroll]);
+
+  // Stop auto-scroll animation
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollRef.current !== null) {
+      cancelAnimationFrame(autoScrollRef.current);
+      autoScrollRef.current = null;
+    }
+    dragScrollSpeedRef.current = 0;
+  }, []);
+
   // Track original element position when entering crop mode (for cancellation)
   const cropOriginalPositionRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Zoom state for canvas
+  const [zoomLevel, setZoomLevel] = useState(1);
 
   // Refs for drop handling (to avoid stale closures in always-attached listener)
   const dropStateRef = useRef({
@@ -98,6 +138,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     numSlides: 0,
     canvasSize: { width: 0, height: 0 },
     scale: 1,
+    zoomLevel: 1,
     designSize: { width: 0, height: 0 },
     totalDesignWidth: 0,
     elements: [] as Element[],
@@ -111,11 +152,12 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       numSlides,
       canvasSize,
       scale,
+      zoomLevel,
       designSize,
       totalDesignWidth,
       elements,
     };
-  }, [draggingMediaId, project, numSlides, canvasSize, scale, designSize, totalDesignWidth, elements]);
+  }, [draggingMediaId, project, numSlides, canvasSize, scale, zoomLevel, designSize, totalDesignWidth, elements]);
 
   // Crop aspect ratio state
   const [cropAspectRatio, setCropAspectRatio] = useState<number | null>(null);
@@ -322,39 +364,121 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     }
   }, [cropModeElementId]);
 
+  // Handle Cmd/Ctrl + scroll for zoom (relative to center of viewport)
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      if (e.metaKey || e.ctrlKey) {
+        e.preventDefault();
+        
+        // Get the center point of the visible viewport before zoom
+        const viewportCenterX = container.scrollLeft + container.clientWidth / 2;
+        const viewportCenterY = container.scrollTop + container.clientHeight / 2;
+        
+        // Calculate what point in the canvas this corresponds to (in unzoomed coordinates)
+        const canvasX = (viewportCenterX - 24) / zoomLevel; // 24px is left padding
+        const canvasY = viewportCenterY / zoomLevel;
+        
+        // Normalize scroll delta and apply zoom
+        const zoomDelta = -e.deltaY * 0.002;
+        const newZoomLevel = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomLevel + zoomDelta));
+        
+        if (newZoomLevel !== zoomLevel) {
+          setZoomLevel(newZoomLevel);
+          
+          // After zoom, adjust scroll to keep the same point centered
+          // Use requestAnimationFrame to ensure zoom state has updated
+          requestAnimationFrame(() => {
+            if (!scrollContainerRef.current) return;
+            const newContainer = scrollContainerRef.current;
+            
+            // Calculate new scroll position to keep the same canvas point centered
+            const newScrollLeft = canvasX * newZoomLevel + 24 - newContainer.clientWidth / 2;
+            const newScrollTop = canvasY * newZoomLevel - newContainer.clientHeight / 2;
+            
+            newContainer.scrollTo({
+              left: Math.max(0, newScrollLeft),
+              top: Math.max(0, newScrollTop),
+              behavior: 'auto', // Instant scroll for zoom
+            });
+          });
+        }
+      }
+    };
+
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    return () => container.removeEventListener('wheel', handleWheel);
+  }, [zoomLevel]);
+
   // Scroll to current slide when it changes (only if not fully visible)
   useEffect(() => {
-    if (scrollContainerRef.current && canvasSize.width > 0) {
+    if (scrollContainerRef.current && canvasSize.width > 0 && stageContainerRef.current) {
       const container = scrollContainerRef.current;
+      const stageContainer = stageContainerRef.current;
       const padding = 24; // Left/right padding on stage container
 
-      // Calculate the slide's position in screen coordinates
-      const slideLeft = padding + currentSlideIndex * canvasSize.width;
-      const slideRight = slideLeft + canvasSize.width;
+      // Calculate the slide's position in screen coordinates (accounting for zoom)
+      const slideScreenWidth = canvasSize.width * zoomLevel;
+      const slideLeft = padding + currentSlideIndex * slideScreenWidth;
+
+      // Get the stage container's position relative to the scroll container's content area
+      // When content is centered, we need to account for the offset
+      const stageContainerRect = stageContainer.getBoundingClientRect();
+      const scrollContainerRect = container.getBoundingClientRect();
+      
+      // Calculate where the stage container starts in scroll coordinates
+      // scrollLeft gives us the scroll position, and the difference in getBoundingClientRect
+      // gives us the visual offset (which accounts for centering)
+      const stageOffsetInScroll = stageContainerRect.left - scrollContainerRect.left + container.scrollLeft;
+      
+      // Calculate slide position in scroll container coordinates
+      const slideLeftInScroll = stageOffsetInScroll + slideLeft - padding;
+      const slideRightInScroll = slideLeftInScroll + slideScreenWidth;
 
       // Get the visible area
       const visibleLeft = container.scrollLeft;
       const visibleRight = container.scrollLeft + container.clientWidth;
+      const visibleWidth = container.clientWidth;
 
       // Check if slide is off-screen in either direction
-      const isOffLeft = slideLeft < visibleLeft;
-      const isOffRight = slideRight > visibleRight;
+      const isOffLeft = slideLeftInScroll < visibleLeft;
+      const isOffRight = slideRightInScroll > visibleRight;
 
       if (isOffLeft) {
-        // Slide is off to the left - align to left edge
-        container.scrollTo({
-          left: slideLeft - padding,
-          behavior: 'smooth',
-        });
+        // Slide is off to the left
+        // If slide is larger than viewport, align left edge
+        if (slideScreenWidth > visibleWidth) {
+          container.scrollTo({
+            left: slideLeftInScroll,
+            behavior: 'smooth',
+          });
+        } else {
+          // Slide fits - align to left edge
+          container.scrollTo({
+            left: slideLeftInScroll,
+            behavior: 'smooth',
+          });
+        }
       } else if (isOffRight) {
-        // Slide is off to the right - align to right edge
-        container.scrollTo({
-          left: Math.max(0, slideRight - container.clientWidth + padding),
-          behavior: 'smooth',
-        });
+        // Slide is off to the right
+        if (slideScreenWidth > visibleWidth) {
+          // Slide is larger than viewport - align left edge
+          container.scrollTo({
+            left: slideLeftInScroll,
+            behavior: 'smooth',
+          });
+        } else {
+          // Slide fits - align to right edge with padding
+          container.scrollTo({
+            left: Math.max(0, slideRightInScroll - visibleWidth + padding),
+            behavior: 'smooth',
+          });
+        }
       }
     }
-  }, [currentSlideIndex, canvasSize.width]);
+  }, [currentSlideIndex, canvasSize.width, zoomLevel]);
 
   // Handle drop of media onto canvas via window mouseup (always attached, reads from refs)
   useEffect(() => {
@@ -407,8 +531,9 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       }
 
       // Convert to design coordinates (global across all slides)
-      const dropX = dropScreenX / state.scale;
-      const dropY = dropScreenY / state.scale;
+      // Account for zoom level in coordinate conversion
+      const dropX = dropScreenX / (state.scale * state.zoomLevel);
+      const dropY = dropScreenY / (state.scale * state.zoomLevel);
 
       // Check if dropping on a placeholder frame
       const placeholderFrame = state.elements.find((el) => {
@@ -525,7 +650,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       if (stage) {
         const pointerPos = stage.getPointerPosition();
         if (pointerPos) {
-          const designX = pointerPos.x / scale;
+          const designX = pointerPos.x / (scale * zoomLevel);
           const slideIndex = Math.floor(designX / designSize.width);
           if (slideIndex >= 0 && slideIndex < numSlides) {
             setCurrentSlide(slideIndex);
@@ -567,6 +692,72 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     [totalDesignWidth, designSize.height]
   );
 
+  // Global mouse move handler for auto-scroll when cursor leaves window
+  useEffect(() => {
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      if (!isDraggingRef.current || !scrollContainerRef.current) return;
+
+      const scrollContainer = scrollContainerRef.current;
+      const scrollRect = scrollContainer.getBoundingClientRect();
+      const mouseX = e.clientX;
+      lastMouseXRef.current = mouseX;
+
+      // Get visible viewport edges in screen coordinates
+      const visibleLeft = scrollRect.left;
+      const visibleRight = scrollRect.right;
+
+      // Edge zone: ~100px from container edge
+      const edgeZone = 100;
+      // Max speed: ~2 slides/second = 2 * canvasSize.width pixels per second
+      // At 60fps, that's about 2 * canvasSize.width / 60 pixels per frame
+      const maxSpeed = (2 * canvasSize.width * zoomLevel) / 60;
+
+      let scrollSpeed = 0;
+
+      // Check if cursor is outside the container (with small tolerance for edge pixels)
+      // Use <= and >= to handle exact edge pixels in fullscreen mode
+      const tolerance = 1; // 1px tolerance for edge detection
+      const isOutsideLeft = mouseX <= visibleLeft + tolerance;
+      const isOutsideRight = mouseX >= visibleRight - tolerance;
+      const isInside = !isOutsideLeft && !isOutsideRight;
+
+      if (isInside) {
+        // Cursor is inside - normal edge detection
+        const distanceToLeft = mouseX - visibleLeft;
+        if (distanceToLeft < edgeZone && distanceToLeft >= 0) {
+          const proximity = 1 - (distanceToLeft / edgeZone);
+          scrollSpeed = -maxSpeed * proximity;
+        }
+
+        const distanceToRight = visibleRight - mouseX;
+        if (distanceToRight < edgeZone && distanceToRight >= 0) {
+          const proximity = 1 - (distanceToRight / edgeZone);
+          scrollSpeed = Math.max(scrollSpeed, maxSpeed * proximity);
+        }
+      } else {
+        // Cursor is outside (or at exact edge) - continue scrolling in the direction it left
+        if (isOutsideLeft) {
+          // Cursor left to the left - scroll left at max speed
+          scrollSpeed = -maxSpeed;
+        } else if (isOutsideRight) {
+          // Cursor left to the right - scroll right at max speed
+          scrollSpeed = maxSpeed;
+        }
+      }
+
+      // Update scroll speed and start animation if needed
+      dragScrollSpeedRef.current = scrollSpeed;
+      if (scrollSpeed !== 0) {
+        startAutoScroll();
+      } else {
+        stopAutoScroll();
+      }
+    };
+
+    window.addEventListener('mousemove', handleGlobalMouseMove);
+    return () => window.removeEventListener('mousemove', handleGlobalMouseMove);
+  }, [zoomLevel, canvasSize.width, startAutoScroll, stopAutoScroll]);
+
   // Handle drag with snapping
   const handleDragMove = useCallback(
     (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
@@ -605,9 +796,52 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       const clamped = clampToVisibleBounds(newX, newY, element.width, element.height);
       node.x(clamped.x);
       node.y(clamped.y);
+
+      // Update last mouse position for auto-scroll
+      lastMouseXRef.current = e.evt.clientX;
+      
+      // Trigger auto-scroll update (the global mousemove handler will handle it)
+      // But we also check here in case the event hasn't fired yet
+      if (scrollContainerRef.current) {
+        const scrollContainer = scrollContainerRef.current;
+        const scrollRect = scrollContainer.getBoundingClientRect();
+        const mouseX = e.evt.clientX;
+
+        const visibleLeft = scrollRect.left;
+        const visibleRight = scrollRect.right;
+        const edgeZone = 100;
+        const maxSpeed = (2 * canvasSize.width * zoomLevel) / 60;
+
+        let scrollSpeed = 0;
+
+        const distanceToLeft = mouseX - visibleLeft;
+        if (distanceToLeft < edgeZone && distanceToLeft >= 0) {
+          const proximity = 1 - (distanceToLeft / edgeZone);
+          scrollSpeed = -maxSpeed * proximity;
+        }
+
+        const distanceToRight = visibleRight - mouseX;
+        if (distanceToRight < edgeZone && distanceToRight >= 0) {
+          const proximity = 1 - (distanceToRight / edgeZone);
+          scrollSpeed = Math.max(scrollSpeed, maxSpeed * proximity);
+        }
+
+        dragScrollSpeedRef.current = scrollSpeed;
+        if (scrollSpeed !== 0) {
+          startAutoScroll();
+        } else {
+          stopAutoScroll();
+        }
+      }
     },
-    [elements, snapEnabled, snapSettings, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds]
+    [elements, snapEnabled, snapSettings, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds, scale, zoomLevel, canvasSize.width, startAutoScroll, stopAutoScroll]
   );
+
+  // Handle drag start
+  const handleDragStart = useCallback(() => {
+    isDraggingRef.current = true;
+    lastMouseXRef.current = null;
+  }, []);
 
   // Handle drag end
   const handleDragEnd = useCallback(
@@ -615,6 +849,11 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       const node = e.target;
       const element = elements.find((el) => el.id === elementId);
       if (!element) return;
+
+      // Stop auto-scroll and reset drag state
+      stopAutoScroll();
+      isDraggingRef.current = false;
+      lastMouseXRef.current = null;
 
       const newX = node.x();
       const newY = node.y();
@@ -630,7 +869,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         setCurrentSlide(slideIndex);
       }
     },
-    [elements, updateElement, setActiveGuides, clampToVisibleBounds, designSize.width, numSlides, setCurrentSlide]
+    [elements, updateElement, setActiveGuides, clampToVisibleBounds, designSize.width, numSlides, setCurrentSlide, stopAutoScroll]
   );
 
   // Handle transform end
@@ -823,8 +1062,8 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       const stage = e.target.getStage();
       const pointerPos = stage?.getPointerPosition();
       const designPos = pointerPos ? {
-        x: pointerPos.x / scale,
-        y: pointerPos.y / scale,
+        x: pointerPos.x / (scale * zoomLevel),
+        y: pointerPos.y / (scale * zoomLevel),
       } : { x: 0, y: 0 };
 
       // Calculate which slide was clicked
@@ -1121,7 +1360,10 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
   // Check if content should be centered (when it doesn't overflow)
   const containerWidth = containerRef.current?.clientWidth || 0;
-  const contentFits = totalCanvasWidth + 48 < containerWidth;
+  const containerHeight = containerRef.current?.clientHeight || 0;
+  const contentFitsWidth = totalCanvasWidth * zoomLevel + 48 < containerWidth;
+  const contentFitsHeight = canvasSize.height * zoomLevel + 40 < containerHeight; // 40 = paddingTop + paddingBottom
+  const contentFits = contentFitsWidth && contentFitsHeight;
 
   return (
     <div
@@ -1129,18 +1371,18 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       className="absolute inset-0 flex flex-col overflow-hidden"
       onContextMenu={handleContextMenu}
     >
-      {/* Horizontal scrolling canvas container */}
+      {/* Scrolling canvas container - overflow-auto for zoom support */}
       <div
         ref={scrollContainerRef}
-        className={`flex-1 overflow-x-auto overflow-y-hidden flex items-center ${contentFits ? 'justify-center' : ''}`}
+        className={`flex-1 overflow-auto flex ${contentFits || zoomLevel <= 1 ? 'items-center justify-center' : 'items-start'} ${contentFits && zoomLevel <= 1 ? '' : ''}`}
         style={{ paddingTop: 30, paddingBottom: 10 }}
       >
         <div
           ref={stageContainerRef}
           className="relative"
           style={{
-            width: totalCanvasWidth + 48,
-            height: canvasSize.height,
+            width: totalCanvasWidth * zoomLevel + 48,
+            height: canvasSize.height * zoomLevel,
             paddingLeft: 24,
             paddingRight: 24,
             flexShrink: 0,
@@ -1152,7 +1394,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
               key={index}
               className="absolute -top-5 group"
               style={{
-                left: 24 + index * canvasSize.width + canvasSize.width / 2,
+                left: 24 + (index * canvasSize.width + canvasSize.width / 2) * zoomLevel,
                 transform: 'translateX(-50%)',
               }}
             >
@@ -1190,8 +1432,8 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
             style={{
               left: 24,
               top: 0,
-              width: totalCanvasWidth,
-              height: canvasSize.height,
+              width: totalCanvasWidth * zoomLevel,
+              height: canvasSize.height * zoomLevel,
             }}
           />
 
@@ -1199,13 +1441,13 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
           {canvasSize.width > 0 && canvasSize.height > 0 && (
             <Stage
               ref={stageRef}
-              width={totalCanvasWidth}
-              height={canvasSize.height}
+              width={totalCanvasWidth * zoomLevel}
+              height={canvasSize.height * zoomLevel}
               style={{ position: 'absolute', left: 24, top: 0 }}
               onClick={handleStageClick}
               onContextMenu={handleStageContextMenu}
             >
-              <Layer scaleX={scale} scaleY={scale}>
+              <Layer scaleX={scale * zoomLevel} scaleY={scale * zoomLevel}>
                 {/* Render all elements sorted by zIndex */}
                 {[...elements]
                   .sort((a, b) => a.zIndex - b.zIndex)
@@ -1230,6 +1472,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
                           draggable={!element.locked && !cropModeElementId}
                           onClick={(e) => handleElementClick(element.id, e)}
                           onTap={(e) => handleElementClick(element.id, e as unknown as Konva.KonvaEventObject<MouseEvent>)}
+                          onDragStart={handleDragStart}
                           onDragMove={(e) => handleDragMove(element.id, e)}
                           onDragEnd={(e) => handleDragEnd(element.id, e)}
                           onTransformEnd={(e) => handleTransformEnd(element.id, e)}
@@ -1240,7 +1483,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
                             height={element.height}
                             fill="#e5e7eb"
                             stroke={isSelected ? '#3b82f6' : '#d1d5db'}
-                            strokeWidth={isSelected ? 2 : 1}
+                            strokeWidth={isSelected ? 2 / zoomLevel : 1 / zoomLevel}
                             strokeScaleEnabled={false}
                             dash={isSelected ? undefined : [8, 4]}
                           />
@@ -1336,11 +1579,12 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
                         draggable={!element.locked && !cropModeElementId}
                         onClick={(e) => handleElementClick(element.id, e)}
                         onTap={(e) => handleElementClick(element.id, e as unknown as Konva.KonvaEventObject<MouseEvent>)}
+                        onDragStart={handleDragStart}
                         onDragMove={(e) => handleDragMove(element.id, e)}
                         onDragEnd={(e) => handleDragEnd(element.id, e)}
                         onTransformEnd={(e) => handleTransformEnd(element.id, e)}
                         stroke={isSelected ? '#3b82f6' : undefined}
-                        strokeWidth={isSelected ? 2 : 0}
+                        strokeWidth={isSelected ? 2 / zoomLevel : 0}
                         strokeScaleEnabled={false}
                       />
                     );
@@ -1354,7 +1598,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
                       key={`separator-${index}`}
                       points={[slideX, 0, slideX, designSize.height]}
                       stroke="#374151"
-                      strokeWidth={2 / scale}
+                      strokeWidth={2 / (scale * zoomLevel)}
                     />
                   );
                 })}
@@ -1377,7 +1621,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
                             : [0, guide.position, totalDesignWidth, guide.position]
                         }
                         stroke={colors[guide.type]}
-                        strokeWidth={1 / scale}
+                        strokeWidth={1 / (scale * zoomLevel)}
                       />
                     );
                   }
@@ -1393,8 +1637,8 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
                         : [0, guide.position, totalDesignWidth, guide.position]
                     }
                     stroke="#3b82f6"
-                    strokeWidth={1 / scale}
-                    dash={[4 / scale, 4 / scale]}
+                    strokeWidth={1 / (scale * zoomLevel)}
+                    dash={[4 / (scale * zoomLevel), 4 / (scale * zoomLevel)]}
                   />
                 ))}
 
@@ -1456,8 +1700,8 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
             <div
               className="absolute flex flex-col gap-2"
               style={{
-                left: 24 + totalCanvasWidth + 8,
-                top: canvasSize.height / 2 - 36,
+                left: 24 + totalCanvasWidth * zoomLevel + 8,
+                top: (canvasSize.height * zoomLevel) / 2 - 36,
               }}
             >
               {/* Add empty slide button */}
@@ -1505,6 +1749,38 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         </div>
       </div>
 
+      {/* Zoom controls */}
+      <div className="absolute bottom-4 right-4 flex items-center gap-1 bg-gray-800 rounded px-2 py-1 shadow-lg z-10">
+        <button
+          onClick={() => setZoomLevel((z) => Math.max(MIN_ZOOM, z - ZOOM_STEP))}
+          className="px-2 py-1 text-white hover:bg-gray-700 rounded transition-colors"
+          title="Zoom out"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+          </svg>
+        </button>
+        <span className="text-xs text-gray-300 min-w-[3rem] text-center">
+          {Math.round(zoomLevel * 100)}%
+        </span>
+        <button
+          onClick={() => setZoomLevel((z) => Math.min(MAX_ZOOM, z + ZOOM_STEP))}
+          className="px-2 py-1 text-white hover:bg-gray-700 rounded transition-colors"
+          title="Zoom in"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+          </svg>
+        </button>
+        <div className="w-px h-4 bg-gray-600 mx-1" />
+        <button
+          onClick={() => setZoomLevel(1)}
+          className="px-2 py-1 text-xs text-gray-300 hover:bg-gray-700 rounded transition-colors"
+          title="Reset zoom"
+        >
+          Reset
+        </button>
+      </div>
 
       {/* Crop toolbar */}
       {cropModeElementId && croppingFullBounds && (
