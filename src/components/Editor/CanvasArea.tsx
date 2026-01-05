@@ -21,7 +21,7 @@ const MAX_SLIDES = 20;
 
 // Zoom constraints
 const MIN_ZOOM = 0.25;
-const MAX_ZOOM = 3;
+const MAX_ZOOM = 1.5;
 const ZOOM_STEP = 0.1;
 
 export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
@@ -314,6 +314,24 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         return;
       }
 
+      // Zoom with Cmd/Ctrl + Plus/Minus
+      if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) {
+        e.preventDefault();
+        setZoomLevel((z) => Math.min(MAX_ZOOM, z + ZOOM_STEP));
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === '-') {
+        e.preventDefault();
+        setZoomLevel((z) => Math.max(MIN_ZOOM, z - ZOOM_STEP));
+        return;
+      }
+      // Reset zoom with Cmd/Ctrl + 0
+      if ((e.metaKey || e.ctrlKey) && e.key === '0') {
+        e.preventDefault();
+        setZoomLevel(1);
+        return;
+      }
+
       if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey) {
         if (selectedElementId && !cropModeElementId) {
           e.preventDefault();
@@ -364,7 +382,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     }
   }, [cropModeElementId]);
 
-  // Handle Cmd/Ctrl + scroll for zoom (relative to center of viewport)
+  // Handle Cmd/Ctrl + scroll for zoom (relative to mouse position)
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -372,36 +390,69 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     const handleWheel = (e: WheelEvent) => {
       if (e.metaKey || e.ctrlKey) {
         e.preventDefault();
-        
-        // Get the center point of the visible viewport before zoom
-        const viewportCenterX = container.scrollLeft + container.clientWidth / 2;
-        const viewportCenterY = container.scrollTop + container.clientHeight / 2;
-        
-        // Calculate what point in the canvas this corresponds to (in unzoomed coordinates)
-        const canvasX = (viewportCenterX - 24) / zoomLevel; // 24px is left padding
-        const canvasY = viewportCenterY / zoomLevel;
-        
+
+        const totalContentWidth = numSlides * canvasSize.width * zoomLevel + 48;
+        const totalContentHeight = canvasSize.height * zoomLevel;
+        const isScrollable = totalContentWidth > container.clientWidth || totalContentHeight > container.clientHeight;
+
+        // Calculate the point under the mouse in content coordinates (before zoom)
+        // When content is centered, there's an offset we need to account for
+        let contentOffsetX = 0;
+        let contentOffsetY = 0;
+        if (!isScrollable) {
+          // Content is centered - calculate the offset
+          contentOffsetX = Math.max(0, (container.clientWidth - totalContentWidth) / 2);
+          contentOffsetY = Math.max(0, (container.clientHeight - totalContentHeight) / 2);
+        }
+
+        // Mouse position relative to scroll container
+        const containerRect = container.getBoundingClientRect();
+        const mouseXInContainer = e.clientX - containerRect.left;
+        const mouseYInContainer = e.clientY - containerRect.top;
+
+        // Convert to content coordinates (accounting for scroll and centering offset)
+        const mouseXInContent = container.scrollLeft + mouseXInContainer - contentOffsetX;
+        const mouseYInContent = container.scrollTop + mouseYInContainer - contentOffsetY;
+
+        // Convert to canvas coordinates (in unzoomed space, excluding padding)
+        const canvasX = (mouseXInContent - 24) / zoomLevel;
+        const canvasY = mouseYInContent / zoomLevel;
+
         // Normalize scroll delta and apply zoom
         const zoomDelta = -e.deltaY * 0.002;
         const newZoomLevel = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomLevel + zoomDelta));
-        
+
         if (newZoomLevel !== zoomLevel) {
+          // Calculate new content dimensions
+          const newContentWidth = numSlides * canvasSize.width * newZoomLevel + 48;
+          const newContentHeight = canvasSize.height * newZoomLevel;
+          const widthOverflows = newContentWidth > container.clientWidth;
+          const heightOverflows = newContentHeight > container.clientHeight;
+
+          // Calculate target scroll positions based on canvas point under mouse
+          const newMouseXInContent = canvasX * newZoomLevel + 24;
+          const newMouseYInContent = canvasY * newZoomLevel;
+
+          // Only adjust scroll for dimensions that overflow; let flexbox center the rest
+          const targetScrollLeft = widthOverflows
+            ? Math.max(0, Math.min(newMouseXInContent - mouseXInContainer, newContentWidth - container.clientWidth))
+            : 0;
+          const targetScrollTop = heightOverflows
+            ? Math.max(0, Math.min(newMouseYInContent - mouseYInContainer, newContentHeight - container.clientHeight))
+            : 0;
+
+          // Store scroll targets before zoom change
+          const scrollTargets = { left: targetScrollLeft, top: targetScrollTop };
+
           setZoomLevel(newZoomLevel);
-          
-          // After zoom, adjust scroll to keep the same point centered
-          // Use requestAnimationFrame to ensure zoom state has updated
+
+          // Apply scroll adjustment after React re-renders with new zoom
           requestAnimationFrame(() => {
             if (!scrollContainerRef.current) return;
-            const newContainer = scrollContainerRef.current;
-            
-            // Calculate new scroll position to keep the same canvas point centered
-            const newScrollLeft = canvasX * newZoomLevel + 24 - newContainer.clientWidth / 2;
-            const newScrollTop = canvasY * newZoomLevel - newContainer.clientHeight / 2;
-            
-            newContainer.scrollTo({
-              left: Math.max(0, newScrollLeft),
-              top: Math.max(0, newScrollTop),
-              behavior: 'auto', // Instant scroll for zoom
+            scrollContainerRef.current.scrollTo({
+              left: scrollTargets.left,
+              top: scrollTargets.top,
+              behavior: 'auto',
             });
           });
         }
@@ -410,75 +461,54 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
     container.addEventListener('wheel', handleWheel, { passive: false });
     return () => container.removeEventListener('wheel', handleWheel);
-  }, [zoomLevel]);
+  }, [zoomLevel, numSlides, canvasSize.width, canvasSize.height]);
 
   // Scroll to current slide when it changes (only if not fully visible)
   useEffect(() => {
-    if (scrollContainerRef.current && canvasSize.width > 0 && stageContainerRef.current) {
-      const container = scrollContainerRef.current;
-      const stageContainer = stageContainerRef.current;
-      const padding = 24; // Left/right padding on stage container
+    if (!scrollContainerRef.current || canvasSize.width <= 0) return;
 
-      // Calculate the slide's position in screen coordinates (accounting for zoom)
-      const slideScreenWidth = canvasSize.width * zoomLevel;
-      const slideLeft = padding + currentSlideIndex * slideScreenWidth;
+    const container = scrollContainerRef.current;
+    const slideScreenWidth = canvasSize.width * zoomLevel;
+    const totalContentWidth = numSlides * slideScreenWidth + 48; // 48 = left + right padding
+    const viewPadding = 24; // Padding to show part of adjacent slides
 
-      // Get the stage container's position relative to the scroll container's content area
-      // When content is centered, we need to account for the offset
-      const stageContainerRect = stageContainer.getBoundingClientRect();
-      const scrollContainerRect = container.getBoundingClientRect();
-      
-      // Calculate where the stage container starts in scroll coordinates
-      // scrollLeft gives us the scroll position, and the difference in getBoundingClientRect
-      // gives us the visual offset (which accounts for centering)
-      const stageOffsetInScroll = stageContainerRect.left - scrollContainerRect.left + container.scrollLeft;
-      
-      // Calculate slide position in scroll container coordinates
-      const slideLeftInScroll = stageOffsetInScroll + slideLeft - padding;
-      const slideRightInScroll = slideLeftInScroll + slideScreenWidth;
+    // If content fits in viewport, all slides are visible - no need to scroll
+    if (totalContentWidth <= container.clientWidth) return;
 
-      // Get the visible area
-      const visibleLeft = container.scrollLeft;
-      const visibleRight = container.scrollLeft + container.clientWidth;
-      const visibleWidth = container.clientWidth;
+    // Calculate slide position within content (relative to content left edge)
+    const slideLeftInContent = 24 + currentSlideIndex * slideScreenWidth;
+    const slideRightInContent = slideLeftInContent + slideScreenWidth;
 
-      // Check if slide is off-screen in either direction
-      const isOffLeft = slideLeftInScroll < visibleLeft;
-      const isOffRight = slideRightInScroll > visibleRight;
+    // Get visible range
+    const visibleLeft = container.scrollLeft;
+    const visibleRight = container.scrollLeft + container.clientWidth;
 
-      if (isOffLeft) {
-        // Slide is off to the left
-        // If slide is larger than viewport, align left edge
-        if (slideScreenWidth > visibleWidth) {
-          container.scrollTo({
-            left: slideLeftInScroll,
-            behavior: 'smooth',
-          });
-        } else {
-          // Slide fits - align to left edge
-          container.scrollTo({
-            left: slideLeftInScroll,
-            behavior: 'smooth',
-          });
-        }
-      } else if (isOffRight) {
-        // Slide is off to the right
-        if (slideScreenWidth > visibleWidth) {
-          // Slide is larger than viewport - align left edge
-          container.scrollTo({
-            left: slideLeftInScroll,
-            behavior: 'smooth',
-          });
-        } else {
-          // Slide fits - align to right edge with padding
-          container.scrollTo({
-            left: Math.max(0, slideRightInScroll - visibleWidth + padding),
-            behavior: 'smooth',
-          });
-        }
-      }
+    // Check visibility with padding
+    const isOffLeft = slideLeftInContent < visibleLeft + viewPadding;
+    const isOffRight = slideRightInContent > visibleRight - viewPadding;
+
+    // Only scroll if slide is not fully visible (with padding)
+    if (isOffLeft && !isOffRight) {
+      // Slide is off to the left - align left edge with padding
+      container.scrollTo({
+        left: Math.max(0, slideLeftInContent - viewPadding),
+        behavior: 'smooth',
+      });
+    } else if (isOffRight && !isOffLeft) {
+      // Slide is off to the right - align right edge with padding
+      container.scrollTo({
+        left: Math.max(0, slideRightInContent - container.clientWidth + viewPadding),
+        behavior: 'smooth',
+      });
+    } else if (isOffLeft && isOffRight) {
+      // Slide is larger than viewport or completely off-screen - center it
+      const slideCenterInContent = slideLeftInContent + slideScreenWidth / 2;
+      container.scrollTo({
+        left: Math.max(0, slideCenterInContent - container.clientWidth / 2),
+        behavior: 'smooth',
+      });
     }
-  }, [currentSlideIndex, canvasSize.width, zoomLevel]);
+  }, [currentSlideIndex, canvasSize.width, zoomLevel, numSlides]);
 
   // Handle drop of media onto canvas via window mouseup (always attached, reads from refs)
   useEffect(() => {
@@ -1363,7 +1393,6 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
   const containerHeight = containerRef.current?.clientHeight || 0;
   const contentFitsWidth = totalCanvasWidth * zoomLevel + 48 < containerWidth;
   const contentFitsHeight = canvasSize.height * zoomLevel + 40 < containerHeight; // 40 = paddingTop + paddingBottom
-  const contentFits = contentFitsWidth && contentFitsHeight;
 
   return (
     <div
@@ -1374,7 +1403,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       {/* Scrolling canvas container - overflow-auto for zoom support */}
       <div
         ref={scrollContainerRef}
-        className={`flex-1 overflow-auto flex ${contentFits || zoomLevel <= 1 ? 'items-center justify-center' : 'items-start'} ${contentFits && zoomLevel <= 1 ? '' : ''}`}
+        className={`flex-1 overflow-auto flex ${contentFitsHeight ? 'items-center' : 'items-start'} ${contentFitsWidth ? 'justify-center' : ''}`}
         style={{ paddingTop: 30, paddingBottom: 10 }}
       >
         <div
