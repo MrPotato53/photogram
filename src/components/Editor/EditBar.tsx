@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import clsx from 'clsx';
 import { useEditorStore, type SnapSettings, type SnapSettingsUpdate } from '../../stores/editorStore';
+import { DESIGN_HEIGHT, getSlideWidth } from '../../utils/designConstants';
 
 // Reusable number input with visible spinner arrows
 interface NumberInputProps {
@@ -400,10 +401,7 @@ export function EditBar() {
   const isCropping = !!cropModeElementId;
 
   // Design dimensions (canvas size)
-  const DESIGN_HEIGHT = 1080;
-  const designWidth = project
-    ? DESIGN_HEIGHT * (project.aspectRatio.width / project.aspectRatio.height)
-    : 1920;
+  const designWidth = project ? getSlideWidth(project.aspectRatio) : 1920;
 
   // Calculate the "fit size" - size the image would be if it filled the canvas (contain fit)
   // This becomes our 100% baseline, making scale more intuitive

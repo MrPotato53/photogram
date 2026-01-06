@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { Stage, Layer, Rect } from 'react-konva';
 import type { Template, AspectRatio } from '../../types';
 import { useTemplatesStore } from '../../stores/templatesStore';
+import { DESIGN_HEIGHT } from '../../utils/designConstants';
 
 const PREVIEW_HEIGHT = 80;
 const DRAG_THRESHOLD = 5;
@@ -26,7 +27,7 @@ function TemplateCard({
   onMouseDown,
 }: TemplateCardProps) {
   const previewWidth = (PREVIEW_HEIGHT * template.aspectRatio.width) / template.aspectRatio.height;
-  const scale = PREVIEW_HEIGHT / 1080;
+  const scale = PREVIEW_HEIGHT / DESIGN_HEIGHT;
 
   return (
     <div

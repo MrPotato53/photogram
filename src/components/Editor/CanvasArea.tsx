@@ -11,13 +11,13 @@ import { CropOverlay } from './CropOverlay';
 import { ContextMenu, ContextMenuItem } from '../common/ContextMenu';
 import { TemplatePickerModal } from './TemplatePickerModal';
 import { v4 as uuidv4 } from 'uuid';
+import { DESIGN_HEIGHT, getDesignSize } from '../../utils/designConstants';
+import { getSlideIndex, getSlideIndexFromCenter } from '../../utils/slideUtils';
 
 interface CanvasAreaProps {
   aspectRatio: AspectRatio;
 }
 
-// Fixed design height for consistent element sizing
-const DESIGN_HEIGHT = 1080;
 const MAX_SLIDES = 20;
 
 // Zoom constraints
@@ -35,10 +35,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
   const [loadedImages, setLoadedImages] = useState<Map<string, HTMLImageElement>>(new Map());
 
   // Design size is fixed based on aspect ratio (per slide)
-  const designSize = {
-    width: DESIGN_HEIGHT * (aspectRatio.width / aspectRatio.height),
-    height: DESIGN_HEIGHT,
-  };
+  const designSize = getDesignSize(aspectRatio);
 
   const scale = canvasSize.height > 0 ? canvasSize.height / DESIGN_HEIGHT : 1;
 
@@ -596,7 +593,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
               const designDropY = dropY / (state.scale * state.zoomLevel);
 
               // Determine which slide was dropped on
-              const slideIndex = Math.floor(designDropX / state.designSize.width);
+              const slideIndex = getSlideIndex(designDropX, state.designSize.width);
 
               // Get current media pool IDs before import
               const existingMediaIds = new Set(state.project.mediaPool.map(m => m.id));
@@ -781,7 +778,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         });
 
         // Update current slide based on frame position
-        const slideIndex = Math.floor((placeholderFrame.x + placeholderFrame.width / 2) / state.designSize.width);
+        const slideIndex = getSlideIndexFromCenter(placeholderFrame.x, placeholderFrame.width, state.designSize.width);
         if (slideIndex >= 0 && slideIndex < state.numSlides) {
           setCurrentSlide(slideIndex);
         }
@@ -830,7 +827,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       addElement(newElement);
 
       // Update current slide based on drop position
-      const slideIndex = Math.floor(dropX / state.designSize.width);
+      const slideIndex = getSlideIndex(dropX, state.designSize.width);
       if (slideIndex >= 0 && slideIndex < state.numSlides) {
         setCurrentSlide(slideIndex);
       }
@@ -850,7 +847,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         const pointerPos = stage.getPointerPosition();
         if (pointerPos) {
           const designX = pointerPos.x / (scale * zoomLevel);
-          const slideIndex = Math.floor(designX / designSize.width);
+          const slideIndex = getSlideIndex(designX, designSize.width);
           if (slideIndex >= 0 && slideIndex < numSlides) {
             setCurrentSlide(slideIndex);
           }
@@ -866,8 +863,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     // Update current slide based on element position
     const element = elements.find((el) => el.id === elementId);
     if (element) {
-      const elementCenterX = element.x + element.width / 2;
-      const slideIndex = Math.floor(elementCenterX / designSize.width);
+      const slideIndex = getSlideIndexFromCenter(element.x, element.width, designSize.width);
       if (slideIndex >= 0 && slideIndex < numSlides) {
         setCurrentSlide(slideIndex);
       }
@@ -1062,8 +1058,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       updateElement(elementId, { x: clamped.x, y: clamped.y });
 
       // Update current slide based on where element was dropped
-      const elementCenterX = clamped.x + element.width / 2;
-      const slideIndex = Math.floor(elementCenterX / designSize.width);
+      const slideIndex = getSlideIndexFromCenter(clamped.x, element.width, designSize.width);
       if (slideIndex >= 0 && slideIndex < numSlides) {
         setCurrentSlide(slideIndex);
       }
@@ -1266,7 +1261,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       } : { x: 0, y: 0 };
 
       // Calculate which slide was clicked
-      const clickedSlideIndex = Math.floor(designPos.x / designSize.width);
+      const clickedSlideIndex = getSlideIndex(designPos.x, designSize.width);
 
       setContextMenu({
         isOpen: true,

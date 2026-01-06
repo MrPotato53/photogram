@@ -7,7 +7,7 @@ import { useTemplatesStore } from '../../../stores/templatesStore';
 import { ContextMenu, ContextMenuItem } from '../../common/ContextMenu';
 import { TemplatePickerModal } from '../TemplatePickerModal';
 
-const DESIGN_HEIGHT = 1080;
+import { DESIGN_HEIGHT, getDesignSize } from '../../../utils/designConstants';
 const THUMBNAIL_HEIGHT = 80;
 const MAX_SLIDES = 20;
 
@@ -252,10 +252,7 @@ export function SlidesPanel() {
   const slides = project?.slides || [];
   const elements = project?.elements || [];
 
-  const designSize = project ? {
-    width: DESIGN_HEIGHT * (project.aspectRatio.width / project.aspectRatio.height),
-    height: DESIGN_HEIGHT,
-  } : { width: 1920, height: 1080 };
+  const designSize = project ? getDesignSize(project.aspectRatio) : { width: 1920, height: 1080 };
 
   const thumbnailWidth = (THUMBNAIL_HEIGHT * designSize.width) / designSize.height;
 

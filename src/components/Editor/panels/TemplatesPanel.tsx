@@ -4,7 +4,7 @@ import { useTemplatesStore } from '../../../stores/templatesStore';
 import type { Template } from '../../../types';
 import { ContextMenu, ContextMenuItem } from '../../common/ContextMenu';
 
-const DESIGN_HEIGHT = 1080;
+import { DESIGN_HEIGHT, getSlideWidth } from '../../../utils/designConstants';
 const MAX_SLIDES = 20;
 const DRAG_THRESHOLD = 5;
 
@@ -105,9 +105,7 @@ export function TemplatesPanel() {
   const dragStartPos = useRef<{ x: number; y: number } | null>(null);
   const pendingDragId = useRef<string | null>(null);
 
-  const designWidth = project
-    ? DESIGN_HEIGHT * (project.aspectRatio.width / project.aspectRatio.height)
-    : 1920;
+  const designWidth = project ? getSlideWidth(project.aspectRatio) : 1920;
 
   // Get templates matching the current project's aspect ratio
   const matchingTemplates = project

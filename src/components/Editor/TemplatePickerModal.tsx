@@ -3,6 +3,7 @@ import { Stage, Layer, Rect } from 'react-konva';
 import type { Template, AspectRatio } from '../../types';
 import { useTemplatesStore } from '../../stores/templatesStore';
 import { TemplatesManagementModal } from './TemplatesManagementModal';
+import { DESIGN_HEIGHT } from '../../utils/designConstants';
 
 const PREVIEW_HEIGHT = 100;
 
@@ -21,7 +22,7 @@ function TemplatePreview({
   onClick: () => void;
 }) {
   const previewWidth = (PREVIEW_HEIGHT * template.aspectRatio.width) / template.aspectRatio.height;
-  const scale = PREVIEW_HEIGHT / 1080; // DESIGN_HEIGHT
+  const scale = PREVIEW_HEIGHT / DESIGN_HEIGHT;
 
   return (
     <button
