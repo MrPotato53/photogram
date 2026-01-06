@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { Stage, Layer, Image as KonvaImage, Transformer, Line, Rect, Group } from 'react-konva';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import type Konva from 'konva';
 import type { AspectRatio, Element, Template } from '../../types';
 import { useEditorStore } from '../../stores/editorStore';
@@ -66,6 +67,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     snapSettings,
     activeGuides,
     setActiveGuides,
+    importMedia,
   } = useEditorStore();
 
   const { templates, saveSlideAsTemplate } = useTemplatesStore();
@@ -125,11 +127,25 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     dragScrollSpeedRef.current = 0;
   }, []);
 
-  // Track original element position when entering crop mode (for cancellation)
-  const cropOriginalPositionRef = useRef<{ x: number; y: number } | null>(null);
+  // Track original element state when entering crop mode (for cancellation)
+  const cropOriginalStateRef = useRef<{
+    x: number;
+    y: number;
+    cropX: number;
+    cropY: number;
+    cropWidth: number;
+    cropHeight: number;
+  } | null>(null);
+
+  // Reset key for crop overlay - increment to trigger reset to full bounds
+  const [cropResetKey, setCropResetKey] = useState(0);
 
   // Zoom state for canvas
   const [zoomLevel, setZoomLevel] = useState(1);
+
+  // File drag-drop state (for files from filesystem)
+  const [isFileDragOver, setIsFileDragOver] = useState(false);
+  const fileDragPositionRef = useRef<{ x: number; y: number } | null>(null);
 
   // Refs for drop handling (to avoid stale closures in always-attached listener)
   const dropStateRef = useRef({
@@ -142,6 +158,19 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     designSize: { width: 0, height: 0 },
     totalDesignWidth: 0,
     elements: [] as Element[],
+  });
+
+  // Refs for file drag-drop handling (to avoid Tauri event re-subscriptions)
+  const fileDragDropStateRef = useRef({
+    project: null as typeof project,
+    numSlides: 0,
+    canvasSize: { width: 0, height: 0 },
+    scale: 1,
+    zoomLevel: 1,
+    designSize: { width: 0, height: 0 },
+    importMedia: importMedia,
+    addElement: addElement,
+    setCurrentSlide: setCurrentSlide,
   });
 
   // Keep refs updated
@@ -157,10 +186,24 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       totalDesignWidth,
       elements,
     };
-  }, [draggingMediaId, project, numSlides, canvasSize, scale, zoomLevel, designSize, totalDesignWidth, elements]);
+    fileDragDropStateRef.current = {
+      project,
+      numSlides,
+      canvasSize,
+      scale,
+      zoomLevel,
+      designSize,
+      importMedia,
+      addElement,
+      setCurrentSlide,
+    };
+  }, [draggingMediaId, project, numSlides, canvasSize, scale, zoomLevel, designSize, totalDesignWidth, elements, importMedia, addElement, setCurrentSlide]);
 
   // Crop aspect ratio state
   const [cropAspectRatio, setCropAspectRatio] = useState<number | null>(null);
+  const [customRatioWidth, setCustomRatioWidth] = useState<string>('16');
+  const [customRatioHeight, setCustomRatioHeight] = useState<string>('9');
+  const [showCustomRatio, setShowCustomRatio] = useState(false);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{
@@ -297,15 +340,19 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
       if (e.key === 'Escape') {
         if (cropModeElementId) {
-          // Restore original element position if it was moved during Shift+pan
-          if (cropOriginalPositionRef.current) {
-            const originalPos = cropOriginalPositionRef.current;
+          // Restore original element state if it was changed during crop mode
+          if (cropOriginalStateRef.current) {
+            const original = cropOriginalStateRef.current;
             updateElement(cropModeElementId, {
-              x: originalPos.x,
-              y: originalPos.y,
+              x: original.x,
+              y: original.y,
+              cropX: original.cropX,
+              cropY: original.cropY,
+              cropWidth: original.cropWidth,
+              cropHeight: original.cropHeight,
             });
           }
-          cropOriginalPositionRef.current = null;
+          cropOriginalStateRef.current = null;
           setCropShiftPressed(false);
           exitCropMode();
           return;
@@ -376,11 +423,8 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedElementId, elements, removeElement, updateElement, selectElement, cropModeElementId, enterCropMode, exitCropMode]);
 
-  useEffect(() => {
-    if (!cropModeElementId) {
-      setCropAspectRatio(null);
-    }
-  }, [cropModeElementId]);
+  // Removed: This effect was conflicting with the restore ratio effect below.
+  // The ratio is now reset to null only in the else branch of the restore effect.
 
   // Handle Cmd/Ctrl + scroll for zoom (relative to mouse position)
   useEffect(() => {
@@ -509,6 +553,131 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       });
     }
   }, [currentSlideIndex, canvasSize.width, zoomLevel, numSlides]);
+
+  // Handle file drop from filesystem directly onto canvas
+  // Uses ref to avoid Tauri event re-subscriptions on state changes
+  useEffect(() => {
+    const webview = getCurrentWebviewWindow();
+
+    const unlistenPromise = webview.onDragDropEvent(async (event) => {
+      const dragEvent = event.payload;
+      const state = fileDragDropStateRef.current;
+
+      if (dragEvent.type === 'over' || dragEvent.type === 'enter') {
+        setIsFileDragOver(true);
+        // Store position for potential drop
+        if (dragEvent.position) {
+          fileDragPositionRef.current = { x: dragEvent.position.x, y: dragEvent.position.y };
+        }
+      } else if (dragEvent.type === 'drop') {
+        setIsFileDragOver(false);
+        const paths = dragEvent.paths;
+
+        if (paths && paths.length > 0 && state.project && stageContainerRef.current) {
+          // Filter for image files
+          const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif'];
+          const imagePaths = paths.filter((path: string) =>
+            imageExtensions.some(ext => path.toLowerCase().endsWith(ext))
+          );
+
+          if (imagePaths.length > 0) {
+            // Get drop position relative to stage
+            const stageRect = stageContainerRef.current.getBoundingClientRect();
+            const dropX = (dragEvent.position?.x ?? 0) - stageRect.left - 24; // 24 is paddingLeft
+            const dropY = (dragEvent.position?.y ?? 0) - stageRect.top;
+
+            // Check if drop is within canvas bounds
+            const totalScreenWidth = state.numSlides * state.canvasSize.width * state.zoomLevel;
+            const screenHeight = state.canvasSize.height * state.zoomLevel;
+
+            if (dropX >= 0 && dropX <= totalScreenWidth && dropY >= 0 && dropY <= screenHeight) {
+              // Convert to design coordinates
+              const designDropX = dropX / (state.scale * state.zoomLevel);
+              const designDropY = dropY / (state.scale * state.zoomLevel);
+
+              // Determine which slide was dropped on
+              const slideIndex = Math.floor(designDropX / state.designSize.width);
+
+              // Get current media pool IDs before import
+              const existingMediaIds = new Set(state.project.mediaPool.map(m => m.id));
+
+              // Import files to media pool
+              await state.importMedia(imagePaths);
+
+              // Get the updated project to find newly added media
+              const updatedProject = useEditorStore.getState().project;
+              if (!updatedProject) return;
+
+              // Find the newly added media items
+              const newMediaItems = updatedProject.mediaPool.filter(m => !existingMediaIds.has(m.id));
+
+              // Create elements for each new media item
+              const maxZIndex = updatedProject.elements.length > 0
+                ? Math.max(...updatedProject.elements.map(e => e.zIndex)) + 1
+                : 0;
+
+              for (let i = 0; i < newMediaItems.length; i++) {
+                const media = newMediaItems[i];
+
+                // Calculate element size (50% of slide width, maintaining aspect ratio)
+                const targetWidth = state.designSize.width * 0.5;
+                const mediaAspect = media.width / media.height;
+                let elementWidth = targetWidth;
+                let elementHeight = targetWidth / mediaAspect;
+
+                // Clamp height to 50% of slide height
+                if (elementHeight > state.designSize.height * 0.5) {
+                  elementHeight = state.designSize.height * 0.5;
+                  elementWidth = elementHeight * mediaAspect;
+                }
+
+                // Position element centered at drop point (offset each subsequent element)
+                const slideLeft = slideIndex * state.designSize.width;
+                const x = Math.max(slideLeft, Math.min(
+                  designDropX - elementWidth / 2 + i * 20, // Offset each element slightly
+                  slideLeft + state.designSize.width - elementWidth
+                ));
+                const y = Math.max(0, Math.min(
+                  designDropY - elementHeight / 2 + i * 20,
+                  state.designSize.height - elementHeight
+                ));
+
+                const newElement: Element = {
+                  id: uuidv4(),
+                  type: 'photo',
+                  mediaId: media.id,
+                  x,
+                  y,
+                  width: elementWidth,
+                  height: elementHeight,
+                  rotation: 0,
+                  scale: 1,
+                  locked: false,
+                  zIndex: maxZIndex + i,
+                };
+
+                await state.addElement(newElement);
+              }
+
+              // Update current slide to where elements were dropped
+              if (slideIndex >= 0 && slideIndex < state.numSlides) {
+                state.setCurrentSlide(slideIndex);
+              }
+            }
+          }
+        }
+
+        fileDragPositionRef.current = null;
+      } else if (dragEvent.type === 'leave') {
+        setIsFileDragOver(false);
+        fileDragPositionRef.current = null;
+      }
+    });
+
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []); // Empty deps - uses ref for all state
 
   // Handle drop of media onto canvas via window mouseup (always attached, reads from refs)
   useEffect(() => {
@@ -1300,7 +1469,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
   };
 
   // Crop handlers
-  const handleCropConfirm = async (crop: {
+  const handleCropConfirm = (crop: {
     cropX: number;
     cropY: number;
     cropWidth: number;
@@ -1324,7 +1493,9 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
       const newX = fullBoundsX + crop.cropX * fullBoundsWidth;
       const newY = fullBoundsY + crop.cropY * fullBoundsHeight;
 
-      await updateElement(cropModeElementId, {
+      // Don't await - let the update happen in background to avoid race conditions
+      // with component unmounting when exitCropMode is called
+      updateElement(cropModeElementId, {
         cropX: crop.cropX,
         cropY: crop.cropY,
         cropWidth: crop.cropWidth,
@@ -1333,10 +1504,11 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         y: newY,
         width: crop.newWidth,
         height: crop.newHeight,
+        lastCropRatio: cropAspectRatio,
       });
     }
-    // Clear original position ref since crop was confirmed (not cancelled)
-    cropOriginalPositionRef.current = null;
+    // Clear original state ref since crop was confirmed (not cancelled)
+    cropOriginalStateRef.current = null;
     setCropShiftPressed(false);
     exitCropMode();
   };
@@ -1345,29 +1517,62 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     ? elements.find((el) => el.id === cropModeElementId)
     : null;
 
-  // Capture original element position when entering crop mode
+  // Capture original element state when entering crop mode
   useEffect(() => {
-    if (cropModeElementId && croppingElement && !cropOriginalPositionRef.current) {
-      cropOriginalPositionRef.current = {
+    if (cropModeElementId && croppingElement && !cropOriginalStateRef.current) {
+      cropOriginalStateRef.current = {
         x: croppingElement.x,
         y: croppingElement.y,
+        cropX: croppingElement.cropX ?? 0,
+        cropY: croppingElement.cropY ?? 0,
+        cropWidth: croppingElement.cropWidth ?? 1,
+        cropHeight: croppingElement.cropHeight ?? 1,
       };
     } else if (!cropModeElementId) {
       // Only clear ref when actually exiting crop mode (not during transient state updates)
-      cropOriginalPositionRef.current = null;
+      cropOriginalStateRef.current = null;
     }
   }, [cropModeElementId, croppingElement]);
 
+  // Set initial crop ratio when entering crop mode (from element's saved ratio)
+  // Also reset to null when exiting crop mode
+  const prevCropModeElementIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (cropModeElementId && cropModeElementId !== prevCropModeElementIdRef.current) {
+      // Entering crop mode for a new element
+      const element = elements.find((el) => el.id === cropModeElementId);
+
+      // Check if lastCropRatio exists on the element (could be null for Free, or a number)
+      if ('lastCropRatio' in (element || {})) {
+        setCropAspectRatio(element!.lastCropRatio ?? null);
+        setShowCustomRatio(false);
+      } else {
+        // Default to free if no saved ratio
+        setCropAspectRatio(null);
+        setShowCustomRatio(false);
+      }
+    } else if (!cropModeElementId && prevCropModeElementIdRef.current) {
+      // Exiting crop mode - reset ratio
+      setCropAspectRatio(null);
+      setShowCustomRatio(false);
+    }
+    prevCropModeElementIdRef.current = cropModeElementId;
+  }, [cropModeElementId, elements]);
+
   const handleCropCancel = () => {
-    // Restore original element position if it was moved during Shift+pan
-    if (cropModeElementId && cropOriginalPositionRef.current) {
-      const originalPos = cropOriginalPositionRef.current;
+    // Restore original element state (position and crop values)
+    if (cropModeElementId && cropOriginalStateRef.current) {
+      const original = cropOriginalStateRef.current;
       updateElement(cropModeElementId, {
-        x: originalPos.x,
-        y: originalPos.y,
+        x: original.x,
+        y: original.y,
+        cropX: original.cropX,
+        cropY: original.cropY,
+        cropWidth: original.cropWidth,
+        cropHeight: original.cropHeight,
       });
     }
-    cropOriginalPositionRef.current = null;
+    cropOriginalStateRef.current = null;
     setCropShiftPressed(false);
     exitCropMode();
   };
@@ -1457,7 +1662,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
           {/* Canvas background (white slides) */}
           <div
-            className={`absolute bg-white shadow-lg transition-all ${showDropZone ? 'ring-2 ring-blue-400 ring-opacity-50' : ''}`}
+            className={`absolute bg-white shadow-lg ${showDropZone || isFileDragOver ? 'ring-2 ring-blue-400 ring-opacity-50' : ''}`}
             style={{
               left: 24,
               top: 0,
@@ -1717,6 +1922,7 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
                       canvasHeight={designSize.height}
                       slideWidth={designSize.width}
                       numSlides={numSlides}
+                      resetKey={cropResetKey}
                     />
                   </>
                 )}
@@ -1821,12 +2027,16 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
             { label: '1:1', ratio: 1 },
             { label: '4:5', ratio: 4 / 5 },
             { label: '16:9', ratio: 16 / 9 },
+            { label: '1.91:1', ratio: 1.91 },
           ].map((preset) => {
-            const isSelected = cropAspectRatio === preset.ratio;
+            const isSelected = cropAspectRatio === preset.ratio && !showCustomRatio;
             return (
               <button
                 key={preset.label}
-                onClick={() => setCropAspectRatio(preset.ratio)}
+                onClick={() => {
+                  setShowCustomRatio(false);
+                  setCropAspectRatio(preset.ratio);
+                }}
                 className={`px-1.5 py-0.5 text-xs rounded transition-colors ${
                   isSelected ? 'bg-blue-500 text-white' : 'text-gray-300 hover:bg-gray-700'
                 }`}
@@ -1835,6 +2045,75 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
               </button>
             );
           })}
+          {/* Custom ratio toggle and inputs */}
+          <button
+            onClick={() => {
+              if (!showCustomRatio) {
+                setShowCustomRatio(true);
+                const w = parseFloat(customRatioWidth);
+                const h = parseFloat(customRatioHeight);
+                if (w > 0 && h > 0) {
+                  setCropAspectRatio(w / h);
+                }
+              } else {
+                setShowCustomRatio(false);
+              }
+            }}
+            className={`px-1.5 py-0.5 text-xs rounded transition-colors ${
+              showCustomRatio ? 'bg-blue-500 text-white' : 'text-gray-300 hover:bg-gray-700'
+            }`}
+          >
+            Custom
+          </button>
+          {showCustomRatio && (
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                min="0.1"
+                step="0.1"
+                value={customRatioWidth}
+                onChange={(e) => {
+                  setCustomRatioWidth(e.target.value);
+                  const w = parseFloat(e.target.value);
+                  const h = parseFloat(customRatioHeight);
+                  if (w > 0 && h > 0) {
+                    setCropAspectRatio(w / h);
+                  }
+                }}
+                className="w-10 px-1 py-0.5 text-xs bg-gray-700 text-white rounded border border-gray-600 focus:border-blue-500 focus:outline-none"
+              />
+              <span className="text-xs text-gray-400">:</span>
+              <input
+                type="number"
+                min="0.1"
+                step="0.1"
+                value={customRatioHeight}
+                onChange={(e) => {
+                  setCustomRatioHeight(e.target.value);
+                  const w = parseFloat(customRatioWidth);
+                  const h = parseFloat(e.target.value);
+                  if (w > 0 && h > 0) {
+                    setCropAspectRatio(w / h);
+                  }
+                }}
+                className="w-10 px-1 py-0.5 text-xs bg-gray-700 text-white rounded border border-gray-600 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+          )}
+          <div className="w-px h-3 bg-gray-600 mx-1" />
+          {/* Reset crop button */}
+          <button
+            onClick={() => {
+              // Trigger crop overlay to reset to full bounds
+              setCropResetKey((k) => k + 1);
+              // Reset ratio to Free
+              setCropAspectRatio(null);
+              setShowCustomRatio(false);
+            }}
+            className="px-1.5 py-0.5 text-xs text-gray-300 hover:bg-gray-700 rounded"
+          >
+            Reset
+          </button>
           <div className="w-px h-3 bg-gray-600 mx-1" />
           <button
             onClick={handleCropCancel}

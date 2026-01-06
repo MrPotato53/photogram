@@ -47,6 +47,8 @@ pub struct Element {
     // Flip/mirror
     pub flip_x: Option<bool>,
     pub flip_y: Option<bool>,
+    // Last used crop aspect ratio (to remember for next crop)
+    pub last_crop_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

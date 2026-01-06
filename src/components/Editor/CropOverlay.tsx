@@ -32,6 +32,8 @@ interface CropOverlayProps {
   canvasHeight: number;
   slideWidth: number;
   numSlides: number;
+  // Reset key - when changed, resets crop rect to full bounds
+  resetKey?: number;
 }
 
 export function CropOverlay({
@@ -49,6 +51,7 @@ export function CropOverlay({
   canvasHeight,
   slideWidth,
   numSlides,
+  resetKey,
 }: CropOverlayProps) {
   // Store the existing crop values
   const existingCropX = element.cropX ?? 0;
@@ -140,6 +143,21 @@ export function CropOverlay({
     width: existingCropW * fullBounds.width,
     height: existingCropH * fullBounds.height,
   }));
+
+  // Reset crop rect to full bounds when resetKey changes
+  const prevResetKeyRef = useRef(resetKey);
+  useEffect(() => {
+    if (resetKey !== undefined && resetKey !== prevResetKeyRef.current) {
+      // Reset to full bounds (show entire image)
+      setCropRect({
+        x: 0,
+        y: 0,
+        width: fullBounds.width,
+        height: fullBounds.height,
+      });
+    }
+    prevResetKeyRef.current = resetKey;
+  }, [resetKey, fullBounds.width, fullBounds.height]);
 
   // Track shift key state
   useEffect(() => {
