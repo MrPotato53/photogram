@@ -1,6 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import clsx from 'clsx';
-import { useEditorStore, type SnapSettings, type SnapSettingsUpdate } from '../../stores/editorStore';
+import { useProjectStore } from '../../stores/projectStore';
+import { useElementStore } from '../../stores/elementStore';
+import { usePanelStore } from '../../stores/panelStore';
+import { useCropStore } from '../../stores/cropStore';
+import { useSnapStore, type SnapSettings, type SnapSettingsUpdate } from '../../stores/snapStore';
 import { DESIGN_HEIGHT, getSlideWidth } from '../../utils/designConstants';
 
 // Reusable number input with visible spinner arrows
@@ -369,19 +373,11 @@ function SnapSettingsPopover({
 }
 
 export function EditBar() {
-  const {
-    panels,
-    togglePanel,
-    selectedElementId,
-    project,
-    updateElement,
-    enterCropMode,
-    cropModeElementId,
-    snapEnabled,
-    setSnapEnabled,
-    snapSettings,
-    updateSnapSettings,
-  } = useEditorStore();
+  const { project } = useProjectStore();
+  const { selectedElementId, updateElement } = useElementStore();
+  const { panels, togglePanel } = usePanelStore();
+  const { cropModeElementId, enterCropMode } = useCropStore();
+  const { snapEnabled, setSnapEnabled, snapSettings, updateSnapSettings } = useSnapStore();
 
   const [snapPopoverOpen, setSnapPopoverOpen] = useState(false);
 

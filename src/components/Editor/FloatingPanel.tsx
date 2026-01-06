@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect, type ReactNode } from 'react';
 import clsx from 'clsx';
-import { useEditorStore, type PanelId } from '../../stores/editorStore';
+import { usePanelStore, type PanelId } from '../../stores/panelStore';
+import { useMediaStore } from '../../stores/mediaStore';
 
 interface FloatingPanelProps {
   title: string;
@@ -19,7 +20,8 @@ export function FloatingPanel({
   minWidth = 200,
   minHeight = 150,
 }: FloatingPanelProps) {
-  const { panels, setPanelSize, closePanel, draggingMediaId } = useEditorStore();
+  const { panels, setPanelSize, closePanel } = usePanelStore();
+  const { draggingMediaId } = useMediaStore();
   const panelState = panels[panelId];
 
   // Allow drop events to bubble up to EditorLayout when media is being dragged

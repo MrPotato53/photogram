@@ -1,6 +1,9 @@
 import { useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { useEditorStore } from '../../stores/editorStore';
+import { useProjectStore } from '../../stores/projectStore';
+import { useSlideStore } from '../../stores/slideStore';
+import { useMediaStore } from '../../stores/mediaStore';
+import { usePanelStore } from '../../stores/panelStore';
 import { EditorToolbar } from './EditorToolbar';
 import { EditBar } from './EditBar';
 import { CanvasArea } from './CanvasArea';
@@ -16,16 +19,10 @@ interface EditorLayoutProps {
 }
 
 export function EditorLayout({ projectId }: EditorLayoutProps) {
-  const {
-    project,
-    isLoading,
-    error,
-    panels,
-    loadProject,
-    refreshProject,
-    draggingMediaId,
-    currentSlideIndex,
-  } = useEditorStore();
+  const { project, isLoading, error, loadProject, refreshProject } = useProjectStore();
+  const { currentSlideIndex } = useSlideStore();
+  const { draggingMediaId } = useMediaStore();
+  const { panels } = usePanelStore();
 
   useEffect(() => {
     loadProject(projectId);

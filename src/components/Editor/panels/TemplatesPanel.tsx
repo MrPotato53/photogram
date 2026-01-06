@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { useEditorStore } from '../../../stores/editorStore';
+import { useProjectStore } from '../../../stores/projectStore';
+import { useSlideStore } from '../../../stores/slideStore';
 import { useTemplatesStore } from '../../../stores/templatesStore';
 import type { Template } from '../../../types';
 import { ContextMenu, ContextMenuItem } from '../../common/ContextMenu';
@@ -77,7 +78,8 @@ function TemplatePreview({
 }
 
 export function TemplatesPanel() {
-  const { project, addSlideWithTemplate } = useEditorStore();
+  const { project } = useProjectStore();
+  const { addSlideWithTemplate } = useSlideStore();
   const {
     templates,
     saveSlideAsTemplate,
@@ -212,7 +214,7 @@ export function TemplatesPanel() {
 
   const handleSaveCurrentSlide = useCallback(() => {
     if (!project) return;
-    const currentSlideIndex = useEditorStore.getState().currentSlideIndex;
+    const currentSlideIndex = useSlideStore.getState().currentSlideIndex;
     const templateName = `Template ${templates.length + 1}`;
     saveSlideAsTemplate(
       currentSlideIndex,

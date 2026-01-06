@@ -1,8 +1,10 @@
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { useEditorStore } from '../../stores/editorStore';
+import { useProjectStore } from '../../stores/projectStore';
+import { useMediaStore } from '../../stores/mediaStore';
 
 export function DragPreview() {
-  const { project, draggingMediaId, dragMousePosition } = useEditorStore();
+  const { project } = useProjectStore();
+  const { draggingMediaId, dragMousePosition } = useMediaStore();
 
   // Don't render if not dragging or no position
   if (!draggingMediaId || !dragMousePosition || !project) {

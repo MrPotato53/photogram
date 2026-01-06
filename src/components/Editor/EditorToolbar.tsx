@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import { useEditorStore, type PanelId } from '../../stores/editorStore';
+import { usePanelStore, type PanelId } from '../../stores/panelStore';
 
 interface EditorToolbarProps {
   projectName: string;
@@ -31,7 +31,7 @@ function ToolbarButton({ label, icon, isActive, onClick }: ToolbarButtonProps) {
 }
 
 export function EditorToolbar({ projectName }: EditorToolbarProps) {
-  const { panels, togglePanel } = useEditorStore();
+  const { panels, togglePanel } = usePanelStore();
 
   const panelButtons: { id: PanelId; label: string; icon: React.ReactNode }[] = [
     {
