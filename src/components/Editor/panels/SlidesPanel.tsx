@@ -2,7 +2,9 @@ import { useRef, useState, useEffect, useCallback } from 'react';
 import { Stage, Layer, Image as KonvaImage, Rect } from 'react-konva';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { Element, Template } from '../../../types';
-import { useEditorStore } from '../../../stores/editorStore';
+import { useProjectStore } from '../../../stores/projectStore';
+import { useSlideStore } from '../../../stores/slideStore';
+import { usePanelStore } from '../../../stores/panelStore';
 import { useTemplatesStore } from '../../../stores/templatesStore';
 import { ContextMenu, ContextMenuItem } from '../../common/ContextMenu';
 import { TemplatePickerModal } from '../TemplatePickerModal';
@@ -43,7 +45,7 @@ function SlidePreview({
   renderVersion,
 }: SlidePreviewProps) {
   const [loadedImages, setLoadedImages] = useState<Map<string, HTMLImageElement>>(new Map());
-  const { project } = useEditorStore();
+  const { project } = useProjectStore();
 
   const thumbnailWidth = (THUMBNAIL_HEIGHT * designSize.width) / designSize.height;
   const scale = THUMBNAIL_HEIGHT / DESIGN_HEIGHT;
@@ -204,17 +206,16 @@ function SlidePreview({
 }
 
 export function SlidesPanel() {
+  const { project } = useProjectStore();
   const {
-    project,
     currentSlideIndex,
     setCurrentSlide,
     addSlide,
     addSlideWithTemplate,
     removeSlide,
     reorderSlides,
-    togglePanel,
-    panels,
-  } = useEditorStore();
+  } = useSlideStore();
+  const { panels, togglePanel } = usePanelStore();
 
   const { templates, saveSlideAsTemplate } = useTemplatesStore();
 

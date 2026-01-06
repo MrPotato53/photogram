@@ -3,8 +3,13 @@ import { Stage, Layer, Image as KonvaImage, Transformer, Line, Rect, Group } fro
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import type Konva from 'konva';
-import type { AspectRatio, Element, Template } from '../../types';
-import { useEditorStore } from '../../stores/editorStore';
+import type { AspectRatio, Element, Template, MediaItem } from '../../types';
+import { useProjectStore } from '../../stores/projectStore';
+import { useSlideStore } from '../../stores/slideStore';
+import { useElementStore } from '../../stores/elementStore';
+import { useMediaStore } from '../../stores/mediaStore';
+import { useSnapStore } from '../../stores/snapStore';
+import { useCropStore } from '../../stores/cropStore';
 import { useTemplatesStore } from '../../stores/templatesStore';
 import { calculateSnapLines, findSnap, findTransformSnap, generateStaticGuides } from '../../utils/snapping';
 import { CropOverlay } from './CropOverlay';
@@ -39,33 +44,52 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
   const scale = canvasSize.height > 0 ? canvasSize.height / DESIGN_HEIGHT : 1;
 
+  // Project store
+  const { project } = useProjectStore();
+
+  // Slide store
   const {
-    project,
     currentSlideIndex,
     setCurrentSlide,
+    addSlide,
+    addSlideWithTemplate,
+    removeSlide,
+  } = useSlideStore();
+
+  // Element store
+  const {
     selectedElementId,
     selectElement,
     updateElement,
     removeElement,
     sendToFront,
     sendToBack,
+    addElement,
+  } = useElementStore();
+
+  // Media store
+  const {
     draggingMediaId,
     setDraggingMedia,
     setDragMousePosition,
-    cropModeElementId,
-    enterCropMode,
-    exitCropMode,
-    addSlide,
-    addSlideWithTemplate,
-    removeSlide,
-    addElement,
     clearMediaSelection,
+    importMedia,
+  } = useMediaStore();
+
+  // Snap store
+  const {
     snapEnabled,
     snapSettings,
     activeGuides,
     setActiveGuides,
-    importMedia,
-  } = useEditorStore();
+  } = useSnapStore();
+
+  // Crop store
+  const {
+    cropModeElementId,
+    enterCropMode,
+    exitCropMode,
+  } = useCropStore();
 
   const { templates, saveSlideAsTemplate } = useTemplatesStore();
 
@@ -602,15 +626,15 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
               await state.importMedia(imagePaths);
 
               // Get the updated project to find newly added media
-              const updatedProject = useEditorStore.getState().project;
+              const updatedProject = useProjectStore.getState().project;
               if (!updatedProject) return;
 
               // Find the newly added media items
-              const newMediaItems = updatedProject.mediaPool.filter(m => !existingMediaIds.has(m.id));
+              const newMediaItems = updatedProject.mediaPool.filter((m: MediaItem) => !existingMediaIds.has(m.id));
 
               // Create elements for each new media item
               const maxZIndex = updatedProject.elements.length > 0
-                ? Math.max(...updatedProject.elements.map(e => e.zIndex)) + 1
+                ? Math.max(...updatedProject.elements.map((e: Element) => e.zIndex)) + 1
                 : 0;
 
               for (let i = 0; i < newMediaItems.length; i++) {

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Group, Rect, Line } from 'react-konva';
 import type Konva from 'konva';
 import type { Element, Guide } from '../../types';
-import type { SnapSettings } from '../../stores/editorStore';
+import type { SnapSettings } from '../../stores/snapStore';
 import { calculateSnapLines, findSnap, findTransformSnap } from '../../utils/snapping';
 
 interface CropOverlayProps {

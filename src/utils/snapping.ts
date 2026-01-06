@@ -1,5 +1,5 @@
 import type { Element as AppElement, Guide } from '../types';
-import type { SnapSettings } from '../stores/editorStore';
+import type { SnapSettings } from '../stores/snapStore';
 
 export interface StaticGuide {
   orientation: 'vertical' | 'horizontal';

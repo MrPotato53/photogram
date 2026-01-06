@@ -1,11 +1,12 @@
 import { useState, useCallback, useRef } from 'react';
 import clsx from 'clsx';
-import { useEditorStore } from '../../../stores/editorStore';
+import { useProjectStore } from '../../../stores/projectStore';
+import { useElementStore } from '../../../stores/elementStore';
 import type { Element } from '../../../types';
 
 export function LayersPanel() {
-  const { project, selectedElementId, selectElement, reorderElements } =
-    useEditorStore();
+  const { project } = useProjectStore();
+  const { selectedElementId, selectElement, reorderElements } = useElementStore();
 
   // Global elements across all slides
   const elements = project?.elements || [];

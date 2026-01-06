@@ -3,7 +3,8 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import clsx from 'clsx';
-import { useEditorStore } from '../../../stores/editorStore';
+import { useProjectStore } from '../../../stores/projectStore';
+import { useMediaStore } from '../../../stores/mediaStore';
 import { ConfirmDialog } from '../../common/ConfirmDialog';
 import { MediaPreviewModal } from '../MediaPreviewModal';
 import { showInFolder, checkMediaExists, relinkMedia } from '../../../services/tauri';
@@ -179,8 +180,8 @@ function MediaContextMenu({
 
 export function MediaPoolPanel() {
   const containerRef = useRef<HTMLDivElement>(null);
+  const { project, setProject } = useProjectStore();
   const {
-    project,
     selectedMediaIds,
     selectMedia,
     importMedia,
@@ -191,8 +192,7 @@ export function MediaPoolPanel() {
     setDraggingMedia,
     setDragPosition,
     setDragMousePosition,
-    setProject,
-  } = useEditorStore();
+  } = useMediaStore();
 
   const mediaPool = project?.mediaPool || [];
   const [isDraggingOver, setIsDraggingOver] = useState(false);
