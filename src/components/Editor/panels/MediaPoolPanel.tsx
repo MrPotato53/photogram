@@ -9,6 +9,12 @@ import { MediaPreviewModal } from '../MediaPreviewModal';
 import { showInFolder, checkMediaExists, relinkMedia } from '../../../services/tauri';
 import type { MediaItem } from '../../../types';
 
+// Zoom settings
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 2;
+const ZOOM_STEP = 0.25;
+const BASE_THUMBNAIL_SIZE = 80; // Base size in pixels at 100% zoom
+
 // Memoized media item to prevent re-renders during panel resize
 interface MediaItemProps {
   media: MediaItem;
@@ -16,6 +22,7 @@ interface MediaItemProps {
   isDragging: boolean;
   inUse: boolean;
   isMissing: boolean;
+  showNativeAspectRatio: boolean;
   onMouseDown: (e: React.MouseEvent, mediaId: string) => void;
   onDoubleClick: (media: MediaItem) => void;
   onContextMenu: (e: React.MouseEvent, media: MediaItem) => void;
@@ -28,6 +35,7 @@ const MediaItemComponent = memo(function MediaItemComponent({
   isDragging,
   inUse,
   isMissing,
+  showNativeAspectRatio,
   onMouseDown,
   onDoubleClick,
   onContextMenu,
@@ -41,7 +49,8 @@ const MediaItemComponent = memo(function MediaItemComponent({
       onDoubleClick={() => onDoubleClick(media)}
       onContextMenu={(e) => onContextMenu(e, media)}
       className={clsx(
-        'aspect-square bg-theme-bg-tertiary rounded overflow-hidden cursor-grab transition-all relative select-none',
+        'aspect-square rounded overflow-hidden cursor-grab transition-all relative select-none',
+        showNativeAspectRatio ? 'bg-theme-bg-tertiary/50' : 'bg-theme-bg-tertiary',
         isSelected
           ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-theme-bg-secondary'
           : 'hover:ring-2 hover:ring-theme-border',
@@ -63,14 +72,24 @@ const MediaItemComponent = memo(function MediaItemComponent({
           <span className="text-[10px] text-center px-1 truncate w-full">Missing</span>
         </div>
       ) : (
-        <img
-          src={src || ''}
-          alt={media.fileName}
-          className="w-full h-full object-cover pointer-events-none"
-          draggable={false}
-          loading="lazy"
-          decoding="async"
-        />
+        <div className={clsx(
+          'w-full h-full flex items-center justify-center',
+          showNativeAspectRatio && 'p-1'
+        )}>
+          <img
+            src={src || ''}
+            alt={media.fileName}
+            className={clsx(
+              'pointer-events-none',
+              showNativeAspectRatio
+                ? 'max-w-full max-h-full object-contain'
+                : 'w-full h-full object-cover'
+            )}
+            draggable={false}
+            loading="lazy"
+            decoding="async"
+          />
+        </div>
       )}
       {/* In-use indicator */}
       {inUse && !isMissing && (
@@ -188,6 +207,16 @@ export function MediaPoolPanel() {
 
   // Track which media files are missing
   const [missingMediaIds, setMissingMediaIds] = useState<Set<string>>(new Set());
+
+  // Zoom level for thumbnails (0.5 = 50%, 1 = 100%, 2 = 200%)
+  const [zoomLevel, setZoomLevel] = useState(1);
+
+  // Native aspect ratio display toggle
+  const [showNativeAspectRatio, setShowNativeAspectRatio] = useState(false);
+
+  // Calculate thumbnail size based on zoom level
+  const thumbnailSize = Math.round(BASE_THUMBNAIL_SIZE * zoomLevel);
+  const gap = 8; // Gap between thumbnails in pixels
 
   // Check for missing media on mount and when mediaPool changes
   useEffect(() => {
@@ -494,27 +523,101 @@ export function MediaPoolPanel() {
           </p>
         </div>
       ) : (
-        <div className="flex-1 overflow-y-auto overflow-x-hidden">
-          {/* Extra padding to prevent ring clipping */}
-          <div className="p-1">
-            <div className="grid grid-cols-3 gap-2">
-              {mediaPool.map((media) => (
-                <MediaItemComponent
-                  key={media.id}
-                  media={media}
-                  isSelected={selectedMediaIds.includes(media.id)}
-                  isDragging={draggingMediaId === media.id}
-                  inUse={isMediaInUse(media.id)}
-                  isMissing={missingMediaIds.has(media.id)}
-                  onMouseDown={handleMediaMouseDown}
-                  onDoubleClick={handleDoubleClick}
-                  onContextMenu={handleContextMenu}
-                  getMediaSrc={getMediaSrc}
+        <>
+          {/* Zoom and display controls */}
+          <div className="flex items-center justify-between mb-2 pb-2 border-b border-theme-border">
+            {/* Zoom controls */}
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setZoomLevel((z) => Math.max(MIN_ZOOM, z - ZOOM_STEP))}
+                disabled={zoomLevel <= MIN_ZOOM}
+                className="p-1 rounded hover:bg-theme-bg-tertiary disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                title="Zoom out"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 12H4" />
+                </svg>
+              </button>
+              <span className="text-xs text-theme-text-muted w-10 text-center">
+                {Math.round(zoomLevel * 100)}%
+              </span>
+              <button
+                onClick={() => setZoomLevel((z) => Math.min(MAX_ZOOM, z + ZOOM_STEP))}
+                disabled={zoomLevel >= MAX_ZOOM}
+                className="p-1 rounded hover:bg-theme-bg-tertiary disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                title="Zoom in"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 4v16m8-8H4" />
+                </svg>
+              </button>
+              {zoomLevel !== 1 && (
+                <button
+                  onClick={() => setZoomLevel(1)}
+                  className="ml-1 px-1.5 py-0.5 text-[10px] rounded bg-theme-bg-tertiary hover:bg-theme-border transition-colors"
+                  title="Reset zoom to 100%"
+                >
+                  Reset
+                </button>
+              )}
+            </div>
+
+            {/* Aspect ratio toggle */}
+            <button
+              onClick={() => setShowNativeAspectRatio((v) => !v)}
+              className={clsx(
+                'p-1 rounded transition-colors',
+                showNativeAspectRatio
+                  ? 'bg-blue-500/20 text-blue-400'
+                  : 'hover:bg-theme-bg-tertiary text-theme-text-muted'
+              )}
+              title={showNativeAspectRatio ? 'Show cropped thumbnails' : 'Show native aspect ratios'}
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"
                 />
-              ))}
+              </svg>
+            </button>
+          </div>
+
+          {/* Media grid */}
+          <div className="flex-1 overflow-y-auto overflow-x-hidden">
+            {/* Extra padding to prevent ring clipping */}
+            <div className="p-1">
+              <div
+                className="grid justify-start"
+                style={{
+                  gridTemplateColumns: `repeat(auto-fill, ${thumbnailSize}px)`,
+                  gap: `${gap}px`,
+                }}
+              >
+                {mediaPool.map((media) => (
+                  <div
+                    key={media.id}
+                    style={{ width: thumbnailSize, height: thumbnailSize }}
+                  >
+                    <MediaItemComponent
+                      media={media}
+                      isSelected={selectedMediaIds.includes(media.id)}
+                      isDragging={draggingMediaId === media.id}
+                      inUse={isMediaInUse(media.id)}
+                      isMissing={missingMediaIds.has(media.id)}
+                      showNativeAspectRatio={showNativeAspectRatio}
+                      onMouseDown={handleMediaMouseDown}
+                      onDoubleClick={handleDoubleClick}
+                      onContextMenu={handleContextMenu}
+                      getMediaSrc={getMediaSrc}
+                    />
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
+        </>
       )}
 
       {/* Import button */}

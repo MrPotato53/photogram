@@ -30,7 +30,7 @@ fn get_assets_dir(app: &AppHandle, project_id: &str) -> PathBuf {
         .join(project_id)
 }
 
-// Generate a small thumbnail for the media pool (128x128, JPEG quality 80)
+// Generate a thumbnail for the media pool (256x256, JPEG quality 85)
 fn generate_thumbnail(source_path: &PathBuf, thumb_path: &PathBuf) -> Result<(), String> {
     use image::imageops::FilterType;
 
@@ -42,10 +42,11 @@ fn generate_thumbnail(source_path: &PathBuf, thumb_path: &PathBuf) -> Result<(),
     let orientation = get_exif_orientation(source_path).unwrap_or(1);
     let img = apply_exif_orientation(img, orientation);
 
-    // Resize to thumbnail (128x128 max, maintaining aspect ratio)
-    let thumb = img.resize(128, 128, FilterType::Triangle);
+    // Resize to thumbnail (256x256 max, maintaining aspect ratio)
+    // Use Lanczos3 for better quality at larger thumbnail sizes
+    let thumb = img.resize(256, 256, FilterType::Lanczos3);
 
-    // Save as JPEG with quality 80
+    // Save as JPEG with quality 85
     thumb.save(thumb_path)
         .map_err(|e| format!("Failed to save thumbnail: {}", e))?;
 
