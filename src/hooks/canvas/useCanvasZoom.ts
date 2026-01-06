@@ -5,7 +5,6 @@ const MAX_ZOOM = 1.5;
 const ZOOM_STEP = 0.1;
 
 interface UseCanvasZoomOptions {
-  containerRef: React.RefObject<HTMLDivElement>;
   scrollContainerRef: React.RefObject<HTMLDivElement>;
   numSlides: number;
   canvasSize: { width: number; height: number };
