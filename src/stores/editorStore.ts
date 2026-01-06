@@ -9,6 +9,8 @@ import {
   embedElementAsset,
   deleteElementAsset,
 } from '../services/tauri';
+import { getSlideWidth } from '../utils/designConstants';
+import { getSlideIndex } from '../utils/slideUtils';
 
 export type PanelId = 'mediaPool' | 'layers' | 'templates' | 'slides' | 'editBar';
 
@@ -117,10 +119,6 @@ interface EditorState {
   // Crop operations
   enterCropMode: (elementId: string) => void;
   exitCropMode: () => void;
-
-  // Template operations
-  saveSlideAsTemplate: (slideIndex: number, name: string) => Promise<void>;
-  deleteTemplate: (templateId: string) => Promise<void>;
 }
 
 const defaultPanelState: Record<PanelId, PanelState> = {
@@ -213,8 +211,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     // Maximum 20 slides
     if (project.slides.length >= 20) return;
 
-    const DESIGN_HEIGHT = 1080;
-    const designWidth = DESIGN_HEIGHT * (project.aspectRatio.width / project.aspectRatio.height);
+    const designWidth = getSlideWidth(project.aspectRatio);
     const newSlideIndex = project.slides.length;
     const slideOffsetX = newSlideIndex * designWidth;
 
@@ -266,18 +263,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (project.slides.length <= 1) return;
 
     // Calculate slide width for element repositioning
-    const slideWidth = 1080 * (project.aspectRatio.width / project.aspectRatio.height);
+    const slideWidth = getSlideWidth(project.aspectRatio);
 
     // Find elements "homed" on this slide and remove them
     // An element's home slide is the leftmost slide it occupies
     const updatedElements = project.elements.filter((element) => {
-      const homeSlideIndex = Math.floor(element.x / slideWidth);
+      const homeSlideIndex = getSlideIndex(element.x, slideWidth);
       return homeSlideIndex !== slideIndex;
     });
 
     // Adjust x coordinates for elements on slides after the deleted one
     const adjustedElements = updatedElements.map((element) => {
-      const homeSlideIndex = Math.floor(element.x / slideWidth);
+      const homeSlideIndex = getSlideIndex(element.x, slideWidth);
       if (homeSlideIndex > slideIndex) {
         return { ...element, x: element.x - slideWidth };
       }
@@ -315,7 +312,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     if (fromIndex < 0 || fromIndex >= project.slides.length) return;
     if (toIndex < 0 || toIndex >= project.slides.length) return;
 
-    const slideWidth = 1080 * (project.aspectRatio.width / project.aspectRatio.height);
+    const slideWidth = getSlideWidth(project.aspectRatio);
 
     // Reorder slides array
     const newSlides = [...project.slides];
@@ -330,7 +327,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     // Adjust element positions based on slide movement
     // Elements stay with their "home" slide (leftmost slide they occupy)
     const adjustedElements = project.elements.map((element) => {
-      const homeSlideIndex = Math.floor(element.x / slideWidth);
+      const homeSlideIndex = getSlideIndex(element.x, slideWidth);
 
       if (homeSlideIndex === fromIndex) {
         // Element is homed on the moved slide - move it to new position
@@ -717,75 +714,5 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   exitCropMode: () => {
     set({ cropModeElementId: null });
-  },
-
-  // Template operations
-  saveSlideAsTemplate: async (slideIndex: number, name: string) => {
-    const { project } = get();
-    if (!project) return;
-
-    // Calculate design size (fixed height of 1080)
-    const DESIGN_HEIGHT = 1080;
-    const designWidth = DESIGN_HEIGHT * (project.aspectRatio.width / project.aspectRatio.height);
-
-    // Get elements on this slide
-    const slideStartX = slideIndex * designWidth;
-    const slideEndX = slideStartX + designWidth;
-
-    const slideElements = project.elements.filter((el) => {
-      const elCenterX = el.x + el.width / 2;
-      return elCenterX >= slideStartX && elCenterX < slideEndX;
-    });
-
-    // Convert elements to template elements (positions relative to slide, all become placeholders)
-    const templateElements = slideElements.map((el) => ({
-      id: uuidv4(),
-      type: 'placeholder' as const,
-      x: el.x - slideStartX, // Convert to slide-relative coordinates
-      y: el.y,
-      width: el.width,
-      height: el.height,
-      rotation: el.rotation,
-      scale: el.scale,
-      locked: false,
-      zIndex: el.zIndex,
-    }));
-
-    const newTemplate: Template = {
-      id: uuidv4(),
-      name,
-      aspectRatio: { ...project.aspectRatio },
-      elements: templateElements,
-      createdAt: new Date().toISOString(),
-    };
-
-    const updatedProject = {
-      ...project,
-      templates: [...project.templates, newTemplate],
-    };
-
-    try {
-      await updateProject(updatedProject);
-      set({ project: updatedProject });
-    } catch (error) {
-      console.error('Failed to save template:', error);
-    }
-  },
-
-  deleteTemplate: async (templateId: string) => {
-    const { project } = get();
-    if (!project) return;
-
-    const updatedProject = {
-      ...project,
-      templates: project.templates.filter((t) => t.id !== templateId),
-    };
-
-    try {
-      await updateProject(updatedProject);
-      set({ project: updatedProject });
-    } catch (error) {
-      console.error('Failed to delete template:', error);
-    }
   },
 }));

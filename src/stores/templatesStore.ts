@@ -7,6 +7,7 @@ import {
   deleteTemplateApi,
   reorderTemplates as reorderTemplatesApi,
 } from '../services/tauri';
+import { getElementsOnSlide, toSlideRelativeX } from '../utils/slideUtils';
 
 interface TemplatesState {
   templates: Template[];
@@ -62,19 +63,13 @@ export const useTemplatesStore = create<TemplatesState>((set, get) => ({
     designWidth: number
   ) => {
     // Get elements on this slide
-    const slideStartX = slideIndex * designWidth;
-    const slideEndX = slideStartX + designWidth;
-
-    const slideElements = elements.filter((el) => {
-      const elCenterX = el.x + el.width / 2;
-      return elCenterX >= slideStartX && elCenterX < slideEndX;
-    });
+    const slideElements = getElementsOnSlide(elements, slideIndex, designWidth);
 
     // Convert elements to template elements (positions relative to slide, all become placeholders)
     const templateElements = slideElements.map((el) => ({
       id: uuidv4(),
       type: 'placeholder' as const,
-      x: el.x - slideStartX, // Convert to slide-relative coordinates
+      x: toSlideRelativeX(el.x, slideIndex, designWidth), // Convert to slide-relative coordinates
       y: el.y,
       width: el.width,
       height: el.height,
