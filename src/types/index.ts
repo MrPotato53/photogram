@@ -36,6 +36,8 @@ export interface Element {
   // Flip/mirror
   flipX?: boolean;
   flipY?: boolean;
+  // Last used crop aspect ratio (to remember for next crop)
+  lastCropRatio?: number | null;
 }
 
 // Alignment guide for snapping
