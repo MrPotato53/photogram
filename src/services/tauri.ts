@@ -28,6 +28,13 @@ export async function renameProject(id: string, newName: string): Promise<Projec
   return invoke('rename_project', { id, newName });
 }
 
+export async function saveProjectThumbnail(
+  projectId: string,
+  imageData: string
+): Promise<string> {
+  return invoke('save_project_thumbnail', { projectId, imageData });
+}
+
 export async function importMediaFiles(
   projectId: string,
   filePaths: string[]

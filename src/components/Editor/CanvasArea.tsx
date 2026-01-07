@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { Stage, Layer, Transformer } from 'react-konva';
+import { Stage, Layer, Transformer, Rect } from 'react-konva';
 import type Konva from 'konva';
 import type { AspectRatio, Element, Template } from '../../types';
 import { useProjectStore } from '../../stores/projectStore';
@@ -9,6 +9,7 @@ import { useMediaStore } from '../../stores/mediaStore';
 import { useSnapStore } from '../../stores/snapStore';
 import { useCropStore } from '../../stores/cropStore';
 import { useTemplatesStore } from '../../stores/templatesStore';
+import { saveProjectThumbnail } from '../../services/tauri';
 import { calculateSnapLines, findSnap, findTransformSnap } from '../../utils/snapping';
 import { CropOverlay } from './CropOverlay';
 import { ContextMenu, ContextMenuItem } from '../common/ContextMenu';
@@ -209,6 +210,62 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
 
     return () => resizeObserver.disconnect();
   }, [aspectRatio]);
+
+  // Snapshot generator function (memoized via ref to avoid stale closures)
+  const generateSnapshot = useCallback(() => {
+    if (!stageRef.current) return null;
+    try {
+      const stage = stageRef.current;
+      // Use a fixed low resolution for fast thumbnail generation
+      return stage.toDataURL({
+        pixelRatio: 0.5, // Low res for speed
+        mimeType: 'image/jpeg',
+        quality: 0.7,
+      });
+    } catch (error) {
+      console.error('Failed to generate snapshot:', error);
+      return null;
+    }
+  }, []);
+
+  // Debounced background thumbnail save on content changes
+  const thumbnailTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSavedRef = useRef<string>('');
+
+  useEffect(() => {
+    if (!project?.id || elements.length === 0) return;
+
+    // Clear any pending save
+    if (thumbnailTimeoutRef.current) {
+      clearTimeout(thumbnailTimeoutRef.current);
+    }
+
+    // Debounce: save thumbnail 3 seconds after last change
+    thumbnailTimeoutRef.current = setTimeout(() => {
+      // Use requestIdleCallback for low-priority work
+      const saveThumb = () => {
+        const imageData = generateSnapshot();
+        if (imageData && imageData !== lastSavedRef.current) {
+          lastSavedRef.current = imageData;
+          saveProjectThumbnail(project.id, imageData).catch((err) => {
+            console.error('Background thumbnail save failed:', err);
+          });
+        }
+      };
+
+      if ('requestIdleCallback' in window) {
+        requestIdleCallback(saveThumb, { timeout: 5000 });
+      } else {
+        saveThumb();
+      }
+    }, 3000);
+
+    return () => {
+      if (thumbnailTimeoutRef.current) {
+        clearTimeout(thumbnailTimeoutRef.current);
+      }
+    };
+  }, [project?.id, elements, generateSnapshot]);
 
   // Image loading is handled by useCanvasImages hook
 
@@ -1052,6 +1109,15 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
               onContextMenu={handleStageContextMenu}
             >
               <Layer scaleX={scale * zoomLevel} scaleY={scale * zoomLevel}>
+                {/* White background for thumbnail captures */}
+                <Rect
+                  x={0}
+                  y={0}
+                  width={totalDesignWidth}
+                  height={designSize.height}
+                  fill="white"
+                  listening={false}
+                />
                 {/* Render all elements sorted by zIndex */}
                 {[...elements]
                   .sort((a, b) => a.zIndex - b.zIndex)
