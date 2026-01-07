@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import clsx from 'clsx';
 import type { ProjectSummary } from '../../types';
 import { formatAspectRatio } from '../../constants/aspectRatios';
@@ -62,7 +63,7 @@ export function ProjectCard({ project, onOpen, onRename, onDelete }: ProjectCard
         <div className="relative aspect-square bg-theme-bg-tertiary flex items-center justify-center">
           {project.thumbnail ? (
             <img
-              src={project.thumbnail}
+              src={convertFileSrc(project.thumbnail)}
               alt={project.name}
               className="w-full h-full object-cover"
             />

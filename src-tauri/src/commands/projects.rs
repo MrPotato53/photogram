@@ -1,7 +1,7 @@
 use crate::models::{AspectRatio, Project, ProjectSummary};
 use chrono::Utc;
 use std::fs;
-use tauri::{command, AppHandle};
+use tauri::{command, AppHandle, Manager};
 use super::utils::paths::{get_projects_dir, get_thumbnails_dir, get_assets_dir};
 
 #[command]
@@ -110,5 +110,63 @@ pub fn rename_project(app: AppHandle, id: String, new_name: String) -> Result<Pr
     project.name = new_name;
     project.updated_at = Utc::now();
     update_project(app, project)
+}
+
+#[command]
+pub fn save_project_thumbnail(
+    app: AppHandle,
+    project_id: String,
+    image_data: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    // Create thumbnails directory for project previews
+    let thumbnails_dir = app.path()
+        .app_data_dir()
+        .expect("Failed to get app data dir")
+        .join("project_thumbnails");
+    fs::create_dir_all(&thumbnails_dir)
+        .map_err(|e| format!("Failed to create project thumbnails dir: {}", e))?;
+
+    // Decode base64 image data (strip data URL prefix if present)
+    let base64_data = if image_data.starts_with("data:image") {
+        image_data.split(',').nth(1).unwrap_or(&image_data)
+    } else {
+        &image_data
+    };
+
+    let image_bytes = STANDARD.decode(base64_data)
+        .map_err(|e| format!("Failed to decode base64 image: {}", e))?;
+
+    // Save as JPEG file
+    let thumb_path = thumbnails_dir.join(format!("{}.jpg", project_id));
+
+    // Load and resize the image for consistent thumbnail size
+    let img = image::load_from_memory(&image_bytes)
+        .map_err(|e| format!("Failed to load image: {}", e))?;
+
+    // Resize to max 400x400 for project thumbnail (larger than media thumbnails)
+    let resized = img.resize(400, 400, image::imageops::FilterType::Lanczos3);
+
+    resized.save(&thumb_path)
+        .map_err(|e| format!("Failed to save project thumbnail: {}", e))?;
+
+    let thumb_path_str = thumb_path.to_string_lossy().to_string();
+
+    // Update project with thumbnail path
+    let projects_dir = get_projects_dir(&app);
+    let project_path = projects_dir.join(format!("{}.json", project_id));
+
+    if let Ok(contents) = fs::read_to_string(&project_path) {
+        if let Ok(mut project) = serde_json::from_str::<Project>(&contents) {
+            project.thumbnail = Some(thumb_path_str.clone());
+            if let Ok(json) = serde_json::to_string_pretty(&project) {
+                let _ = fs::write(&project_path, json);
+            }
+        }
+    }
+
+    Ok(thumb_path_str)
 }
 
