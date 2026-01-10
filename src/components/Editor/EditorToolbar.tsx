@@ -3,6 +3,7 @@ import { usePanelStore, type PanelId } from '../../stores/panelStore';
 
 interface EditorToolbarProps {
   projectName: string;
+  onExportClick: () => void;
 }
 
 interface ToolbarButtonProps {
@@ -30,7 +31,7 @@ function ToolbarButton({ label, icon, isActive, onClick }: ToolbarButtonProps) {
   );
 }
 
-export function EditorToolbar({ projectName }: EditorToolbarProps) {
+export function EditorToolbar({ projectName, onExportClick }: EditorToolbarProps) {
   const { panels, togglePanel } = usePanelStore();
 
   const panelButtons: { id: PanelId; label: string; icon: React.ReactNode }[] = [
@@ -124,9 +125,7 @@ export function EditorToolbar({ projectName }: EditorToolbarProps) {
       <div className="flex items-center gap-2">
         <button
           className="px-3 py-1 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
-          onClick={() => {
-            // TODO: Export functionality
-          }}
+          onClick={onExportClick}
         >
           Export
         </button>

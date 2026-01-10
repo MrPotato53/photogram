@@ -4,7 +4,7 @@ mod models;
 use tauri::Manager;
 use commands::{
     check_media_exists, create_project, delete_element_asset, delete_media, delete_project,
-    delete_template, embed_element_asset, get_all_projects, get_preferences, get_project,
+    delete_template, embed_element_asset, export_slides, get_all_projects, get_preferences, get_project,
     get_templates, import_media_files, relink_media, rename_project, reorder_templates,
     save_preferences, save_project_thumbnail, save_template, show_in_folder, update_project,
 };
@@ -55,6 +55,7 @@ pub fn run() {
             save_template,
             delete_template,
             reorder_templates,
+            export_slides,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

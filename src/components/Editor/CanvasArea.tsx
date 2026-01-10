@@ -26,14 +26,17 @@ import { getSlideIndex, getSlideIndexFromCenter } from '../../utils/slideUtils';
 import { useCanvasZoom, useCanvasFileDrop, useCanvasImages, useCanvasMediaDrop } from '../../hooks/canvas';
 import { useCanvasKeyboard } from '../../hooks/canvas/useCanvasKeyboard';
 import { useCanvasAutoScroll } from '../../hooks/canvas/useCanvasAutoScroll';
+import { useSlideExport } from '../../hooks/canvas/useSlideExport';
 
 interface CanvasAreaProps {
   aspectRatio: AspectRatio;
+  onRenderSlideForExport?: (fn: (slideIndex: number, pixelRatio: number, format: 'png' | 'jpeg', quality: number) => string | null) => void;
+  onRenderSlideThumbnail?: (fn: (slideIndex: number) => string | null) => void;
 }
 
 const MAX_SLIDES = 20;
 
-export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
+export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideThumbnail }: CanvasAreaProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const stageContainerRef = useRef<HTMLDivElement>(null);
@@ -168,6 +171,21 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     totalDesignWidth,
     elements,
   });
+
+  // Export hook - expose rendering functions to parent
+  const { renderSlideForExport, renderSlideThumbnail } = useSlideExport({ stageRef, project, scale });
+
+  useEffect(() => {
+    if (onRenderSlideForExport) {
+      onRenderSlideForExport(renderSlideForExport);
+    }
+  }, [onRenderSlideForExport, renderSlideForExport]);
+
+  useEffect(() => {
+    if (onRenderSlideThumbnail) {
+      onRenderSlideThumbnail(renderSlideThumbnail);
+    }
+  }, [onRenderSlideThumbnail, renderSlideThumbnail]);
 
   // Crop aspect ratio state
   const [cropAspectRatio, setCropAspectRatio] = useState<number | null>(null);

@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useProjectStore } from '../../stores/projectStore';
 import { useSlideStore } from '../../stores/slideStore';
@@ -13,6 +13,8 @@ import { LayersPanel } from './panels/LayersPanel';
 import { TemplatesPanel } from './panels/TemplatesPanel';
 import { SlidesPanel } from './panels/SlidesPanel';
 import { DragPreview } from './DragPreview';
+import { ExportModal } from './ExportModal';
+import { exportSlides, showInFolder, type ExportOptions } from '../../services/tauri';
 
 interface EditorLayoutProps {
   projectId: string;
@@ -23,6 +25,11 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   const { currentSlideIndex } = useSlideStore();
   const { draggingMediaId } = useMediaStore();
   const { panels } = usePanelStore();
+
+  // Export functionality
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const renderSlideForExportRef = useRef<((slideIndex: number, pixelRatio: number, format: 'png' | 'jpeg', quality: number) => string | null) | null>(null);
+  const renderSlideThumbnailRef = useRef<((slideIndex: number) => string | null) | null>(null);
 
   useEffect(() => {
     loadProject(projectId);
@@ -52,6 +59,45 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
     };
   }, [draggingMediaId]);
 
+  // Export handler
+  const handleExport = useCallback(async (slideIndices: number[], options: ExportOptions) => {
+    if (!renderSlideForExportRef.current) {
+      console.error('Render function not available');
+      return;
+    }
+
+    try {
+      // Render each slide
+      const slideImageData: string[] = [];
+      for (const slideIndex of slideIndices) {
+        const imageData = renderSlideForExportRef.current(
+          slideIndex,
+          options.pixelRatio,
+          options.format,
+          options.quality
+        );
+        if (imageData) {
+          slideImageData.push(imageData);
+        } else {
+          throw new Error(`Failed to render slide ${slideIndex + 1}`);
+        }
+      }
+
+      // Call backend to save files
+      const filePaths = await exportSlides(options, slideImageData);
+
+      console.log(`Successfully exported ${filePaths.length} slides`);
+
+      // Optionally open folder
+      if (filePaths.length > 0) {
+        await showInFolder(filePaths[0]);
+      }
+    } catch (error) {
+      console.error('Export failed:', error);
+      throw error;
+    }
+  }, []);
+
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center bg-theme-bg">
@@ -70,13 +116,20 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
 
   return (
     <div className="h-full flex flex-col bg-theme-bg-tertiary select-none">
-      <EditorToolbar projectName={project.name} />
+      <EditorToolbar
+        projectName={project.name}
+        onExportClick={() => setIsExportModalOpen(true)}
+      />
       <EditBar />
 
       <div className="flex-1 flex flex-col min-h-0">
         {/* Canvas area - takes remaining space */}
         <div className="flex-1 relative overflow-hidden min-h-0">
-          <CanvasArea aspectRatio={project.aspectRatio} />
+          <CanvasArea
+            aspectRatio={project.aspectRatio}
+            onRenderSlideForExport={(fn) => { renderSlideForExportRef.current = fn; }}
+            onRenderSlideThumbnail={(fn) => { renderSlideThumbnailRef.current = fn; }}
+          />
 
           {/* Floating Panels */}
           {panels.mediaPool.isOpen && (
@@ -135,6 +188,17 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
 
       {/* Drag preview that follows cursor */}
       <DragPreview />
+
+      {/* Export modal */}
+      <ExportModal
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+        projectName={project.name}
+        aspectRatio={project.aspectRatio}
+        numSlides={project.slides.length}
+        onExport={handleExport}
+        renderSlideThumbnail={(slideIndex) => renderSlideThumbnailRef.current?.(slideIndex) ?? null}
+      />
     </div>
   );
 }
