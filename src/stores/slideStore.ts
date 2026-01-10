@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
-import type { Slide, Template } from '../types';
+import type { Slide, Template, Element } from '../types';
 import { updateProject } from '../services/tauri';
 import { getSlideWidth } from '../utils/designConstants';
 import { getSlideIndex } from '../utils/slideUtils';
@@ -15,6 +15,7 @@ interface SlideState {
   addSlideWithTemplate: (template: Template) => Promise<void>;
   removeSlide: (slideIndex: number) => Promise<void>;
   reorderSlides: (fromIndex: number, toIndex: number) => Promise<void>;
+  duplicateSlide: (slideIndex: number) => Promise<void>;
 }
 
 export const useSlideStore = create<SlideState>((set, get) => ({
@@ -223,6 +224,80 @@ export const useSlideStore = create<SlideState>((set, get) => ({
       set({ currentSlideIndex: newCurrentIndex });
     } catch (error) {
       console.error('Failed to reorder slides:', error);
+    }
+  },
+
+  duplicateSlide: async (slideIndex: number) => {
+    const project = useProjectStore.getState().project;
+    if (!project) return;
+
+    // Maximum 20 slides
+    if (project.slides.length >= 20) return;
+
+    const slideWidth = getSlideWidth(project.aspectRatio);
+    const slideLeft = slideIndex * slideWidth;
+    const slideRight = (slideIndex + 1) * slideWidth;
+
+    // Find all elements that are on this slide
+    const slideElements = project.elements.filter((element) => {
+      const elementLeft = element.x;
+      const elementRight = element.x + element.width;
+      return elementRight > slideLeft && elementLeft < slideRight;
+    });
+
+    // Create new slide immediately after the source slide
+    const newSlideIndex = slideIndex + 1;
+    const newSlide: Slide = {
+      id: uuidv4(),
+      order: newSlideIndex,
+    };
+
+    // Offset for the new slide position
+    const newSlideOffsetX = newSlideIndex * slideWidth;
+
+    // Duplicate elements with new IDs and positions
+    const maxZIndex = project.elements.length > 0
+      ? Math.max(...project.elements.map((el) => el.zIndex))
+      : -1;
+
+    const duplicatedElements: Element[] = slideElements.map((element, index) => ({
+      ...element,
+      id: uuidv4(),
+      x: element.x + slideWidth, // Shift to next slide position
+      zIndex: maxZIndex + 1 + index,
+    }));
+
+    // Shift existing slides after the insertion point
+    const updatedSlides = [
+      ...project.slides.slice(0, newSlideIndex),
+      newSlide,
+      ...project.slides.slice(newSlideIndex).map((slide) => ({
+        ...slide,
+        order: slide.order + 1,
+      })),
+    ];
+
+    // Shift elements on slides after the new slide
+    const updatedElements = project.elements.map((element) => {
+      const homeSlideIndex = getSlideIndex(element.x, slideWidth);
+      if (homeSlideIndex >= newSlideIndex) {
+        return { ...element, x: element.x + slideWidth };
+      }
+      return element;
+    });
+
+    const updatedProject = {
+      ...project,
+      slides: updatedSlides,
+      elements: [...updatedElements, ...duplicatedElements],
+    };
+
+    try {
+      const savedProject = await updateProject(updatedProject);
+      useProjectStore.getState().setProject(savedProject);
+      set({ currentSlideIndex: newSlideIndex });
+    } catch (error) {
+      console.error('Failed to duplicate slide:', error);
     }
   },
 }));

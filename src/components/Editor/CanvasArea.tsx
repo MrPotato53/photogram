@@ -9,6 +9,7 @@ import { useMediaStore } from '../../stores/mediaStore';
 import { useSnapStore } from '../../stores/snapStore';
 import { useCropStore } from '../../stores/cropStore';
 import { useTemplatesStore } from '../../stores/templatesStore';
+import { useClipboardStore } from '../../stores/clipboardStore';
 import { saveProjectThumbnail } from '../../services/tauri';
 import { calculateSnapLines, findSnap, findTransformSnap } from '../../utils/snapping';
 import { CropOverlay } from './CropOverlay';
@@ -66,6 +67,8 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     sendToFront,
     sendToBack,
     addElement,
+    copySelectedElement,
+    pasteElements,
   } = useElementStore();
 
   // Media store
@@ -339,6 +342,66 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
         });
         cropOriginalStateRef.current = null;
         setCropShiftPressed(false);
+      }
+    },
+    onCopy: copySelectedElement,
+    onPaste: async () => {
+      // Calculate viewport center in design coordinates
+      if (scrollContainerRef.current && stageContainerRef.current) {
+        const container = scrollContainerRef.current;
+        const stageContainer = stageContainerRef.current;
+
+        // Get viewport dimensions
+        const viewportWidth = container.clientWidth;
+        const viewportHeight = container.clientHeight;
+
+        // Get stage container position and dimensions
+        const stageRect = stageContainer.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+
+        // Calculate center of viewport in container coordinates
+        const viewportCenterX = viewportWidth / 2;
+        const viewportCenterY = viewportHeight / 2;
+
+        // Calculate where viewport center intersects with stage
+        // Stage position relative to container viewport
+        const stageLeftInViewport = stageRect.left - containerRect.left;
+        const stageTopInViewport = stageRect.top - containerRect.top;
+        const stageRightInViewport = stageLeftInViewport + stageRect.width;
+        const stageBottomInViewport = stageTopInViewport + stageRect.height;
+
+        // Clamp viewport center to stage bounds (in viewport coordinates)
+        const clampedViewportX = Math.max(stageLeftInViewport, Math.min(stageRightInViewport, viewportCenterX));
+        const clampedViewportY = Math.max(stageTopInViewport, Math.min(stageBottomInViewport, viewportCenterY));
+
+        // Convert to stage coordinates (relative to stage container)
+        const stageLocalX = clampedViewportX - stageLeftInViewport;
+        const stageLocalY = clampedViewportY - stageTopInViewport;
+
+        // Convert to design coordinates
+        const designX = (stageLocalX - 24) / (scale * zoomLevel);
+        const designY = stageLocalY / (scale * zoomLevel);
+
+        // Determine which slide this position is in
+        const slideWidth = designSize.width;
+        const targetSlideIndex = Math.floor(designX / slideWidth);
+        const clampedSlideIndex = Math.max(0, Math.min(slides.length - 1, targetSlideIndex));
+
+        // Clamp to the detected slide bounds
+        const slideLeft = clampedSlideIndex * slideWidth;
+        const slideRight = (clampedSlideIndex + 1) * slideWidth;
+        const clampedX = Math.max(slideLeft, Math.min(slideRight, designX));
+        const clampedY = Math.max(0, Math.min(designSize.height, designY));
+
+        const newIds = await pasteElements({ centerX: clampedX, centerY: clampedY });
+
+        // Scroll to first pasted element if needed
+        if (newIds.length > 0) {
+          const firstElement = elements.find((el) => el.id === newIds[0]);
+          if (firstElement) {
+            scrollToElement(firstElement);
+          }
+        }
       }
     },
   });
@@ -917,6 +980,69 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
     setContextMenu({ ...contextMenu, isOpen: false });
   };
 
+  const handleCopyElement = () => {
+    if (!contextMenu.elementId) return;
+    const element = elements.find((el) => el.id === contextMenu.elementId);
+    if (!element) return;
+    useClipboardStore.getState().copyElements([element]);
+    setContextMenu({ ...contextMenu, isOpen: false });
+  };
+
+  const handlePasteAtCursor = async () => {
+    // Right-click paste - use cursor position for both element and canvas
+    if (!contextMenu.designPosition) return;
+
+    const newIds = await pasteElements({
+      centerX: contextMenu.designPosition.x,
+      centerY: contextMenu.designPosition.y,
+    });
+
+    // Scroll to first pasted element if needed
+    if (newIds.length > 0 && scrollContainerRef.current) {
+      const firstElement = elements.find((el) => el.id === newIds[0]);
+      if (firstElement) {
+        scrollToElement(firstElement);
+      }
+    }
+
+    setContextMenu({ ...contextMenu, isOpen: false });
+  };
+
+  const { duplicateSlide } = useSlideStore();
+  const { hasClipboardData } = useClipboardStore();
+
+  const handleDuplicateSlide = () => {
+    const slideIndex = contextMenu.slideIndex ?? currentSlideIndex;
+    duplicateSlide(slideIndex);
+    setContextMenu({ ...contextMenu, isOpen: false });
+  };
+
+  // Scroll to make an element visible
+  const scrollToElement = (element: Element) => {
+    if (!scrollContainerRef.current) return;
+
+    const container = scrollContainerRef.current;
+
+    // Calculate element center in screen coordinates
+    const elementCenterX = (element.x + element.width / 2) * scale * zoomLevel + 24;
+
+    // Get visible range
+    const visibleLeft = container.scrollLeft;
+    const visibleRight = container.scrollLeft + container.clientWidth;
+
+    // Check if element is visible
+    const elementLeft = element.x * scale * zoomLevel + 24;
+    const elementRight = (element.x + element.width) * scale * zoomLevel + 24;
+
+    if (elementLeft < visibleLeft || elementRight > visibleRight) {
+      // Scroll to center the element
+      container.scrollTo({
+        left: Math.max(0, elementCenterX - container.clientWidth / 2),
+        behavior: 'smooth',
+      });
+    }
+  };
+
   const handleAddSlide = () => {
     if (slides.length < MAX_SLIDES) {
       addSlide();
@@ -1333,6 +1459,12 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
             <ContextMenuItem onClick={handleCropFromMenu}>
               Crop
             </ContextMenuItem>
+            <ContextMenuItem onClick={handleCopyElement}>
+              Copy
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handlePasteAtCursor}>
+              Paste
+            </ContextMenuItem>
             <ContextMenuItem onClick={handleResetCrop}>
               Reset Crop
             </ContextMenuItem>
@@ -1359,6 +1491,14 @@ export function CanvasArea({ aspectRatio }: CanvasAreaProps) {
           <>
             <ContextMenuItem onClick={handleAddFrame}>
               Add Frame
+            </ContextMenuItem>
+            {hasClipboardData() && (
+              <ContextMenuItem onClick={handlePasteAtCursor}>
+                Paste
+              </ContextMenuItem>
+            )}
+            <ContextMenuItem onClick={handleDuplicateSlide}>
+              Duplicate Slide
             </ContextMenuItem>
             <ContextMenuItem onClick={handleSaveSlideAsTemplate}>
               Save Slide as Template
