@@ -105,3 +105,27 @@ export async function deleteTemplateApi(templateId: string): Promise<Template[]>
 export async function reorderTemplates(templateIds: string[]): Promise<Template[]> {
   return invoke('reorder_templates', { templateIds });
 }
+
+// ============ Export Functions ============
+
+export interface ExportOptions {
+  projectName: string;
+  slideIndices: number[];
+  outputFolder: string;
+  format: 'png' | 'jpeg';
+  quality: number; // 0-1
+  pixelRatio: number; // 1, 2, 3, or 4
+}
+
+export async function exportSlides(
+  options: ExportOptions,
+  slideImageData: string[]
+): Promise<string[]> {
+  return invoke('export_slides', {
+    projectName: options.projectName,
+    slideIndices: options.slideIndices,
+    outputFolder: options.outputFolder,
+    format: options.format,
+    slideImageData,
+  });
+}
