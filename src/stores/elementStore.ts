@@ -3,6 +3,7 @@ import type { Element } from '../types';
 import { updateProject, embedElementAsset, deleteElementAsset } from '../services/tauri';
 import { useProjectStore } from './projectStore';
 import { useCropStore } from './cropStore';
+import { useClipboardStore } from './clipboardStore';
 
 interface ElementState {
   selectedElementId: string | null;
@@ -14,6 +15,8 @@ interface ElementState {
   reorderElements: (orderedIds: string[]) => Promise<void>;
   sendToFront: (elementId: string) => Promise<void>;
   sendToBack: (elementId: string) => Promise<void>;
+  copySelectedElement: () => void;
+  pasteElements: (options?: { centerX?: number; centerY?: number }) => Promise<string[]>;
 }
 
 export const useElementStore = create<ElementState>((set, get) => ({
@@ -182,6 +185,86 @@ export const useElementStore = create<ElementState>((set, get) => ({
 
     const orderedIds = elements.map((e) => e.id);
     await get().reorderElements(orderedIds);
+  },
+
+  copySelectedElement: () => {
+    const project = useProjectStore.getState().project;
+    const { selectedElementId } = get();
+    if (!project || !selectedElementId) return;
+
+    const element = project.elements.find((e) => e.id === selectedElementId);
+    if (!element) return;
+
+    useClipboardStore.getState().copyElements([element]);
+  },
+
+  pasteElements: async (options?: { centerX?: number; centerY?: number }) => {
+    const clipboardData = useClipboardStore.getState().paste();
+    if (!clipboardData || clipboardData.length === 0) return [];
+
+    const project = useProjectStore.getState().project;
+    if (!project) return [];
+
+    const PASTE_OFFSET = 20; // pixels for keyboard paste offset
+
+    // Calculate the center point of the original elements
+    const originalElements = clipboardData;
+    const bounds = originalElements.reduce(
+      (acc, el) => ({
+        minX: Math.min(acc.minX, el.x),
+        minY: Math.min(acc.minY, el.y),
+        maxX: Math.max(acc.maxX, el.x + el.width),
+        maxY: Math.max(acc.maxY, el.y + el.height),
+      }),
+      { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+    );
+    const originalCenterX = (bounds.minX + bounds.maxX) / 2;
+    const originalCenterY = (bounds.minY + bounds.maxY) / 2;
+
+    // Determine paste position
+    let targetCenterX: number;
+    let targetCenterY: number;
+
+    if (options?.centerX !== undefined && options?.centerY !== undefined) {
+      // Right-click paste: use provided cursor position as center
+      targetCenterX = options.centerX;
+      targetCenterY = options.centerY;
+    } else {
+      // Keyboard paste: offset from original position
+      targetCenterX = originalCenterX + PASTE_OFFSET;
+      targetCenterY = originalCenterY + PASTE_OFFSET;
+    }
+
+    // Calculate offset to apply to all elements
+    const offsetX = targetCenterX - originalCenterX;
+    const offsetY = targetCenterY - originalCenterY;
+
+    // Generate new IDs and apply position offset
+    const maxZIndex = project.elements.length > 0
+      ? Math.max(...project.elements.map((e) => e.zIndex))
+      : -1;
+
+    const newElements: Element[] = clipboardData.map((element, index) => ({
+      ...element,
+      id: crypto.randomUUID(),
+      x: element.x + offsetX,
+      y: element.y + offsetY,
+      zIndex: maxZIndex + 1 + index,
+    }));
+
+    // Add all pasted elements
+    const newIds: string[] = [];
+    for (const element of newElements) {
+      await get().addElement(element);
+      newIds.push(element.id);
+    }
+
+    // Select the first pasted element
+    if (newElements.length > 0) {
+      set({ selectedElementId: newElements[0].id });
+    }
+
+    return newIds;
   },
 }));
 

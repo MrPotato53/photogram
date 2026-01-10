@@ -14,6 +14,8 @@ interface UseCanvasKeyboardOptions {
   onZoomOut: () => void;
   onResetZoom: () => void;
   onRestoreCropState?: () => void;
+  onCopy?: () => void;
+  onPaste?: () => void;
 }
 
 /**
@@ -32,11 +34,31 @@ export function useCanvasKeyboard({
   onZoomOut,
   onResetZoom,
   onRestoreCropState,
+  onCopy,
+  onPaste,
 }: UseCanvasKeyboardOptions) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Don't handle if typing in an input
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      // Copy with Cmd/Ctrl + C
+      if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
+        e.preventDefault();
+        if (onCopy) {
+          onCopy();
+        }
+        return;
+      }
+
+      // Paste with Cmd/Ctrl + V
+      if ((e.metaKey || e.ctrlKey) && e.key === 'v') {
+        e.preventDefault();
+        if (onPaste) {
+          onPaste();
+        }
         return;
       }
 
@@ -127,6 +149,8 @@ export function useCanvasKeyboard({
     onZoomOut,
     onResetZoom,
     onRestoreCropState,
+    onCopy,
+    onPaste,
   ]);
 }
 

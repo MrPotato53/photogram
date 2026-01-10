@@ -214,6 +214,7 @@ export function SlidesPanel() {
     addSlideWithTemplate,
     removeSlide,
     reorderSlides,
+    duplicateSlide,
   } = useSlideStore();
   const { panels, togglePanel } = usePanelStore();
 
@@ -499,6 +500,11 @@ export function SlidesPanel() {
     setContextMenu({ ...contextMenu, isOpen: false });
   }, [contextMenu, slides.length, removeSlide]);
 
+  const handleDuplicateSlide = useCallback(() => {
+    duplicateSlide(contextMenu.slideIndex);
+    setContextMenu({ ...contextMenu, isOpen: false });
+  }, [contextMenu, duplicateSlide]);
+
   // Get drop indicator for a specific slide
   const getDropIndicator = (index: number): 'left' | 'right' | null => {
     if (dropTargetIndex !== index || draggedIndex === null) return null;
@@ -627,6 +633,11 @@ export function SlidesPanel() {
         onClose={() => setContextMenu({ ...contextMenu, isOpen: false })}
         position={contextMenu.position}
       >
+        {slides.length < MAX_SLIDES && (
+          <ContextMenuItem onClick={handleDuplicateSlide}>
+            Duplicate Slide
+          </ContextMenuItem>
+        )}
         <ContextMenuItem onClick={handleSaveAsTemplate}>
           Save as Template
         </ContextMenuItem>
