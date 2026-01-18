@@ -10,6 +10,7 @@ import { useSnapStore } from '../../stores/snapStore';
 import { useCropStore } from '../../stores/cropStore';
 import { useTemplatesStore } from '../../stores/templatesStore';
 import { useClipboardStore } from '../../stores/clipboardStore';
+import { useHistoryStore } from '../../stores/historyStore';
 import { saveProjectThumbnail } from '../../services/tauri';
 import { calculateSnapLines, findSnap, findTransformSnap } from '../../utils/snapping';
 import { CropOverlay } from './CropOverlay';
@@ -93,6 +94,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   } = useCropStore();
 
   const { templates, saveSlideAsTemplate } = useTemplatesStore();
+
+  // History store
+  const { undo, redo } = useHistoryStore();
 
   // Template picker modal state
   const [isTemplatePickerOpen, setIsTemplatePickerOpen] = useState(false);
@@ -363,6 +367,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       }
     },
     onCopy: copySelectedElement,
+    onUndo: undo,
+    onRedo: redo,
     onPaste: async () => {
       // Calculate viewport center in design coordinates
       if (scrollContainerRef.current && stageContainerRef.current) {
@@ -775,6 +781,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // Context menu handlers
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
+    // Don't show context menu during crop mode
+    if (cropModeElementId) return;
     if (selectedElementId) {
       setContextMenu({
         isOpen: true,
@@ -782,10 +790,12 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         elementId: selectedElementId,
       });
     }
-  }, [selectedElementId]);
+  }, [selectedElementId, cropModeElementId]);
 
   // Canvas context menu for empty space right-clicks
   const handleStageContextMenu = useCallback((e: Konva.KonvaEventObject<PointerEvent>) => {
+    // Don't show context menu during crop mode
+    if (cropModeElementId) return;
     // Only show menu if clicking on empty stage area
     if (e.target === e.target.getStage()) {
       e.evt.preventDefault();
@@ -812,7 +822,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         slideIndex: clickedSlideIndex >= 0 && clickedSlideIndex < numSlides ? clickedSlideIndex : currentSlideIndex,
       });
     }
-  }, [scale, selectElement, designSize.width, numSlides, currentSlideIndex]);
+  }, [scale, selectElement, designSize.width, numSlides, currentSlideIndex, cropModeElementId]);
 
   const handleFlipHorizontal = () => {
     if (!contextMenu.elementId) return;
@@ -907,10 +917,19 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     const loadedImage = loadedImages.get(element.id);
     if (!loadedImage) return;
 
-    const originalRatio = loadedImage.naturalWidth / loadedImage.naturalHeight;
+    // Calculate the target aspect ratio based on the visible (cropped) region
+    // Crop values are normalized (0-1). When no crop: cropWidth=1, cropHeight=1
+    const cropW = element.cropWidth ?? 1;
+    const cropH = element.cropHeight ?? 1;
+
+    // The visible area's dimensions (accounting for crop)
+    const visibleWidth = cropW * loadedImage.naturalWidth;
+    const visibleHeight = cropH * loadedImage.naturalHeight;
+    const targetRatio = visibleWidth / visibleHeight;
+
     const currentArea = element.width * element.height;
-    const newHeight = Math.sqrt(currentArea / originalRatio);
-    const newWidth = newHeight * originalRatio;
+    const newHeight = Math.sqrt(currentArea / targetRatio);
+    const newWidth = newHeight * targetRatio;
 
     const centerX = element.x + element.width / 2;
     const centerY = element.y + element.height / 2;

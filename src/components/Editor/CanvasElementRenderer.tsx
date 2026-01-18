@@ -83,7 +83,60 @@ export function CanvasElementRenderer({
   }
 
   // Render photo elements
-  if (element.type !== 'photo' || !loadedImage) return null;
+  if (element.type !== 'photo') return null;
+
+  // Show placeholder for missing/broken images
+  if (!loadedImage) {
+    return (
+      <Group
+        key={element.id}
+        id={element.id}
+        x={element.x}
+        y={element.y}
+        width={element.width}
+        height={element.height}
+        rotation={element.rotation}
+        draggable={!element.locked && !cropModeElementId}
+        onClick={(e) => onElementClick(element.id, e)}
+        onTap={(e) => onElementClick(element.id, e as unknown as Konva.KonvaEventObject<MouseEvent>)}
+        onDragStart={onDragStart}
+        onDragMove={(e) => onDragMove(element.id, e)}
+        onDragEnd={(e) => onDragEnd(element.id, e)}
+        onTransformEnd={(e) => onTransformEnd(element.id, e)}
+      >
+        {/* Error background */}
+        <Rect
+          width={element.width}
+          height={element.height}
+          fill="#fef2f2"
+          stroke={isSelected ? '#3b82f6' : '#fca5a5'}
+          strokeWidth={isSelected ? 2 / zoomLevel : 1 / zoomLevel}
+          strokeScaleEnabled={false}
+        />
+        {/* X icon - diagonal lines */}
+        <Rect
+          x={element.width / 2 - 2}
+          y={element.height / 2 - 15}
+          width={4}
+          height={30}
+          fill="#ef4444"
+          rotation={45}
+          offsetX={2}
+          offsetY={15}
+        />
+        <Rect
+          x={element.width / 2 - 2}
+          y={element.height / 2 - 15}
+          width={4}
+          height={30}
+          fill="#ef4444"
+          rotation={-45}
+          offsetX={2}
+          offsetY={15}
+        />
+      </Group>
+    );
+  }
 
   const flipScaleX = element.flipX ? -1 : 1;
   const flipScaleY = element.flipY ? -1 : 1;

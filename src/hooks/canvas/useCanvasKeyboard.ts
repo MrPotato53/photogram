@@ -16,6 +16,8 @@ interface UseCanvasKeyboardOptions {
   onRestoreCropState?: () => void;
   onCopy?: () => void;
   onPaste?: () => void;
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
 /**
@@ -36,6 +38,8 @@ export function useCanvasKeyboard({
   onRestoreCropState,
   onCopy,
   onPaste,
+  onUndo,
+  onRedo,
 }: UseCanvasKeyboardOptions) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -58,6 +62,24 @@ export function useCanvasKeyboard({
         e.preventDefault();
         if (onPaste) {
           onPaste();
+        }
+        return;
+      }
+
+      // Undo with Cmd/Ctrl + Z (without shift)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        if (onUndo) {
+          onUndo();
+        }
+        return;
+      }
+
+      // Redo with Cmd/Ctrl + Shift + Z or Cmd/Ctrl + Y
+      if ((e.metaKey || e.ctrlKey) && ((e.key === 'z' && e.shiftKey) || e.key === 'y')) {
+        e.preventDefault();
+        if (onRedo) {
+          onRedo();
         }
         return;
       }
@@ -151,6 +173,8 @@ export function useCanvasKeyboard({
     onRestoreCropState,
     onCopy,
     onPaste,
+    onUndo,
+    onRedo,
   ]);
 }
 

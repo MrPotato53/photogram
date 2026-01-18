@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { deleteMedia, importMediaFiles } from '../services/tauri';
+import { importMediaFiles, updateProject } from '../services/tauri';
 import { useProjectStore } from './projectStore';
 
 interface MediaState {
@@ -93,9 +93,18 @@ export const useMediaStore = create<MediaState>((set, get) => ({
     const { selectedMediaIds } = get();
     if (!project) return;
 
+    // Soft delete: remove from mediaPool but keep file on disk for undo
+    const updatedProject = {
+      ...project,
+      mediaPool: project.mediaPool.filter((m) => m.id !== mediaId),
+    };
+
     try {
-      const updatedProject = await deleteMedia(project.id, mediaId);
-      useProjectStore.getState().setProject(updatedProject);
+      const savedProject = await updateProject(updatedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'media',
+        actionType: 'delete',
+      });
       set({
         selectedMediaIds: selectedMediaIds.filter((id) => id !== mediaId),
       });
@@ -109,13 +118,19 @@ export const useMediaStore = create<MediaState>((set, get) => ({
     const { selectedMediaIds } = get();
     if (!project || selectedMediaIds.length === 0) return;
 
+    // Soft delete: remove all selected from mediaPool
+    const selectedIdSet = new Set(selectedMediaIds);
+    const updatedProject = {
+      ...project,
+      mediaPool: project.mediaPool.filter((m) => !selectedIdSet.has(m.id)),
+    };
+
     try {
-      // Remove each selected media one by one
-      let updatedProject = project;
-      for (const mediaId of selectedMediaIds) {
-        updatedProject = await deleteMedia(project.id, mediaId);
-      }
-      useProjectStore.getState().setProject(updatedProject);
+      const savedProject = await updateProject(updatedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'media',
+        actionType: 'delete',
+      });
       set({
         selectedMediaIds: [],
         lastSelectedMediaId: null,
