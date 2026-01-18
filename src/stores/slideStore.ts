@@ -47,7 +47,10 @@ export const useSlideStore = create<SlideState>((set, get) => ({
 
     try {
       const savedProject = await updateProject(updatedProject);
-      useProjectStore.getState().setProject(savedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'slide',
+        actionType: 'add',
+      });
     } catch (error) {
       console.error('Failed to add slide:', error);
     }
@@ -98,7 +101,10 @@ export const useSlideStore = create<SlideState>((set, get) => ({
 
     try {
       const savedProject = await updateProject(updatedProject);
-      useProjectStore.getState().setProject(savedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'template',
+        actionType: 'apply',
+      });
       set({ currentSlideIndex: newSlideIndex });
     } catch (error) {
       console.error('Failed to add slide with template:', error);
@@ -151,7 +157,11 @@ export const useSlideStore = create<SlideState>((set, get) => ({
 
     try {
       const savedProject = await updateProject(updatedProject);
-      useProjectStore.getState().setProject(savedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'slide',
+        actionType: 'delete',
+        slideIndex,
+      });
       set({ currentSlideIndex: newCurrentIndex });
     } catch (error) {
       console.error('Failed to remove slide:', error);
@@ -220,7 +230,10 @@ export const useSlideStore = create<SlideState>((set, get) => ({
 
     try {
       const savedProject = await updateProject(updatedProject);
-      useProjectStore.getState().setProject(savedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'slide',
+        actionType: 'reorder',
+      });
       set({ currentSlideIndex: newCurrentIndex });
     } catch (error) {
       console.error('Failed to reorder slides:', error);
@@ -251,9 +264,6 @@ export const useSlideStore = create<SlideState>((set, get) => ({
       id: uuidv4(),
       order: newSlideIndex,
     };
-
-    // Offset for the new slide position
-    const newSlideOffsetX = newSlideIndex * slideWidth;
 
     // Duplicate elements with new IDs and positions
     const maxZIndex = project.elements.length > 0
@@ -294,7 +304,11 @@ export const useSlideStore = create<SlideState>((set, get) => ({
 
     try {
       const savedProject = await updateProject(updatedProject);
-      useProjectStore.getState().setProject(savedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'slide',
+        actionType: 'duplicate',
+        slideIndex,
+      });
       set({ currentSlideIndex: newSlideIndex });
     } catch (error) {
       console.error('Failed to duplicate slide:', error);

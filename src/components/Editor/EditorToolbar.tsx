@@ -1,5 +1,6 @@
 import clsx from 'clsx';
 import { usePanelStore, type PanelId } from '../../stores/panelStore';
+import { useHistoryStore, useCanUndo, useCanRedo } from '../../stores/historyStore';
 
 interface EditorToolbarProps {
   projectName: string;
@@ -33,6 +34,9 @@ function ToolbarButton({ label, icon, isActive, onClick }: ToolbarButtonProps) {
 
 export function EditorToolbar({ projectName, onExportClick }: EditorToolbarProps) {
   const { panels, togglePanel } = usePanelStore();
+  const canUndo = useCanUndo();
+  const canRedo = useCanRedo();
+  const { undo, redo } = useHistoryStore();
 
   const panelButtons: { id: PanelId; label: string; icon: React.ReactNode }[] = [
     {
@@ -81,11 +85,58 @@ export function EditorToolbar({ projectName, onExportClick }: EditorToolbarProps
 
   return (
     <div className="flex items-center justify-between px-3 py-2 bg-theme-bg-secondary border-b border-theme-border">
-      {/* Left: Project name */}
+      {/* Left: Project name and undo/redo */}
       <div className="flex items-center gap-3">
         <h1 className="text-sm font-medium text-theme-text truncate max-w-[200px]">
           {projectName}
         </h1>
+
+        {/* Separator */}
+        <div className="w-px h-5 bg-theme-border" />
+
+        {/* Undo/Redo buttons */}
+        <div className="flex items-center gap-0.5">
+          <button
+            onClick={undo}
+            disabled={!canUndo}
+            className={clsx(
+              'p-1.5 rounded transition-colors',
+              canUndo
+                ? 'text-theme-text-secondary hover:text-theme-text hover:bg-theme-bg-tertiary'
+                : 'text-theme-text-tertiary cursor-not-allowed'
+            )}
+            title="Undo (Cmd+Z)"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
+              />
+            </svg>
+          </button>
+          <button
+            onClick={redo}
+            disabled={!canRedo}
+            className={clsx(
+              'p-1.5 rounded transition-colors',
+              canRedo
+                ? 'text-theme-text-secondary hover:text-theme-text hover:bg-theme-bg-tertiary'
+                : 'text-theme-text-tertiary cursor-not-allowed'
+            )}
+            title="Redo (Cmd+Shift+Z)"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M21 10h-10a8 8 0 00-8 8v2M21 10l-6 6m6-6l-6-6"
+              />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {/* Center: Panel toggles */}

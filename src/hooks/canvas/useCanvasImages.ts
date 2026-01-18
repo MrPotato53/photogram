@@ -30,17 +30,24 @@ export function useCanvasImages(elements: Element[]) {
 
           if (imagePath) {
             const existingImage = loadedImages.get(element.id);
-            if (existingImage) {
+            // Only reuse existing image if it loaded successfully
+            if (existingImage && existingImage.complete && existingImage.naturalWidth > 0) {
               newLoadedImages.set(element.id, existingImage);
             } else {
               const img = new window.Image();
               img.crossOrigin = 'anonymous';
               img.src = convertFileSrc(imagePath);
-              await new Promise<void>((resolve) => {
-                img.onload = () => resolve();
-                img.onerror = () => resolve();
+              const loaded = await new Promise<boolean>((resolve) => {
+                img.onload = () => resolve(true);
+                img.onerror = () => {
+                  console.warn(`Failed to load image for element ${element.id}: ${imagePath}`);
+                  resolve(false);
+                };
               });
-              newLoadedImages.set(element.id, img);
+              // Only add to map if image loaded successfully
+              if (loaded && img.complete && img.naturalWidth > 0) {
+                newLoadedImages.set(element.id, img);
+              }
             }
           }
         }

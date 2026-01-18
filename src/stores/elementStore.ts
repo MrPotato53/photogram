@@ -1,9 +1,10 @@
 import { create } from 'zustand';
 import type { Element } from '../types';
-import { updateProject, embedElementAsset, deleteElementAsset } from '../services/tauri';
+import { updateProject, embedElementAsset } from '../services/tauri';
 import { useProjectStore } from './projectStore';
 import { useCropStore } from './cropStore';
 import { useClipboardStore } from './clipboardStore';
+import { useHistoryStore } from './historyStore';
 
 interface ElementState {
   selectedElementId: string | null;
@@ -53,7 +54,11 @@ export const useElementStore = create<ElementState>((set, get) => ({
 
     try {
       const savedProject = await updateProject(updatedProject);
-      useProjectStore.getState().setProject(savedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'element',
+        actionType: 'add',
+        elementId: element.id,
+      });
       set({ selectedElementId: element.id });
     } catch (error) {
       console.error('Failed to add element:', error);
@@ -76,7 +81,11 @@ export const useElementStore = create<ElementState>((set, get) => ({
     const updatedProject = { ...project, elements: updatedElements };
     try {
       const savedProject = await updateProject(updatedProject);
-      useProjectStore.getState().setProject(savedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'transform',
+        actionType: 'update',
+        elementId,
+      });
     } catch (error) {
       console.error('Failed to update element:', error);
     }
@@ -98,7 +107,11 @@ export const useElementStore = create<ElementState>((set, get) => ({
 
     try {
       const savedProject = await updateProject(updatedProject);
-      useProjectStore.getState().setProject(savedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'element',
+        actionType: 'delete',
+        elementId,
+      });
       set({
         selectedElementId: selectedElementId === elementId ? null : selectedElementId,
       });
@@ -108,10 +121,16 @@ export const useElementStore = create<ElementState>((set, get) => ({
         useCropStore.getState().exitCropMode();
       }
 
-      // Clean up the embedded asset file if it exists
+      // Track deleted asset for undo support (don't delete file yet)
+      // File will be deleted when entry falls off history stack
       if (elementToRemove?.assetPath) {
-        deleteElementAsset(project.id, elementToRemove.assetPath).catch((error) => {
-          console.error('Failed to delete asset file:', error);
+        const historyStore = useHistoryStore.getState();
+        const currentEntry = historyStore.entries[historyStore.currentIndex];
+        historyStore.trackDeletedAsset({
+          assetPath: elementToRemove.assetPath,
+          mediaId: elementToRemove.mediaId || '',
+          deletedAt: Date.now(),
+          historyEntryId: currentEntry?.id || '',
         });
       }
     } catch (error) {
@@ -147,7 +166,10 @@ export const useElementStore = create<ElementState>((set, get) => ({
 
     try {
       const savedProject = await updateProject(updatedProject);
-      useProjectStore.getState().setProject(savedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'reorder',
+        actionType: 'reorder',
+      });
     } catch (error) {
       console.error('Failed to reorder elements:', error);
     }
@@ -252,19 +274,51 @@ export const useElementStore = create<ElementState>((set, get) => ({
       zIndex: maxZIndex + 1 + index,
     }));
 
-    // Add all pasted elements
-    const newIds: string[] = [];
+    // Batch add all elements and embed assets
+    const elementsWithAssets: Element[] = [];
     for (const element of newElements) {
-      await get().addElement(element);
-      newIds.push(element.id);
+      let elementWithAsset = { ...element };
+
+      // For photo elements, embed the source image as a project asset
+      if (element.type === 'photo' && element.mediaId) {
+        const media = project.mediaPool.find((m) => m.id === element.mediaId);
+        if (media) {
+          try {
+            const assetPath = await embedElementAsset(project.id, element.id, media.filePath);
+            elementWithAsset.assetPath = assetPath;
+          } catch (error) {
+            console.error('Failed to embed asset:', error);
+          }
+        }
+      }
+
+      elementsWithAssets.push(elementWithAsset);
     }
 
-    // Select the first pasted element
-    if (newElements.length > 0) {
-      set({ selectedElementId: newElements[0].id });
-    }
+    // Single project update with all pasted elements
+    const updatedProject = {
+      ...project,
+      elements: [...project.elements, ...elementsWithAssets],
+    };
 
-    return newIds;
+    try {
+      const savedProject = await updateProject(updatedProject);
+      // Single history entry for all pasted elements
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'paste',
+        actionType: 'paste',
+      });
+
+      // Select the first pasted element
+      if (newElements.length > 0) {
+        set({ selectedElementId: newElements[0].id });
+      }
+
+      return newElements.map((e) => e.id);
+    } catch (error) {
+      console.error('Failed to paste elements:', error);
+      return [];
+    }
   },
 }));
 
