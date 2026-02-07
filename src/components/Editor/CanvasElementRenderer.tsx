@@ -1,3 +1,4 @@
+import { memo, useCallback } from 'react';
 import { Image as KonvaImage, Group, Rect } from 'react-konva';
 import type Konva from 'konva';
 import type { Element } from '../../types';
@@ -16,7 +17,20 @@ interface CanvasElementRendererProps {
   cropModeElementId: string | null;
 }
 
-export function CanvasElementRenderer({
+/**
+ * Simple rectangle hit function for Konva elements.
+ * Replaces Konva's default pixel-perfect hit detection (which draws the full image
+ * to a hidden canvas and calls getImageData on every mousemove) with a simple
+ * rectangle fill. This reduces hit testing from O(image_pixels) to O(1) per element.
+ */
+function rectHitFunc(context: Konva.Context, shape: Konva.Shape) {
+  context.beginPath();
+  context.rect(0, 0, shape.width(), shape.height());
+  context.closePath();
+  context.fillStrokeShape(shape);
+}
+
+export const CanvasElementRenderer = memo(function CanvasElementRenderer({
   element,
   loadedImage,
   isSelected,
@@ -29,6 +43,31 @@ export function CanvasElementRenderer({
   onTransformEnd,
   cropModeElementId,
 }: CanvasElementRendererProps) {
+  // Stable callbacks to avoid re-creating inline functions
+  const handleClick = useCallback(
+    (e: Konva.KonvaEventObject<MouseEvent>) => onElementClick(element.id, e),
+    [element.id, onElementClick]
+  );
+  const handleTap = useCallback(
+    (e: Konva.KonvaEventObject<TouchEvent>) =>
+      onElementClick(element.id, e as unknown as Konva.KonvaEventObject<MouseEvent>),
+    [element.id, onElementClick]
+  );
+  const handleDragMove = useCallback(
+    (e: Konva.KonvaEventObject<DragEvent>) => onDragMove(element.id, e),
+    [element.id, onDragMove]
+  );
+  const handleDragEnd = useCallback(
+    (e: Konva.KonvaEventObject<DragEvent>) => onDragEnd(element.id, e),
+    [element.id, onDragEnd]
+  );
+  const handleTransformEnd = useCallback(
+    (e: Konva.KonvaEventObject<Event>) => onTransformEnd(element.id, e),
+    [element.id, onTransformEnd]
+  );
+
+  const isDraggable = !element.locked && !cropModeElementId;
+
   // Render placeholder/frame elements
   if (element.type === 'placeholder') {
     const plusSize = Math.min(element.width, element.height) * 0.3;
@@ -44,13 +83,13 @@ export function CanvasElementRenderer({
         width={element.width}
         height={element.height}
         rotation={element.rotation}
-        draggable={!element.locked && !cropModeElementId}
-        onClick={(e) => onElementClick(element.id, e)}
-        onTap={(e) => onElementClick(element.id, e as unknown as Konva.KonvaEventObject<MouseEvent>)}
+        draggable={isDraggable}
+        onClick={handleClick}
+        onTap={handleTap}
         onDragStart={onDragStart}
-        onDragMove={(e) => onDragMove(element.id, e)}
-        onDragEnd={(e) => onDragEnd(element.id, e)}
-        onTransformEnd={(e) => onTransformEnd(element.id, e)}
+        onDragMove={handleDragMove}
+        onDragEnd={handleDragEnd}
+        onTransformEnd={handleTransformEnd}
       >
         {/* Gray background */}
         <Rect
@@ -61,6 +100,7 @@ export function CanvasElementRenderer({
           strokeWidth={isSelected ? 2 / zoomLevel : 1 / zoomLevel}
           strokeScaleEnabled={false}
           dash={isSelected ? undefined : [8, 4]}
+          hitFunc={rectHitFunc}
         />
         {/* Plus icon - horizontal line */}
         <Rect
@@ -69,6 +109,7 @@ export function CanvasElementRenderer({
           width={plusSize}
           height={plusSize / 6}
           fill="#9ca3af"
+          listening={false}
         />
         {/* Plus icon - vertical line */}
         <Rect
@@ -77,6 +118,7 @@ export function CanvasElementRenderer({
           width={plusSize / 6}
           height={plusSize}
           fill="#9ca3af"
+          listening={false}
         />
       </Group>
     );
@@ -96,13 +138,13 @@ export function CanvasElementRenderer({
         width={element.width}
         height={element.height}
         rotation={element.rotation}
-        draggable={!element.locked && !cropModeElementId}
-        onClick={(e) => onElementClick(element.id, e)}
-        onTap={(e) => onElementClick(element.id, e as unknown as Konva.KonvaEventObject<MouseEvent>)}
+        draggable={isDraggable}
+        onClick={handleClick}
+        onTap={handleTap}
         onDragStart={onDragStart}
-        onDragMove={(e) => onDragMove(element.id, e)}
-        onDragEnd={(e) => onDragEnd(element.id, e)}
-        onTransformEnd={(e) => onTransformEnd(element.id, e)}
+        onDragMove={handleDragMove}
+        onDragEnd={handleDragEnd}
+        onTransformEnd={handleTransformEnd}
       >
         {/* Error background */}
         <Rect
@@ -112,6 +154,7 @@ export function CanvasElementRenderer({
           stroke={isSelected ? '#3b82f6' : '#fca5a5'}
           strokeWidth={isSelected ? 2 / zoomLevel : 1 / zoomLevel}
           strokeScaleEnabled={false}
+          hitFunc={rectHitFunc}
         />
         {/* X icon - diagonal lines */}
         <Rect
@@ -123,6 +166,7 @@ export function CanvasElementRenderer({
           rotation={45}
           offsetX={2}
           offsetY={15}
+          listening={false}
         />
         <Rect
           x={element.width / 2 - 2}
@@ -133,6 +177,7 @@ export function CanvasElementRenderer({
           rotation={-45}
           offsetX={2}
           offsetY={15}
+          listening={false}
         />
       </Group>
     );
@@ -171,6 +216,7 @@ export function CanvasElementRenderer({
         offsetY={fullOffsetY}
         draggable={false}
         listening={false}
+        perfectDrawEnabled={false}
       />
     );
   }
@@ -199,17 +245,18 @@ export function CanvasElementRenderer({
       offsetX={offsetX}
       offsetY={offsetY}
       crop={cropConfig}
-      draggable={!element.locked && !cropModeElementId}
-      onClick={(e) => onElementClick(element.id, e)}
-      onTap={(e) => onElementClick(element.id, e as unknown as Konva.KonvaEventObject<MouseEvent>)}
+      draggable={isDraggable}
+      onClick={handleClick}
+      onTap={handleTap}
       onDragStart={onDragStart}
-      onDragMove={(e) => onDragMove(element.id, e)}
-      onDragEnd={(e) => onDragEnd(element.id, e)}
-      onTransformEnd={(e) => onTransformEnd(element.id, e)}
+      onDragMove={handleDragMove}
+      onDragEnd={handleDragEnd}
+      onTransformEnd={handleTransformEnd}
       stroke={isSelected ? '#3b82f6' : undefined}
       strokeWidth={isSelected ? 2 / zoomLevel : 0}
       strokeScaleEnabled={false}
+      perfectDrawEnabled={false}
+      hitFunc={rectHitFunc}
     />
   );
-}
-
+});

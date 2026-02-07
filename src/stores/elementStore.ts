@@ -66,6 +66,7 @@ export const useElementStore = create<ElementState>((set, get) => ({
   },
 
   updateElement: async (elementId: string, updates: Partial<Element>) => {
+    console.time('updateElement');
     const project = useProjectStore.getState().project;
     if (!project) return;
 
@@ -80,14 +81,18 @@ export const useElementStore = create<ElementState>((set, get) => ({
 
     const updatedProject = { ...project, elements: updatedElements };
     try {
+      console.time('updateProject-tauri');
       const savedProject = await updateProject(updatedProject);
+      console.timeEnd('updateProject-tauri');
       useProjectStore.getState().setProject(savedProject, {
         source: 'transform',
         actionType: 'update',
         elementId,
       });
+      console.timeEnd('updateElement');
     } catch (error) {
       console.error('Failed to update element:', error);
+      console.timeEnd('updateElement');
     }
   },
 
