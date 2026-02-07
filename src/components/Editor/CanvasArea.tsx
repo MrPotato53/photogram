@@ -133,6 +133,11 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   // Auto-scroll hook
   const isDraggingRef = useRef<boolean>(false); // Track if we're currently dragging
+
+  // Throttle refs for drag operations - reduce expensive calculations during drag
+  const lastSnapCalcRef = useRef<{ x: number; y: number; time: number }>({ x: 0, y: 0, time: 0 });
+  const SNAP_THROTTLE_MS = 32; // ~30fps for snap calculations
+  const SNAP_MIN_DISTANCE = 3; // Minimum pixels moved before recalculating snaps
   const { stopAutoScroll, updateScrollSpeed } = useCanvasAutoScroll({
     scrollContainerRef,
     canvasSize,
@@ -241,12 +246,15 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     if (!stageRef.current) return null;
     try {
       const stage = stageRef.current;
+      console.time('generateSnapshot');
       // Use a fixed low resolution for fast thumbnail generation
-      return stage.toDataURL({
+      const result = stage.toDataURL({
         pixelRatio: 0.5, // Low res for speed
         mimeType: 'image/jpeg',
         quality: 0.7,
       });
+      console.timeEnd('generateSnapshot');
+      return result;
     } catch (error) {
       console.error('Failed to generate snapshot:', error);
       return null;
@@ -260,15 +268,24 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   useEffect(() => {
     if (!project?.id || elements.length === 0) return;
 
+    // Skip if currently dragging - wait until drag ends
+    if (isDraggingRef.current) return;
+
     // Clear any pending save
     if (thumbnailTimeoutRef.current) {
       clearTimeout(thumbnailTimeoutRef.current);
     }
 
-    // Debounce: save thumbnail 3 seconds after last change
+    // Debounce: save thumbnail 5 seconds after last change (increased from 3)
     thumbnailTimeoutRef.current = setTimeout(() => {
+      // Double-check we're not dragging when the timeout fires
+      if (isDraggingRef.current) return;
+
       // Use requestIdleCallback for low-priority work
       const saveThumb = () => {
+        // Final check before expensive operation
+        if (isDraggingRef.current) return;
+
         const imageData = generateSnapshot();
         if (imageData && imageData !== lastSavedRef.current) {
           lastSavedRef.current = imageData;
@@ -279,11 +296,11 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       };
 
       if ('requestIdleCallback' in window) {
-        requestIdleCallback(saveThumb, { timeout: 5000 });
+        requestIdleCallback(saveThumb, { timeout: 10000 });
       } else {
-        saveThumb();
+        setTimeout(saveThumb, 100);
       }
-    }, 3000);
+    }, 5000);
 
     return () => {
       if (thumbnailTimeoutRef.current) {
@@ -536,7 +553,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   // Auto-scroll logic is handled by useCanvasAutoScroll hook
 
-  // Handle drag with snapping
+  // Handle drag with snapping - THROTTLED to reduce CPU usage
   const handleDragMove = useCallback(
     (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
       const node = e.target;
@@ -547,30 +564,43 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       let newY = node.y();
 
       // Apply snapping (snap to slide boundaries and other elements)
+      // THROTTLED: Only recalculate snaps if enough time/distance has passed
       if (snapEnabled) {
-        const snapLines = calculateSnapLines(
-          elements,
-          elementId,
-          totalDesignWidth,
-          designSize.height,
-          snapSettings,
-          designSize.width,
-          numSlides
-        );
+        const now = performance.now();
+        const lastCalc = lastSnapCalcRef.current;
+        const dx = Math.abs(newX - lastCalc.x);
+        const dy = Math.abs(newY - lastCalc.y);
+        const timeSinceLastCalc = now - lastCalc.time;
 
-        const elementRect = {
-          x: newX,
-          y: newY,
-          width: element.width,
-          height: element.height,
-        };
-        const snapResult = findSnap(elementRect, snapLines, 10);
-        newX = snapResult.x;
-        newY = snapResult.y;
-        setActiveGuides(snapResult.guides);
+        // Only recalculate if moved enough or enough time passed
+        if (dx >= SNAP_MIN_DISTANCE || dy >= SNAP_MIN_DISTANCE || timeSinceLastCalc >= SNAP_THROTTLE_MS) {
+          const snapLines = calculateSnapLines(
+            elements,
+            elementId,
+            totalDesignWidth,
+            designSize.height,
+            snapSettings,
+            designSize.width,
+            numSlides
+          );
+
+          const elementRect = {
+            x: newX,
+            y: newY,
+            width: element.width,
+            height: element.height,
+          };
+          const snapResult = findSnap(elementRect, snapLines, 10);
+          newX = snapResult.x;
+          newY = snapResult.y;
+          setActiveGuides(snapResult.guides);
+
+          // Update last calculation tracking
+          lastSnapCalcRef.current = { x: newX, y: newY, time: now };
+        }
       }
 
-      // Clamp to bounds
+      // Clamp to bounds (cheap operation, always do it)
       const clamped = clampToVisibleBounds(newX, newY, element.width, element.height);
       node.x(clamped.x);
       node.y(clamped.y);
@@ -586,7 +616,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     isDraggingRef.current = true;
   }, []);
 
-  // Handle drag end
+  // Handle drag end - apply final snap and persist position
   const handleDragEnd = useCallback(
     (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
       const node = e.target;
@@ -597,8 +627,30 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       stopAutoScroll();
       isDraggingRef.current = false;
 
-      const newX = node.x();
-      const newY = node.y();
+      let newX = node.x();
+      let newY = node.y();
+
+      // Apply final snap calculation on drop (since drag snap was throttled)
+      if (snapEnabled) {
+        const snapLines = calculateSnapLines(
+          elements,
+          elementId,
+          totalDesignWidth,
+          designSize.height,
+          snapSettings,
+          designSize.width,
+          numSlides
+        );
+        const elementRect = {
+          x: newX,
+          y: newY,
+          width: element.width,
+          height: element.height,
+        };
+        const snapResult = findSnap(elementRect, snapLines, 10);
+        newX = snapResult.x;
+        newY = snapResult.y;
+      }
 
       setActiveGuides([]);
       const clamped = clampToVisibleBounds(newX, newY, element.width, element.height);
@@ -610,7 +662,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         setCurrentSlide(slideIndex);
       }
     },
-    [elements, updateElement, setActiveGuides, clampToVisibleBounds, designSize.width, numSlides, setCurrentSlide, stopAutoScroll]
+    [elements, updateElement, setActiveGuides, clampToVisibleBounds, designSize.width, designSize.height, numSlides, setCurrentSlide, stopAutoScroll, snapEnabled, snapSettings, totalDesignWidth]
   );
 
   // Handle transform end

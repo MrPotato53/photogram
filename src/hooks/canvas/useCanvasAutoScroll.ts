@@ -58,9 +58,13 @@ export function useCanvasAutoScroll({
   }, [isDragging, stopAutoScroll]);
 
   // Global mouse move handler for auto-scroll when cursor leaves window
+  // ONLY attached when actively dragging to avoid unnecessary event handling
   useEffect(() => {
+    // Don't attach listener if not dragging
+    if (!isDragging) return;
+
     const handleGlobalMouseMove = (e: MouseEvent) => {
-      if (!isDraggingRef.current || !scrollContainerRef.current) return;
+      if (!scrollContainerRef.current) return;
 
       const scrollContainer = scrollContainerRef.current;
       const scrollRect = scrollContainer.getBoundingClientRect();
@@ -121,7 +125,7 @@ export function useCanvasAutoScroll({
 
     window.addEventListener('mousemove', handleGlobalMouseMove);
     return () => window.removeEventListener('mousemove', handleGlobalMouseMove);
-  }, [zoomLevel, canvasSize.width, startAutoScroll, stopAutoScroll, scrollContainerRef]);
+  }, [isDragging, zoomLevel, canvasSize.width, startAutoScroll, stopAutoScroll, scrollContainerRef]);
 
   // Update scroll speed during drag move (called from drag handlers)
   const updateScrollSpeed = useCallback((mouseX: number) => {

@@ -102,8 +102,8 @@ export function EditorToolbar({ projectName, onExportClick }: EditorToolbarProps
             className={clsx(
               'p-1.5 rounded transition-colors',
               canUndo
-                ? 'text-theme-text-secondary hover:text-theme-text hover:bg-theme-bg-tertiary'
-                : 'text-theme-text-tertiary cursor-not-allowed'
+                ? 'text-theme-text hover:bg-theme-bg-tertiary'
+                : 'text-theme-text-tertiary opacity-40 cursor-not-allowed'
             )}
             title="Undo (Cmd+Z)"
           >
@@ -122,8 +122,8 @@ export function EditorToolbar({ projectName, onExportClick }: EditorToolbarProps
             className={clsx(
               'p-1.5 rounded transition-colors',
               canRedo
-                ? 'text-theme-text-secondary hover:text-theme-text hover:bg-theme-bg-tertiary'
-                : 'text-theme-text-tertiary cursor-not-allowed'
+                ? 'text-theme-text hover:bg-theme-bg-tertiary'
+                : 'text-theme-text-tertiary opacity-40 cursor-not-allowed'
             )}
             title="Redo (Cmd+Shift+Z)"
           >

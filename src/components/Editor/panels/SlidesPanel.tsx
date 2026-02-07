@@ -59,10 +59,27 @@ function SlidePreview({
     return elementRight > slideLeft && elementLeft < slideRight;
   });
 
-  // Load images for elements on this slide
+  // Create a stable key for image-relevant data only (id + mediaId + assetPath)
+  // This avoids re-running image loading when only positions change (during drag)
+  const imageRelevantKey = slideElements
+    .filter((el) => el.type === 'photo' && el.mediaId)
+    .map((el) => `${el.id}:${el.mediaId}:${el.assetPath || ''}`)
+    .join('|');
+
+  // Track last processed key to skip redundant work
+  const lastProcessedKeyRef = useRef<string>('');
+
+  // Load images for elements on this slide - only when image-relevant data changes
   useEffect(() => {
+    // Skip if nothing image-relevant changed
+    if (imageRelevantKey === lastProcessedKeyRef.current && loadedImages.size > 0) {
+      return;
+    }
+    lastProcessedKeyRef.current = imageRelevantKey;
+
     const loadImages = async () => {
       const newLoadedImages = new Map<string, HTMLImageElement>();
+      let hasChanges = false;
 
       for (const element of slideElements) {
         if (element.type === 'photo' && element.mediaId) {
@@ -79,9 +96,10 @@ function SlidePreview({
 
           if (imagePath) {
             const existingImage = loadedImages.get(element.id);
-            if (existingImage) {
+            if (existingImage && existingImage.complete && existingImage.naturalWidth > 0) {
               newLoadedImages.set(element.id, existingImage);
             } else {
+              hasChanges = true;
               const img = new window.Image();
               img.crossOrigin = 'anonymous';
               img.src = convertFileSrc(imagePath);
@@ -89,17 +107,22 @@ function SlidePreview({
                 img.onload = () => resolve();
                 img.onerror = () => resolve();
               });
-              newLoadedImages.set(element.id, img);
+              if (img.complete && img.naturalWidth > 0) {
+                newLoadedImages.set(element.id, img);
+              }
             }
           }
         }
       }
 
-      setLoadedImages(newLoadedImages);
+      // Only update state if there are actual changes
+      if (hasChanges || newLoadedImages.size !== loadedImages.size) {
+        setLoadedImages(newLoadedImages);
+      }
     };
 
     loadImages();
-  }, [slideElements.map(e => e.id + e.x + e.y + e.width + e.height).join(','), project?.mediaPool, renderVersion]);
+  }, [imageRelevantKey, project?.mediaPool, renderVersion]);
 
   const slideOffsetX = slideIndex * designSize.width;
 
@@ -126,10 +149,10 @@ function SlidePreview({
           isSelected ? 'ring-2 ring-blue-500' : 'ring-1 ring-gray-600 hover:ring-gray-500'
         } ${isDragging ? 'opacity-50' : ''}`}
       >
-        <Stage width={thumbnailWidth} height={THUMBNAIL_HEIGHT}>
-        <Layer>
+        <Stage width={thumbnailWidth} height={THUMBNAIL_HEIGHT} listening={false}>
+        <Layer listening={false}>
           {/* White background */}
-          <Rect x={0} y={0} width={thumbnailWidth} height={THUMBNAIL_HEIGHT} fill="white" />
+          <Rect x={0} y={0} width={thumbnailWidth} height={THUMBNAIL_HEIGHT} fill="white" listening={false} />
 
           {/* Render elements scaled and offset for this slide */}
           {slideElements
@@ -171,6 +194,8 @@ function SlidePreview({
                   offsetX={offsetX * scale}
                   offsetY={offsetY * scale}
                   crop={cropConfig}
+                  listening={false}
+                  perfectDrawEnabled={false}
                 />
               );
             })}
@@ -251,6 +276,9 @@ export function SlidesPanel() {
   const pendingDragIndex = useRef<number | null>(null);
   const DRAG_THRESHOLD = 5; // pixels before drag starts
 
+  // State to track when global listeners should be attached (for slide drag)
+  const [isSlideDragPending, setIsSlideDragPending] = useState(false);
+
   const slides = project?.slides || [];
   const elements = project?.elements || [];
 
@@ -311,7 +339,11 @@ export function SlidesPanel() {
   }, []);
 
   // Handle mouse move during drag (with threshold)
+  // ONLY attach listeners when a slide drag is pending/active
   useEffect(() => {
+    // Don't attach listeners unless we have a pending or active slide drag
+    if (!isSlideDragPending) return;
+
     const handleMouseMove = (e: MouseEvent) => {
       // Check if we have a pending drag that hasn't started yet
       if (pendingDragIndex.current !== null && dragStartPos.current && !isDraggingRef.current) {
@@ -351,10 +383,14 @@ export function SlidesPanel() {
         // Just a click, not a drag - reset pending state
         pendingDragIndex.current = null;
         dragStartPos.current = null;
+        setIsSlideDragPending(false);
         return;
       }
 
-      if (!isDraggingRef.current) return;
+      if (!isDraggingRef.current) {
+        setIsSlideDragPending(false);
+        return;
+      }
 
       // Execute reorder if we have a valid drop target
       if (dropTargetIndex !== null && dropSide !== null && draggedIndex !== null) {
@@ -379,6 +415,7 @@ export function SlidesPanel() {
       setDropTargetIndex(null);
       setDropSide(null);
       setDragPosition(null);
+      setIsSlideDragPending(false);
       document.body.style.cursor = '';
     };
 
@@ -389,7 +426,7 @@ export function SlidesPanel() {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [draggedIndex, dropTargetIndex, dropSide, calculateDropTarget, reorderSlides, DRAG_THRESHOLD]);
+  }, [isSlideDragPending, draggedIndex, dropTargetIndex, dropSide, calculateDropTarget, reorderSlides, DRAG_THRESHOLD]);
 
   // Handle Delete key to remove selected slide (only when panel has focus)
   useEffect(() => {
@@ -453,6 +490,9 @@ export function SlidesPanel() {
     // Store pending drag info - actual drag starts after threshold
     pendingDragIndex.current = index;
     dragStartPos.current = { x: e.clientX, y: e.clientY };
+
+    // Enable global listeners for drag detection
+    setIsSlideDragPending(true);
   }, []);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, index: number) => {

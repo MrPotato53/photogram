@@ -103,6 +103,7 @@ export function TemplatesPanel() {
   const [draggedTemplateId, setDraggedTemplateId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [dropSide, setDropSide] = useState<'left' | 'right' | null>(null);
+  const [isTemplateDragPending, setIsTemplateDragPending] = useState(false);
   const isDraggingRef = useRef(false);
   const dragStartPos = useRef<{ x: number; y: number } | null>(null);
   const pendingDragId = useRef<string | null>(null);
@@ -126,7 +127,10 @@ export function TemplatesPanel() {
   }, [isRenaming]);
 
   // Handle mouse move/up for dragging
+  // ONLY attach listeners when template drag is pending/active
   useEffect(() => {
+    if (!isTemplateDragPending) return;
+
     const handleMouseMove = (e: MouseEvent) => {
       // Check if we have a pending drag that hasn't started yet
       if (pendingDragId.current && dragStartPos.current && !isDraggingRef.current) {
@@ -169,10 +173,14 @@ export function TemplatesPanel() {
         // Was just a click, not a drag
         pendingDragId.current = null;
         dragStartPos.current = null;
+        setIsTemplateDragPending(false);
         return;
       }
 
-      if (!isDraggingRef.current) return;
+      if (!isDraggingRef.current) {
+        setIsTemplateDragPending(false);
+        return;
+      }
 
       // Execute reorder
       if (dropTargetId && dropSide && draggedTemplateId && draggedTemplateId !== dropTargetId) {
@@ -200,6 +208,7 @@ export function TemplatesPanel() {
       setDraggedTemplateId(null);
       setDropTargetId(null);
       setDropSide(null);
+      setIsTemplateDragPending(false);
       document.body.style.cursor = '';
     };
 
@@ -210,7 +219,7 @@ export function TemplatesPanel() {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [draggedTemplateId, dropTargetId, dropSide, matchingTemplates, reorderTemplates]);
+  }, [isTemplateDragPending, draggedTemplateId, dropTargetId, dropSide, matchingTemplates, reorderTemplates]);
 
   const handleSaveCurrentSlide = useCallback(() => {
     if (!project) return;
@@ -234,6 +243,7 @@ export function TemplatesPanel() {
     if (e.button !== 0) return;
     pendingDragId.current = templateId;
     dragStartPos.current = { x: e.clientX, y: e.clientY };
+    setIsTemplateDragPending(true);
   }, []);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, templateId: string) => {

@@ -172,16 +172,19 @@ export function FloatingPanel({
     // Keep localSize so it's used for display until store commits
   }, [localSize, panelId, setPanelSize]);
 
-  // Attach global listeners for drag and resize
+  // Attach global listeners ONLY when actively dragging or resizing
   useEffect(() => {
+    // Only attach listeners when needed
+    if (!isDragging && !isResizing) return;
+
     const handleMouseMove = (e: MouseEvent) => {
-      handleDrag(e);
-      handleResize(e);
+      if (isDragging) handleDrag(e);
+      if (isResizing) handleResize(e);
     };
 
     const handleMouseUp = () => {
-      handleDragEnd();
-      handleResizeEnd();
+      if (isDragging) handleDragEnd();
+      if (isResizing) handleResizeEnd();
     };
 
     window.addEventListener('mousemove', handleMouseMove);
@@ -191,7 +194,7 @@ export function FloatingPanel({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [handleDrag, handleResize, handleDragEnd, handleResizeEnd]);
+  }, [isDragging, isResizing, handleDrag, handleResize, handleDragEnd, handleResizeEnd]);
 
   // Cleanup timeout on unmount
   useEffect(() => {
