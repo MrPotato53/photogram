@@ -78,16 +78,14 @@ function TemplatePreview({
 }
 
 export function TemplatesPanel() {
-  const { project } = useProjectStore();
-  const { addSlideWithTemplate } = useSlideStore();
-  const {
-    templates,
-    saveSlideAsTemplate,
-    deleteTemplate,
-    renameTemplate,
-    reorderTemplates,
-    getTemplatesForAspectRatio,
-  } = useTemplatesStore();
+  const project = useProjectStore((s) => s.project);
+  const addSlideWithTemplate = useSlideStore((s) => s.addSlideWithTemplate);
+  const templates = useTemplatesStore((s) => s.templates);
+  const saveSlideAsTemplate = useTemplatesStore((s) => s.saveSlideAsTemplate);
+  const deleteTemplate = useTemplatesStore((s) => s.deleteTemplate);
+  const renameTemplate = useTemplatesStore((s) => s.renameTemplate);
+  const reorderTemplates = useTemplatesStore((s) => s.reorderTemplates);
+  const getTemplatesForAspectRatio = useTemplatesStore((s) => s.getTemplatesForAspectRatio);
 
   const gridRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<{

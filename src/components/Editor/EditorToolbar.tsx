@@ -4,6 +4,7 @@ import { useHistoryStore, useCanUndo, useCanRedo } from '../../stores/historySto
 
 interface EditorToolbarProps {
   projectName: string;
+  onPreviewClick: () => void;
   onExportClick: () => void;
 }
 
@@ -32,11 +33,13 @@ function ToolbarButton({ label, icon, isActive, onClick }: ToolbarButtonProps) {
   );
 }
 
-export function EditorToolbar({ projectName, onExportClick }: EditorToolbarProps) {
-  const { panels, togglePanel } = usePanelStore();
+export function EditorToolbar({ projectName, onPreviewClick, onExportClick }: EditorToolbarProps) {
+  const panels = usePanelStore((s) => s.panels);
+  const togglePanel = usePanelStore((s) => s.togglePanel);
   const canUndo = useCanUndo();
   const canRedo = useCanRedo();
-  const { undo, redo } = useHistoryStore();
+  const undo = useHistoryStore((s) => s.undo);
+  const redo = useHistoryStore((s) => s.redo);
 
   const panelButtons: { id: PanelId; label: string; icon: React.ReactNode }[] = [
     {
@@ -172,8 +175,19 @@ export function EditorToolbar({ projectName, onExportClick }: EditorToolbarProps
         />
       </div>
 
-      {/* Right: Future actions (export, etc.) */}
+      {/* Right: Preview & Export */}
       <div className="flex items-center gap-2">
+        <button
+          className="px-3 py-1 text-sm text-theme-text-secondary hover:text-theme-text bg-theme-bg-tertiary hover:bg-theme-bg rounded transition-colors flex items-center gap-1.5"
+          onClick={onPreviewClick}
+          title="Preview as Instagram post"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+          </svg>
+          <span className="hidden sm:inline">Preview</span>
+        </button>
         <button
           className="px-3 py-1 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
           onClick={onExportClick}

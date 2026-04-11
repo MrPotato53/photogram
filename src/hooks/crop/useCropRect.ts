@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useCropStore } from '../../stores/cropStore';
 
 interface CropRect {
   x: number;
@@ -15,6 +16,10 @@ interface UseCropRectOptions {
   existingCropH: number;
   aspectRatio: number | null;
   resetKey?: number;
+  // Current element position — pushed into crop history entries so undo
+  // can restore both the rect and the underlying element position.
+  elementX: number;
+  elementY: number;
 }
 
 /**
@@ -28,9 +33,15 @@ export function useCropRect({
   existingCropH,
   aspectRatio,
   resetKey,
+  elementX,
+  elementY,
 }: UseCropRectOptions) {
   // Track previous aspect ratio to detect swaps
   const prevAspectRatio = useRef<number | null>(null);
+  // Tracks whether the aspect-ratio effect has already run once; used to
+  // distinguish the initial mount sync from genuine user ratio changes so
+  // history only captures the latter.
+  const aspectRatioMountedRef = useRef(false);
 
   // The crop rectangle in PIXELS relative to the FULL bounds
   const [cropRect, setCropRect] = useState<CropRect>(() => ({
@@ -40,29 +51,54 @@ export function useCropRect({
     height: existingCropH * fullBounds.height,
   }));
 
+  // Live ref to current element position so effect-driven pushes
+  // (reset/aspect-ratio) include it without adding extra deps.
+  const elementPosRef = useRef({ x: elementX, y: elementY });
+  elementPosRef.current = { x: elementX, y: elementY };
+
   // Reset crop rect to full bounds when resetKey changes
   const prevResetKeyRef = useRef(resetKey);
   useEffect(() => {
     if (resetKey !== undefined && resetKey !== prevResetKeyRef.current) {
-      setCropRect({
+      const resetRect = {
         x: 0,
         y: 0,
         width: fullBounds.width,
         height: fullBounds.height,
+      };
+      setCropRect(resetRect);
+      useCropStore.getState().pushCropHistory({
+        cropRect: resetRect,
+        elementX: elementPosRef.current.x,
+        elementY: elementPosRef.current.y,
       });
     }
     prevResetKeyRef.current = resetKey;
   }, [resetKey, fullBounds.width, fullBounds.height]);
 
-  // Apply aspect ratio when it changes
+  // Access current cropRect without it being a dependency (avoids infinite loop
+  // where handle drags trigger this effect which overrides the drag position)
+  const cropRectRef = useRef(cropRect);
+  cropRectRef.current = cropRect;
+
+  // Apply aspect ratio ONLY when the ratio value itself changes
   useEffect(() => {
+    const isInitialMount = !aspectRatioMountedRef.current;
+    aspectRatioMountedRef.current = true;
+
     if (aspectRatio === null) {
       prevAspectRatio.current = null;
       return;
     }
 
-    const centerX = cropRect.x + cropRect.width / 2;
-    const centerY = cropRect.y + cropRect.height / 2;
+    // Skip if aspect ratio hasn't actually changed
+    if (prevAspectRatio.current !== null && Math.abs(aspectRatio - prevAspectRatio.current) < 0.0001) {
+      return;
+    }
+
+    const rect = cropRectRef.current;
+    const centerX = rect.x + rect.width / 2;
+    const centerY = rect.y + rect.height / 2;
 
     let newWidth: number;
     let newHeight: number;
@@ -73,15 +109,15 @@ export function useCropRect({
 
     if (isSwap) {
       // Swap: exchange width and height, keeping the same area
-      newWidth = cropRect.height;
-      newHeight = cropRect.width;
+      newWidth = rect.height;
+      newHeight = rect.width;
     } else {
       // Not a swap: fit within current dimensions
-      if (cropRect.width / cropRect.height > aspectRatio) {
-        newHeight = cropRect.height;
+      if (rect.width / rect.height > aspectRatio) {
+        newHeight = rect.height;
         newWidth = newHeight * aspectRatio;
       } else {
-        newWidth = cropRect.width;
+        newWidth = rect.width;
         newHeight = newWidth / aspectRatio;
       }
     }
@@ -104,9 +140,48 @@ export function useCropRect({
     newX = Math.max(0, Math.min(newX, fullBounds.width - newWidth));
     newY = Math.max(0, Math.min(newY, fullBounds.height - newHeight));
 
-    setCropRect({ x: newX, y: newY, width: newWidth, height: newHeight });
+    const adjustedRect = { x: newX, y: newY, width: newWidth, height: newHeight };
+    setCropRect(adjustedRect);
+    // Only push aspect-ratio-triggered changes to history when it's an actual
+    // user-initiated ratio change, not the initial mount sync.
+    if (!isInitialMount) {
+      useCropStore.getState().pushCropHistory({
+        cropRect: adjustedRect,
+        elementX: elementPosRef.current.x,
+        elementY: elementPosRef.current.y,
+      });
+    }
     prevAspectRatio.current = aspectRatio;
-  }, [aspectRatio, cropRect, fullBounds.width, fullBounds.height]);
+  }, [aspectRatio, fullBounds.width, fullBounds.height]);
+
+  // Initialize history with the settled initial rect (deferred so any mount-time
+  // aspect-ratio adjustment has already applied).
+  useEffect(() => {
+    const t = setTimeout(() => {
+      useCropStore.getState().initCropHistory({
+        cropRect: cropRectRef.current,
+        elementX: elementPosRef.current.x,
+        elementY: elementPosRef.current.y,
+      });
+    }, 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Subscribe to restore signal from the store (undo/redo). Only the rect
+  // portion is handled here — element-position restore is handled by the
+  // CropOverlay which has access to the element-drag callback.
+  const restoreVersion = useCropStore((s) => s.restoreVersion);
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
+    const target = useCropStore.getState().restoreTarget;
+    if (!target) return;
+    setCropRect({ ...target.cropRect });
+  }, [restoreVersion]);
 
   // Clamp crop rect within full bounds
   const clampCropRect = (rect: CropRect): CropRect => {

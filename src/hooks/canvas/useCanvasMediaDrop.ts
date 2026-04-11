@@ -31,10 +31,13 @@ export function useCanvasMediaDrop({
   totalDesignWidth,
   elements,
 }: UseCanvasMediaDropOptions) {
-  const { project } = useProjectStore();
-  const { setCurrentSlide } = useSlideStore();
-  const { addElement, updateElement } = useElementStore();
-  const { draggingMediaId, setDraggingMedia, setDragMousePosition, clearMediaSelection } = useMediaStore();
+  const project = useProjectStore((s) => s.project);
+  const setCurrentSlide = useSlideStore((s) => s.setCurrentSlide);
+  const addElement = useElementStore((s) => s.addElement);
+  const updateElement = useElementStore((s) => s.updateElement);
+  const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
+  const setDraggingMedia = useMediaStore((s) => s.setDraggingMedia);
+  const clearMediaSelection = useMediaStore((s) => s.clearMediaSelection);
 
   // Refs for drop handling (to avoid stale closures in always-attached listener)
   const dropStateRef = useRef({
@@ -74,7 +77,7 @@ export function useCanvasMediaDrop({
 
       if (!state.project || !stageContainerRef.current) {
         setDraggingMedia(null);
-        setDragMousePosition(null);
+
         return;
       }
 
@@ -84,7 +87,7 @@ export function useCanvasMediaDrop({
         const isOverPanel = elementUnderMouse.closest('[data-panel]') !== null;
         if (isOverPanel) {
           setDraggingMedia(null);
-          setDragMousePosition(null);
+  
           return;
         }
       }
@@ -92,7 +95,7 @@ export function useCanvasMediaDrop({
       const media = state.project.mediaPool.find((m) => m.id === state.draggingMediaId);
       if (!media) {
         setDraggingMedia(null);
-        setDragMousePosition(null);
+
         return;
       }
 
@@ -107,7 +110,7 @@ export function useCanvasMediaDrop({
       const totalScreenWidth = state.numSlides * state.canvasSize.width;
       if (dropScreenX < 0 || dropScreenX > totalScreenWidth || dropScreenY < 0 || dropScreenY > state.canvasSize.height) {
         setDraggingMedia(null);
-        setDragMousePosition(null);
+
         return;
       }
 
@@ -143,7 +146,7 @@ export function useCanvasMediaDrop({
         }
 
         setDraggingMedia(null);
-        setDragMousePosition(null);
+
         clearMediaSelection();
 
         updateElement(placeholderFrame.id, {
@@ -196,7 +199,6 @@ export function useCanvasMediaDrop({
       };
 
       setDraggingMedia(null);
-      setDragMousePosition(null);
       clearMediaSelection();
 
       addElement(newElement);
@@ -209,7 +211,7 @@ export function useCanvasMediaDrop({
 
     window.addEventListener('mouseup', handleMouseUp);
     return () => window.removeEventListener('mouseup', handleMouseUp);
-  }, [setDraggingMedia, setDragMousePosition, clearMediaSelection, addElement, updateElement, setCurrentSlide]);
+  }, [setDraggingMedia, clearMediaSelection, addElement, updateElement, setCurrentSlide]);
 
   return {};
 }

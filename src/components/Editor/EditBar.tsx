@@ -373,11 +373,17 @@ function SnapSettingsPopover({
 }
 
 export function EditBar() {
-  const { project } = useProjectStore();
-  const { selectedElementId, updateElement } = useElementStore();
-  const { panels, togglePanel } = usePanelStore();
-  const { cropModeElementId, enterCropMode } = useCropStore();
-  const { snapEnabled, setSnapEnabled, snapSettings, updateSnapSettings } = useSnapStore();
+  const project = useProjectStore((s) => s.project);
+  const selectedElementId = useElementStore((s) => s.selectedElementId);
+  const updateElement = useElementStore((s) => s.updateElement);
+  const panels = usePanelStore((s) => s.panels);
+  const togglePanel = usePanelStore((s) => s.togglePanel);
+  const cropModeElementId = useCropStore((s) => s.cropModeElementId);
+  const enterCropMode = useCropStore((s) => s.enterCropMode);
+  const snapEnabled = useSnapStore((s) => s.snapEnabled);
+  const setSnapEnabled = useSnapStore((s) => s.setSnapEnabled);
+  const snapSettings = useSnapStore((s) => s.snapSettings);
+  const updateSnapSettings = useSnapStore((s) => s.updateSnapSettings);
 
   const [snapPopoverOpen, setSnapPopoverOpen] = useState(false);
 

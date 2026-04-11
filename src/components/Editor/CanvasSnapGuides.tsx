@@ -1,11 +1,9 @@
-import { Line } from 'react-konva';
-import type { Guide } from '../../types';
+import { memo, useMemo } from 'react';
+import { Group, Line } from 'react-konva';
 import { generateStaticGuides } from '../../utils/snapping';
-import type { SnapSettings } from '../../stores/snapStore';
+import { useSnapStore } from '../../stores/snapStore';
 
 interface CanvasSnapGuidesProps {
-  snapSettings: SnapSettings;
-  activeGuides: Guide[];
   designSize: { width: number; height: number };
   totalDesignWidth: number;
   numSlides: number;
@@ -13,24 +11,27 @@ interface CanvasSnapGuidesProps {
   zoomLevel: number;
 }
 
-export function CanvasSnapGuides({
-  snapSettings,
-  activeGuides,
+export const CanvasSnapGuides = memo(function CanvasSnapGuides({
   designSize,
   totalDesignWidth,
   numSlides,
   scale,
   zoomLevel,
 }: CanvasSnapGuidesProps) {
-  const staticGuides = generateStaticGuides(
+  // Subscribe directly to snap store - isolates re-renders from activeGuides
+  // changes so they don't cascade up to CanvasArea
+  const snapSettings = useSnapStore((s) => s.snapSettings);
+  const activeGuides = useSnapStore((s) => s.activeGuides);
+
+  const staticGuides = useMemo(() => generateStaticGuides(
     snapSettings,
     designSize.height,
     designSize.width,
     numSlides
-  );
+  ), [snapSettings, designSize.height, designSize.width, numSlides]);
 
   return (
-    <>
+    <Group name="ui-guides" listening={false}>
       {/* Slide separator lines (thin dark lines) */}
       {Array.from({ length: numSlides - 1 }, (_, index) => {
         const slideX = (index + 1) * designSize.width;
@@ -80,7 +81,7 @@ export function CanvasSnapGuides({
           dash={[4 / (scale * zoomLevel), 4 / (scale * zoomLevel)]}
         />
       ))}
-    </>
+    </Group>
   );
-}
+});
 

@@ -1,5 +1,5 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
-import { Stage, Layer, Transformer, Rect } from 'react-konva';
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import { Stage, Layer, Group, Transformer, Rect } from 'react-konva';
 import type Konva from 'konva';
 import type { AspectRatio, Element, Template } from '../../types';
 import { useProjectStore } from '../../stores/projectStore';
@@ -33,11 +33,12 @@ interface CanvasAreaProps {
   aspectRatio: AspectRatio;
   onRenderSlideForExport?: (fn: (slideIndex: number, pixelRatio: number, format: 'png' | 'jpeg', quality: number) => string | null) => void;
   onRenderSlideThumbnail?: (fn: (slideIndex: number) => string | null) => void;
+  onRenderSlideForPreview?: (fn: (slideIndex: number, targetWidth: number) => string | null) => void;
 }
 
 const MAX_SLIDES = 20;
 
-export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideThumbnail }: CanvasAreaProps) {
+export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideThumbnail, onRenderSlideForPreview }: CanvasAreaProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const stageContainerRef = useRef<HTMLDivElement>(null);
@@ -50,53 +51,48 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   const scale = canvasSize.height > 0 ? canvasSize.height / DESIGN_HEIGHT : 1;
 
-  // Project store
-  const { project } = useProjectStore();
+  // Project store - use selectors to avoid re-renders from unrelated store changes
+  const project = useProjectStore((s) => s.project);
 
   // Slide store
-  const {
-    currentSlideIndex,
-    setCurrentSlide,
-    addSlide,
-    addSlideWithTemplate,
-    removeSlide,
-  } = useSlideStore();
+  const currentSlideIndex = useSlideStore((s) => s.currentSlideIndex);
+  const setCurrentSlide = useSlideStore((s) => s.setCurrentSlide);
+  const addSlide = useSlideStore((s) => s.addSlide);
+  const addSlideWithTemplate = useSlideStore((s) => s.addSlideWithTemplate);
+  const removeSlide = useSlideStore((s) => s.removeSlide);
 
   // Element store
-  const {
-    selectedElementId,
-    selectElement,
-    updateElement,
-    removeElement,
-    sendToFront,
-    sendToBack,
-    addElement,
-    copySelectedElement,
-    pasteElements,
-  } = useElementStore();
+  const selectedElementId = useElementStore((s) => s.selectedElementId);
+  const selectElement = useElementStore((s) => s.selectElement);
+  const updateElement = useElementStore((s) => s.updateElement);
+  const updateElementLocal = useElementStore((s) => s.updateElementLocal);
+  const removeElement = useElementStore((s) => s.removeElement);
+  const sendToFront = useElementStore((s) => s.sendToFront);
+  const sendToBack = useElementStore((s) => s.sendToBack);
+  const addElement = useElementStore((s) => s.addElement);
+  const copySelectedElement = useElementStore((s) => s.copySelectedElement);
+  const pasteElements = useElementStore((s) => s.pasteElements);
 
-  // Media store
-  const { draggingMediaId } = useMediaStore();
+  // Media store - use selector to avoid re-renders from drag position updates
+  const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
 
-  // Snap store
-  const {
-    snapEnabled,
-    snapSettings,
-    activeGuides,
-    setActiveGuides,
-  } = useSnapStore();
+  // Snap store - activeGuides is subscribed directly in CanvasSnapGuides
+  // to avoid re-rendering the entire CanvasArea on every guide change during drag
+  const snapEnabled = useSnapStore((s) => s.snapEnabled);
+  const snapSettings = useSnapStore((s) => s.snapSettings);
+  const setActiveGuides = useSnapStore((s) => s.setActiveGuides);
 
   // Crop store
-  const {
-    cropModeElementId,
-    enterCropMode,
-    exitCropMode,
-  } = useCropStore();
+  const cropModeElementId = useCropStore((s) => s.cropModeElementId);
+  const enterCropMode = useCropStore((s) => s.enterCropMode);
+  const exitCropMode = useCropStore((s) => s.exitCropMode);
 
-  const { templates, saveSlideAsTemplate } = useTemplatesStore();
+  const templates = useTemplatesStore((s) => s.templates);
+  const saveSlideAsTemplate = useTemplatesStore((s) => s.saveSlideAsTemplate);
 
   // History store
-  const { undo, redo } = useHistoryStore();
+  const undo = useHistoryStore((s) => s.undo);
+  const redo = useHistoryStore((s) => s.redo);
 
   // Template picker modal state
   const [isTemplatePickerOpen, setIsTemplatePickerOpen] = useState(false);
@@ -109,6 +105,30 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   const slides = project?.slides || [];
   const elements = project?.elements || [];
   const numSlides = slides.length;
+
+  // Element lookup map for O(1) access by ID (replaces repeated .find() calls)
+  const elementMap = useMemo(() => {
+    const map = new Map<string, Element>();
+    for (const el of elements) {
+      map.set(el.id, el);
+    }
+    return map;
+  }, [elements]);
+
+  // Pre-computed max zIndex for new element creation
+  const maxZIndex = useMemo(() => {
+    let max = 0;
+    for (const el of elements) {
+      if (el.zIndex > max) max = el.zIndex;
+    }
+    return max;
+  }, [elements]);
+
+  // Sorted elements for rendering (memoized to avoid re-sorting every render)
+  const sortedElements = useMemo(
+    () => [...elements].sort((a, b) => a.zIndex - b.zIndex),
+    [elements]
+  );
 
   // Total canvas width in design coordinates
   const totalDesignWidth = numSlides * designSize.width;
@@ -131,11 +151,15 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // Track active anchor for transform snapping
   const activeAnchorRef = useRef<string | null>(null);
 
+  // Stage overflow ref for access inside useCallbacks without adding as dependency
+  const stageOverflowRef = useRef(200);
+
   // Auto-scroll hook
   const isDraggingRef = useRef<boolean>(false); // Track if we're currently dragging
 
   // Throttle refs for drag operations - reduce expensive calculations during drag
   const lastSnapCalcRef = useRef<{ x: number; y: number; time: number }>({ x: 0, y: 0, time: 0 });
+  const lastSnapTargetRef = useRef<{ x: number; y: number; snappedX: boolean; snappedY: boolean }>({ x: 0, y: 0, snappedX: false, snappedY: false });
   const SNAP_THROTTLE_MS = 32; // ~30fps for snap calculations
   const SNAP_MIN_DISTANCE = 3; // Minimum pixels moved before recalculating snaps
   const { stopAutoScroll, updateScrollSpeed } = useCanvasAutoScroll({
@@ -182,7 +206,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   });
 
   // Export hook - expose rendering functions to parent
-  const { renderSlideForExport, renderSlideThumbnail } = useSlideExport({ stageRef, project, scale });
+  const { renderSlideForExport, renderSlideThumbnail, renderSlideForPreview } = useSlideExport({ stageRef, project, scale });
 
   useEffect(() => {
     if (onRenderSlideForExport) {
@@ -195,6 +219,78 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       onRenderSlideThumbnail(renderSlideThumbnail);
     }
   }, [onRenderSlideThumbnail, renderSlideThumbnail]);
+
+  useEffect(() => {
+    if (onRenderSlideForPreview) {
+      onRenderSlideForPreview(renderSlideForPreview);
+    }
+  }, [onRenderSlideForPreview, renderSlideForPreview]);
+
+  // Middle-mouse panning. Press-and-hold middle button anywhere inside the
+  // scroll container to drag-scroll the canvas; releases or pointer leaves
+  // the window to cancel. Prevents the browser's native middle-click
+  // auto-scroll from activating.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    let panning = false;
+    let startClientX = 0;
+    let startClientY = 0;
+    let startScrollLeft = 0;
+    let startScrollTop = 0;
+    const prevCursor = container.style.cursor;
+
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button !== 1) return;
+      // Suppress the browser's native auto-scroll UI.
+      e.preventDefault();
+      panning = true;
+      startClientX = e.clientX;
+      startClientY = e.clientY;
+      startScrollLeft = container.scrollLeft;
+      startScrollTop = container.scrollTop;
+      container.style.cursor = 'grabbing';
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!panning) return;
+      const dx = e.clientX - startClientX;
+      const dy = e.clientY - startClientY;
+      container.scrollLeft = startScrollLeft - dx;
+      container.scrollTop = startScrollTop - dy;
+    };
+
+    const endPan = () => {
+      if (!panning) return;
+      panning = false;
+      container.style.cursor = prevCursor;
+    };
+
+    const onMouseUp = (e: MouseEvent) => {
+      if (e.button !== 1) return;
+      endPan();
+    };
+
+    // Block the middle-click auto-scroll icon that some browsers show.
+    const onAuxClick = (e: MouseEvent) => {
+      if (e.button === 1) e.preventDefault();
+    };
+
+    container.addEventListener('mousedown', onMouseDown);
+    container.addEventListener('auxclick', onAuxClick);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('blur', endPan);
+
+    return () => {
+      container.removeEventListener('mousedown', onMouseDown);
+      container.removeEventListener('auxclick', onAuxClick);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('blur', endPan);
+    };
+  }, []);
 
   // Crop aspect ratio state
   const [cropAspectRatio, setCropAspectRatio] = useState<number | null>(null);
@@ -328,7 +424,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       transformer.nodes([]);
       transformer.getLayer()?.batchDraw();
     }
-  }, [selectedElementId, cropModeElementId, loadedImages]);
+  }, [selectedElementId, cropModeElementId, loadedImages.get(selectedElementId ?? '')]);
 
   // Track shift key
   useEffect(() => {
@@ -371,7 +467,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     onRestoreCropState: () => {
       if (cropModeElementId && cropOriginalStateRef.current) {
         const original = cropOriginalStateRef.current;
-        updateElement(cropModeElementId, {
+        // Local-only — discard in-crop edits without polluting global history.
+        updateElementLocal(cropModeElementId, {
           x: original.x,
           y: original.y,
           cropX: original.cropX,
@@ -438,7 +535,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
         // Scroll to first pasted element if needed
         if (newIds.length > 0) {
-          const firstElement = elements.find((el) => el.id === newIds[0]);
+          const firstElement = elementMap.get(newIds[0]);
           if (firstElement) {
             scrollToElement(firstElement);
           }
@@ -502,7 +599,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // File drop and media drop are handled by hooks (useCanvasFileDrop, useCanvasMediaDrop)
 
   // Handle stage click - deselect if clicking empty space
-  const handleStageClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
+  const handleStageClick = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     if (e.target === e.target.getStage()) {
       selectElement(null);
       // Update current slide based on click position
@@ -510,7 +607,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       if (stage) {
         const pointerPos = stage.getPointerPosition();
         if (pointerPos) {
-          const designX = pointerPos.x / (scale * zoomLevel);
+          const designX = (pointerPos.x - stageOverflowRef.current) / (scale * zoomLevel);
           const slideIndex = getSlideIndex(designX, designSize.width);
           if (slideIndex >= 0 && slideIndex < numSlides) {
             setCurrentSlide(slideIndex);
@@ -518,21 +615,21 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         }
       }
     }
-  };
+  }, [selectElement, scale, zoomLevel, designSize.width, numSlides, setCurrentSlide]);
 
-  const handleElementClick = (elementId: string, e: Konva.KonvaEventObject<MouseEvent>) => {
+  const handleElementClick = useCallback((elementId: string, e: Konva.KonvaEventObject<MouseEvent>) => {
     e.cancelBubble = true;
     selectElement(elementId);
 
     // Update current slide based on element position
-    const element = elements.find((el) => el.id === elementId);
+    const element = elementMap.get(elementId);
     if (element) {
       const slideIndex = getSlideIndexFromCenter(element.x, element.width, designSize.width);
       if (slideIndex >= 0 && slideIndex < numSlides) {
         setCurrentSlide(slideIndex);
       }
     }
-  };
+  }, [selectElement, elementMap, designSize.width, numSlides, setCurrentSlide]);
 
   // Clamp element to visible bounds (can span across entire canvas)
   const clampToVisibleBounds = useCallback(
@@ -557,14 +654,16 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   const handleDragMove = useCallback(
     (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
       const node = e.target;
-      const element = elements.find((el) => el.id === elementId);
+      const element = elementMap.get(elementId);
       if (!element) return;
 
       let newX = node.x();
       let newY = node.y();
 
       // Apply snapping (snap to slide boundaries and other elements)
-      // THROTTLED: Only recalculate snaps if enough time/distance has passed
+      // THROTTLED: Only recalculate snap lines if enough time/distance has passed,
+      // but always apply the cached snap offset so the element "sticks" to the snap
+      // position instead of jittering between raw and snapped positions.
       if (snapEnabled) {
         const now = performance.now();
         const lastCalc = lastSnapCalcRef.current;
@@ -591,12 +690,26 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
             height: element.height,
           };
           const snapResult = findSnap(elementRect, snapLines, 10);
+
+          // Cache the snap target so throttled frames stick to it
+          lastSnapTargetRef.current = {
+            x: snapResult.x,
+            y: snapResult.y,
+            snappedX: snapResult.x !== newX,
+            snappedY: snapResult.y !== newY,
+          };
+
           newX = snapResult.x;
           newY = snapResult.y;
           setActiveGuides(snapResult.guides);
 
           // Update last calculation tracking
           lastSnapCalcRef.current = { x: newX, y: newY, time: now };
+        } else {
+          // Throttled frame: force to cached snap target for sticky feel
+          const lastSnap = lastSnapTargetRef.current;
+          if (lastSnap.snappedX) newX = lastSnap.x;
+          if (lastSnap.snappedY) newY = lastSnap.y;
         }
       }
 
@@ -608,19 +721,20 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       // Update auto-scroll based on mouse position
       updateScrollSpeed(e.evt.clientX);
     },
-    [elements, snapEnabled, snapSettings, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds, updateScrollSpeed]
+    [elementMap, snapEnabled, snapSettings, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds, updateScrollSpeed, elements]
   );
 
   // Handle drag start
   const handleDragStart = useCallback(() => {
     isDraggingRef.current = true;
+    lastSnapTargetRef.current = { x: 0, y: 0, snappedX: false, snappedY: false };
   }, []);
 
   // Handle drag end - apply final snap and persist position
   const handleDragEnd = useCallback(
     (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
       const node = e.target;
-      const element = elements.find((el) => el.id === elementId);
+      const element = elementMap.get(elementId);
       if (!element) return;
 
       // Stop auto-scroll and reset drag state
@@ -662,7 +776,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         setCurrentSlide(slideIndex);
       }
     },
-    [elements, updateElement, setActiveGuides, clampToVisibleBounds, designSize.width, designSize.height, numSlides, setCurrentSlide, stopAutoScroll, snapEnabled, snapSettings, totalDesignWidth]
+    [elementMap, updateElement, setActiveGuides, clampToVisibleBounds, designSize.width, designSize.height, numSlides, setCurrentSlide, stopAutoScroll, snapEnabled, snapSettings, totalDesignWidth, elements]
   );
 
   // Handle transform end
@@ -858,9 +972,10 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
       const stage = e.target.getStage();
       const pointerPos = stage?.getPointerPosition();
+      const overflow = stageOverflowRef.current;
       const designPos = pointerPos ? {
-        x: pointerPos.x / (scale * zoomLevel),
-        y: pointerPos.y / (scale * zoomLevel),
+        x: (pointerPos.x - overflow) / (scale * zoomLevel),
+        y: (pointerPos.y - overflow) / (scale * zoomLevel),
       } : { x: 0, y: 0 };
 
       // Calculate which slide was clicked
@@ -878,7 +993,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   const handleFlipHorizontal = () => {
     if (!contextMenu.elementId) return;
-    const element = elements.find((el) => el.id === contextMenu.elementId);
+    const element = elementMap.get(contextMenu.elementId!);
     if (!element) return;
     updateElement(contextMenu.elementId, { flipX: !element.flipX });
     setContextMenu({ ...contextMenu, isOpen: false });
@@ -886,7 +1001,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   const handleFlipVertical = () => {
     if (!contextMenu.elementId) return;
-    const element = elements.find((el) => el.id === contextMenu.elementId);
+    const element = elementMap.get(contextMenu.elementId!);
     if (!element) return;
     updateElement(contextMenu.elementId, { flipY: !element.flipY });
     setContextMenu({ ...contextMenu, isOpen: false });
@@ -894,7 +1009,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   const handleCenterOnCanvas = () => {
     if (!contextMenu.elementId) return;
-    const element = elements.find((el) => el.id === contextMenu.elementId);
+    const element = elementMap.get(contextMenu.elementId!);
     if (!element) return;
     // Center on current slide
     const slideOffsetX = currentSlideIndex * designSize.width;
@@ -930,7 +1045,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   const handleResetCrop = () => {
     if (!contextMenu.elementId) return;
-    const element = elements.find((el) => el.id === contextMenu.elementId);
+    const element = elementMap.get(contextMenu.elementId!);
     if (!element) return;
 
     const existingCropX = element.cropX ?? 0;
@@ -963,7 +1078,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   const handleResetAspectRatio = () => {
     if (!contextMenu.elementId) return;
-    const element = elements.find((el) => el.id === contextMenu.elementId);
+    const element = elementMap.get(contextMenu.elementId!);
     if (!element) return;
 
     const loadedImage = loadedImages.get(element.id);
@@ -999,7 +1114,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   const handleCreateFrame = async () => {
     if (!contextMenu.elementId) return;
-    const element = elements.find((el) => el.id === contextMenu.elementId);
+    const element = elementMap.get(contextMenu.elementId!);
     if (!element) return;
 
     // Create a placeholder frame with same dimensions, offset diagonally
@@ -1013,7 +1128,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       rotation: element.rotation,
       scale: 1,
       locked: false,
-      zIndex: Math.max(...elements.map((el) => el.zIndex), 0) + 1,
+      zIndex: maxZIndex + 1,
     };
 
     await addElement(newFrame);
@@ -1039,7 +1154,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       rotation: 0,
       scale: 1,
       locked: false,
-      zIndex: Math.max(...elements.map((el) => el.zIndex), 0) + 1,
+      zIndex: maxZIndex + 1,
     };
 
     await addElement(newFrame);
@@ -1071,7 +1186,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   const handleCopyElement = () => {
     if (!contextMenu.elementId) return;
-    const element = elements.find((el) => el.id === contextMenu.elementId);
+    const element = elementMap.get(contextMenu.elementId!);
     if (!element) return;
     useClipboardStore.getState().copyElements([element]);
     setContextMenu({ ...contextMenu, isOpen: false });
@@ -1088,7 +1203,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
     // Scroll to first pasted element if needed
     if (newIds.length > 0 && scrollContainerRef.current) {
-      const firstElement = elements.find((el) => el.id === newIds[0]);
+      const firstElement = elementMap.get(newIds[0]);
       if (firstElement) {
         scrollToElement(firstElement);
       }
@@ -1097,8 +1212,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     setContextMenu({ ...contextMenu, isOpen: false });
   };
 
-  const { duplicateSlide } = useSlideStore();
-  const { hasClipboardData } = useClipboardStore();
+  const duplicateSlide = useSlideStore((s) => s.duplicateSlide);
+  const hasClipboardData = useClipboardStore((s) => s.hasClipboardData);
 
   const handleDuplicateSlide = () => {
     const slideIndex = contextMenu.slideIndex ?? currentSlideIndex;
@@ -1148,7 +1263,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     newHeight: number;
   }) => {
     if (cropModeElementId) {
-      const element = elements.find((el) => el.id === cropModeElementId);
+      const element = elementMap.get(cropModeElementId);
       if (!element) return;
 
       const existingCropX = element.cropX ?? 0;
@@ -1184,7 +1299,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   };
 
   const croppingElement = cropModeElementId
-    ? elements.find((el) => el.id === cropModeElementId)
+    ? elementMap.get(cropModeElementId) ?? null
     : null;
 
   // Capture original element state when entering crop mode
@@ -1210,7 +1325,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   useEffect(() => {
     if (cropModeElementId && cropModeElementId !== prevCropModeElementIdRef.current) {
       // Entering crop mode for a new element
-      const element = elements.find((el) => el.id === cropModeElementId);
+      const element = elementMap.get(cropModeElementId);
 
       // Check if lastCropRatio exists on the element (could be null for Free, or a number)
       if ('lastCropRatio' in (element || {})) {
@@ -1230,10 +1345,14 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   }, [cropModeElementId, elements]);
 
   const handleCropCancel = () => {
-    // Restore original element state (position and crop values)
+    // Restore original element state (position and crop values) as a LOCAL
+    // update — no history push, no backend call. Since shift+pan edits made
+    // during crop mode were also local, the backend is still at the original
+    // state and the global undo stack reflects whatever it held before crop
+    // mode was entered.
     if (cropModeElementId && cropOriginalStateRef.current) {
       const original = cropOriginalStateRef.current;
-      updateElement(cropModeElementId, {
+      updateElementLocal(cropModeElementId, {
         x: original.x,
         y: original.y,
         cropX: original.cropX,
@@ -1249,9 +1368,10 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   const handleCropElementDrag = useCallback((x: number, y: number) => {
     if (cropModeElementId) {
-      updateElement(cropModeElementId, { x, y });
+      // Local-only during crop mode — committed on confirm, discarded on cancel.
+      updateElementLocal(cropModeElementId, { x, y });
     }
-  }, [cropModeElementId, updateElement]);
+  }, [cropModeElementId, updateElementLocal]);
 
   const croppingFullBounds = croppingElement
     ? {
@@ -1262,6 +1382,19 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   const showDropZone = draggingMediaId !== null;
   const totalCanvasWidth = numSlides * canvasSize.width;
+
+  // Dynamic Stage overflow so Transformer handles are never clipped.
+  // Sized to the largest element (handles can be at most elementSize away from canvas edge).
+  const maxElementDim = useMemo(() => {
+    let max = 0;
+    for (const el of elements) {
+      if (el.width > max) max = el.width;
+      if (el.height > max) max = el.height;
+    }
+    return max;
+  }, [elements]);
+  const stageOverflow = Math.min(Math.ceil(maxElementDim * scale * zoomLevel) + 20, 800);
+  stageOverflowRef.current = stageOverflow;
 
   // Check if content should be centered (when it doesn't overflow)
   const containerWidth = containerRef.current?.clientWidth || 0;
@@ -1317,13 +1450,13 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
           {canvasSize.width > 0 && canvasSize.height > 0 && (
             <Stage
               ref={stageRef}
-              width={totalCanvasWidth * zoomLevel}
-              height={canvasSize.height * zoomLevel}
-              style={{ position: 'absolute', left: 24, top: 0 }}
+              width={totalCanvasWidth * zoomLevel + 2 * stageOverflow}
+              height={canvasSize.height * zoomLevel + stageOverflow}
+              style={{ position: 'absolute', left: 24 - stageOverflow, top: -stageOverflow, pointerEvents: showDropZone ? 'none' : undefined }}
               onClick={handleStageClick}
               onContextMenu={handleStageContextMenu}
             >
-              <Layer scaleX={scale * zoomLevel} scaleY={scale * zoomLevel}>
+              <Layer scaleX={scale * zoomLevel} scaleY={scale * zoomLevel} x={stageOverflow} y={stageOverflow}>
                 {/* White background for thumbnail captures */}
                 <Rect
                   x={0}
@@ -1333,33 +1466,37 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
                   fill="white"
                   listening={false}
                 />
-                {/* Render all elements sorted by zIndex */}
-                {[...elements]
-                  .sort((a, b) => a.zIndex - b.zIndex)
-                  .map((element) => {
-                    const loadedImage = loadedImages.get(element.id);
-                    return (
-                      <CanvasElementRenderer
-                        key={element.id}
-                        element={element}
-                        loadedImage={loadedImage || null}
-                        isSelected={selectedElementId === element.id}
-                        isBeingCropped={cropModeElementId === element.id}
-                        zoomLevel={zoomLevel}
-                        onElementClick={handleElementClick}
-                        onDragStart={handleDragStart}
-                        onDragMove={handleDragMove}
-                        onDragEnd={handleDragEnd}
-                        onTransformEnd={handleTransformEnd}
-                        cropModeElementId={cropModeElementId}
-                      />
-                    );
-                  })}
+                {/* Clip group keeps element images within canvas bounds while
+                    allowing the Transformer (outside this Group) to draw handles beyond */}
+                <Group
+                  clipFunc={(ctx) => {
+                    ctx.rect(0, 0, totalDesignWidth, designSize.height);
+                  }}
+                >
+                  {/* Render all elements sorted by zIndex */}
+                  {sortedElements.map((element) => {
+                      const loadedImage = loadedImages.get(element.id);
+                      return (
+                        <CanvasElementRenderer
+                          key={element.id}
+                          element={element}
+                          loadedImage={loadedImage || null}
+                          isSelected={selectedElementId === element.id}
+                          isBeingCropped={cropModeElementId === element.id}
+                          zoomLevel={zoomLevel}
+                          onElementClick={handleElementClick}
+                          onDragStart={handleDragStart}
+                          onDragMove={handleDragMove}
+                          onDragEnd={handleDragEnd}
+                          onTransformEnd={handleTransformEnd}
+                          cropModeElementId={cropModeElementId}
+                        />
+                      );
+                    })}
+                </Group>
 
                 {/* Snap guides and slide separators */}
                 <CanvasSnapGuides
-                  snapSettings={snapSettings}
-                  activeGuides={activeGuides}
                   designSize={designSize}
                   totalDesignWidth={totalDesignWidth}
                   numSlides={numSlides}

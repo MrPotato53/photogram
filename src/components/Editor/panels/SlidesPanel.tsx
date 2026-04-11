@@ -45,7 +45,7 @@ function SlidePreview({
   renderVersion,
 }: SlidePreviewProps) {
   const [loadedImages, setLoadedImages] = useState<Map<string, HTMLImageElement>>(new Map());
-  const { project } = useProjectStore();
+  const project = useProjectStore((s) => s.project);
 
   const thumbnailWidth = (THUMBNAIL_HEIGHT * designSize.width) / designSize.height;
   const scale = THUMBNAIL_HEIGHT / DESIGN_HEIGHT;
@@ -231,19 +231,19 @@ function SlidePreview({
 }
 
 export function SlidesPanel() {
-  const { project } = useProjectStore();
-  const {
-    currentSlideIndex,
-    setCurrentSlide,
-    addSlide,
-    addSlideWithTemplate,
-    removeSlide,
-    reorderSlides,
-    duplicateSlide,
-  } = useSlideStore();
-  const { panels, togglePanel } = usePanelStore();
+  const project = useProjectStore((s) => s.project);
+  const currentSlideIndex = useSlideStore((s) => s.currentSlideIndex);
+  const setCurrentSlide = useSlideStore((s) => s.setCurrentSlide);
+  const addSlide = useSlideStore((s) => s.addSlide);
+  const addSlideWithTemplate = useSlideStore((s) => s.addSlideWithTemplate);
+  const removeSlide = useSlideStore((s) => s.removeSlide);
+  const reorderSlides = useSlideStore((s) => s.reorderSlides);
+  const duplicateSlide = useSlideStore((s) => s.duplicateSlide);
+  const panels = usePanelStore((s) => s.panels);
+  const togglePanel = usePanelStore((s) => s.togglePanel);
 
-  const { templates, saveSlideAsTemplate } = useTemplatesStore();
+  const templates = useTemplatesStore((s) => s.templates);
+  const saveSlideAsTemplate = useTemplatesStore((s) => s.saveSlideAsTemplate);
 
   // Template picker modal state
   const [isTemplatePickerOpen, setIsTemplatePickerOpen] = useState(false);

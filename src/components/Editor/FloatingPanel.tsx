@@ -20,8 +20,10 @@ export function FloatingPanel({
   minWidth = 200,
   minHeight = 150,
 }: FloatingPanelProps) {
-  const { panels, setPanelSize, closePanel } = usePanelStore();
-  const { draggingMediaId } = useMediaStore();
+  const panels = usePanelStore((s) => s.panels);
+  const setPanelSize = usePanelStore((s) => s.setPanelSize);
+  const closePanel = usePanelStore((s) => s.closePanel);
+  const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
   const panelState = panels[panelId];
 
   // Allow drop events to bubble up to EditorLayout when media is being dragged
@@ -94,6 +96,13 @@ export function FloatingPanel({
         commitTimeoutRef.current = null;
       }
 
+      // Set global cursor so it persists even when mouse leaves the handle
+      const cursorMap: Record<string, string> = {
+        e: 'ew-resize', w: 'ew-resize', s: 'ns-resize', n: 'ns-resize',
+        se: 'nwse-resize', nw: 'nwse-resize', sw: 'nesw-resize', ne: 'nesw-resize',
+      };
+      document.body.style.cursor = cursorMap[direction] || 'default';
+
       setIsResizing(true);
       setResizeDirection(direction);
 
@@ -147,6 +156,7 @@ export function FloatingPanel({
   );
 
   const handleResizeEnd = useCallback(() => {
+    document.body.style.cursor = '';
     if (localSize) {
       // Store the size to commit and schedule a debounced commit
       pendingSizeRef.current = localSize;
