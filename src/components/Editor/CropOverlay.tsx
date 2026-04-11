@@ -3,6 +3,7 @@ import { Group, Rect } from 'react-konva';
 import type Konva from 'konva';
 import type { Element } from '../../types';
 import type { SnapSettings } from '../../stores/snapStore';
+import { useCropStore } from '../../stores/cropStore';
 import { useCropRect } from '../../hooks/crop/useCropRect';
 import { useCropSnapping } from '../../hooks/crop/useCropSnapping';
 import { useCropEdgeHandles } from '../../hooks/crop/useCropEdgeHandles';
@@ -84,6 +85,9 @@ export function CropOverlay({
     cropCanvasY: number;
     // Layer scale at drag start (needed because dragBoundFunc works in screen coords)
     layerScale: number;
+    // Layer x/y offset at drag start (stageOverflow) - needed for correct stage coord conversion
+    layerX: number;
+    layerY: number;
   } | null>(null);
 
   // Calculate full bounds position in design coordinates
@@ -99,6 +103,8 @@ export function CropOverlay({
     existingCropH,
     aspectRatio,
     resetKey,
+    elementX: element.x,
+    elementY: element.y,
   });
 
   // Snapping hook
@@ -463,9 +469,24 @@ export function CropOverlay({
     node.y(handlePos.y - handleSize / 2);
   };
 
-  // Handle corner drag end - clear guides
+  // Handle corner drag end - clear guides and commit history snapshot
   const handleCornerDragEnd = () => {
     setActiveGuides([]);
+    useCropStore.getState().pushCropHistory({
+      cropRect,
+      elementX: element.x,
+      elementY: element.y,
+    });
+  };
+
+  // Wrap edge drag end to also commit a history snapshot
+  const handleEdgeDragEndWithHistory = () => {
+    handleEdgeDragEnd();
+    useCropStore.getState().pushCropHistory({
+      cropRect,
+      elementX: element.x,
+      elementY: element.y,
+    });
   };
 
   // Track element position for Shift+pan mode
@@ -537,7 +558,31 @@ export function CropOverlay({
 
   const handleCropRectDragEnd = () => {
     setActiveGuides([]);
+    useCropStore.getState().pushCropHistory({
+      cropRect,
+      elementX: element.x,
+      elementY: element.y,
+    });
   };
+
+  // Restore element position on undo/redo signal. useCropRect already
+  // handles the rect side of the restore; this effect applies the element
+  // position portion so undo reverts shift+pan moves too.
+  const restoreVersion = useCropStore((s) => s.restoreVersion);
+  const restoreDidMountRef = useRef(false);
+  useEffect(() => {
+    if (!restoreDidMountRef.current) {
+      restoreDidMountRef.current = true;
+      return;
+    }
+    const target = useCropStore.getState().restoreTarget;
+    if (!target) return;
+    // Pre-seed the compensation ref so the element.x/y watcher sees zero
+    // delta when the element prop updates and does not double-apply an
+    // adjustment to cropRect.
+    elementPositionRef.current = { x: target.elementX, y: target.elementY };
+    onElementDrag(target.elementX, target.elementY);
+  }, [restoreVersion, onElementDrag]);
 
   // Listen for Enter/Escape keys
   useEffect(() => {
@@ -621,7 +666,7 @@ export function CropOverlay({
           getCornerPosition={getCornerPosition}
           onEdgeDragStart={handleDragStart}
           onEdgeDrag={handleEdgeDrag}
-          onEdgeDragEnd={handleEdgeDragEnd}
+          onEdgeDragEnd={handleEdgeDragEndWithHistory}
           onCornerDrag={handleCornerDrag}
           onCornerDragEnd={handleCornerDragEnd}
         />
@@ -652,6 +697,8 @@ export function CropOverlay({
           const node = e.target;
           const layer = node.getLayer();
           const layerScale = layer?.scaleX() ?? 1;
+          const layerX = layer?.x() ?? 0;
+          const layerY = layer?.y() ?? 0;
           const actualRectX = node.x();
           const actualRectY = node.y();
 
@@ -666,6 +713,8 @@ export function CropOverlay({
             cropCanvasX: actualRectX + cropRect.x,
             cropCanvasY: actualRectY + cropRect.y,
             layerScale,
+            layerX,
+            layerY,
           };
 
           // Set ref SYNCHRONOUSLY so dragBoundFunc has immediate access
@@ -681,8 +730,10 @@ export function CropOverlay({
           if (!start) return pos;
 
           const scale = start.layerScale;
-          const startXScreen = start.rectX * scale;
-          const startYScreen = start.rectY * scale;
+          // Layer has an x/y offset (stageOverflow) that must be included when converting
+          // design coordinates to stage coordinates: stageX = layerX + designX * scale
+          const startXScreen = start.layerX + start.rectX * scale;
+          const startYScreen = start.layerY + start.rectY * scale;
           const startCrop = start.cropRect;
 
           // Calculate bounds in design coords, then convert to screen
@@ -722,13 +773,22 @@ export function CropOverlay({
 
             // Finalize cropRect: when full bounds moves by delta, crop rect moves opposite
             const startCrop = start.cropRect;
-            setCropRect({
+            const finalCropRect = {
               ...startCrop,
               x: Math.max(0, Math.min(startCrop.x - deltaX, fullBounds.width - startCrop.width)),
               y: Math.max(0, Math.min(startCrop.y - deltaY, fullBounds.height - startCrop.height)),
-            });
+            };
+            setCropRect(finalCropRect);
 
             elementPositionRef.current = { x: element.x, y: element.y };
+
+            // Commit shift+pan as a crop history entry so undo reverts both
+            // the rect position and the element position together.
+            useCropStore.getState().pushCropHistory({
+              cropRect: finalCropRect,
+              elementX: element.x,
+              elementY: element.y,
+            });
           }
           shiftPanStartRef.current = null;
           setShiftPanStart(null);

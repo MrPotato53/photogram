@@ -12,6 +12,12 @@ interface ElementState {
   selectElement: (id: string | null) => void;
   addElement: (element: Element) => Promise<void>;
   updateElement: (elementId: string, updates: Partial<Element>) => Promise<void>;
+  // Local-only element update: mutates the in-memory project via
+  // setProjectSilent without persisting to the backend and without pushing
+  // a history entry. Used for transient state (e.g. crop-mode shift+pan)
+  // that should be discarded on cancel and committed as a single entry
+  // on confirm.
+  updateElementLocal: (elementId: string, updates: Partial<Element>) => void;
   removeElement: (elementId: string) => Promise<void>;
   reorderElements: (orderedIds: string[]) => Promise<void>;
   sendToFront: (elementId: string) => Promise<void>;
@@ -63,6 +69,25 @@ export const useElementStore = create<ElementState>((set, get) => ({
     } catch (error) {
       console.error('Failed to add element:', error);
     }
+  },
+
+  updateElementLocal: (elementId: string, updates: Partial<Element>) => {
+    const project = useProjectStore.getState().project;
+    if (!project) return;
+
+    const elementIndex = project.elements.findIndex((e) => e.id === elementId);
+    if (elementIndex === -1) return;
+
+    const updatedElements = [...project.elements];
+    updatedElements[elementIndex] = {
+      ...updatedElements[elementIndex],
+      ...updates,
+    };
+
+    useProjectStore.getState().setProjectSilent({
+      ...project,
+      elements: updatedElements,
+    });
   },
 
   updateElement: async (elementId: string, updates: Partial<Element>) => {

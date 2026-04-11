@@ -9,6 +9,7 @@ import { ConfirmDialog } from '../../common/ConfirmDialog';
 import { MediaPreviewModal } from '../MediaPreviewModal';
 import { showInFolder, checkMediaExists, relinkMedia } from '../../../services/tauri';
 import type { MediaItem } from '../../../types';
+import { updateDragPreviewPosition } from '../DragPreview';
 
 // Zoom settings
 const MIN_ZOOM = 0.5;
@@ -50,7 +51,7 @@ const MediaItemComponent = memo(function MediaItemComponent({
       onDoubleClick={() => onDoubleClick(media)}
       onContextMenu={(e) => onContextMenu(e, media)}
       className={clsx(
-        'aspect-square rounded overflow-hidden cursor-grab transition-all relative select-none',
+        'aspect-square rounded overflow-hidden cursor-grab relative select-none',
         showNativeAspectRatio ? 'bg-theme-bg-tertiary/50' : 'bg-theme-bg-tertiary',
         isSelected
           ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-theme-bg-secondary'
@@ -180,19 +181,17 @@ function MediaContextMenu({
 
 export function MediaPoolPanel() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { project, setProject } = useProjectStore();
-  const {
-    selectedMediaIds,
-    selectMedia,
-    importMedia,
-    removeSelectedMedia,
-    removeMedia,
-    isMediaInUse,
-    draggingMediaId,
-    setDraggingMedia,
-    setDragPosition,
-    setDragMousePosition,
-  } = useMediaStore();
+  const project = useProjectStore((s) => s.project);
+  const setProject = useProjectStore((s) => s.setProject);
+  const selectedMediaIds = useMediaStore((s) => s.selectedMediaIds);
+  const selectMedia = useMediaStore((s) => s.selectMedia);
+  const importMedia = useMediaStore((s) => s.importMedia);
+  const removeSelectedMedia = useMediaStore((s) => s.removeSelectedMedia);
+  const removeMedia = useMediaStore((s) => s.removeMedia);
+  const isMediaInUse = useMediaStore((s) => s.isMediaInUse);
+  const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
+  const setDraggingMedia = useMediaStore((s) => s.setDraggingMedia);
+  const setDragPosition = useMediaStore((s) => s.setDragPosition);
 
   const mediaPool = project?.mediaPool || [];
   const [isDraggingOver, setIsDraggingOver] = useState(false);
@@ -218,17 +217,34 @@ export function MediaPoolPanel() {
   const thumbnailSize = Math.round(BASE_THUMBNAIL_SIZE * zoomLevel);
   const gap = 8; // Gap between thumbnails in pixels
 
-  // Check for missing media on mount and when mediaPool changes
+  // Track previously checked media IDs to avoid redundant IPC calls
+  const checkedMediaIdsRef = useRef<Set<string>>(new Set());
+
+  // Check for missing media - only check NEW items when mediaPool changes
   useEffect(() => {
     const checkMissingMedia = async () => {
-      const missing = new Set<string>();
-      for (const media of mediaPool) {
+      const currentIds = new Set(mediaPool.map((m) => m.id));
+      // Find items we haven't checked yet
+      const unchecked = mediaPool.filter((m) => !checkedMediaIdsRef.current.has(m.id));
+
+      // Remove stale entries from missingMediaIds for items no longer in pool
+      setMissingMediaIds((prev) => {
+        const next = new Set(prev);
+        for (const id of prev) {
+          if (!currentIds.has(id)) next.delete(id);
+        }
+        return next.size !== prev.size ? next : prev;
+      });
+
+      if (unchecked.length === 0) return;
+
+      for (const media of unchecked) {
         const exists = await checkMediaExists(media.filePath);
+        checkedMediaIdsRef.current.add(media.id);
         if (!exists) {
-          missing.add(media.id);
+          setMissingMediaIds((prev) => new Set(prev).add(media.id));
         }
       }
-      setMissingMediaIds(missing);
     };
     checkMissingMedia();
   }, [mediaPool]);
@@ -333,9 +349,9 @@ export function MediaPoolPanel() {
           setDraggingMedia(mediaId);
         }
 
-        // Update mouse position for drag preview (this is separate from dragPosition which triggers drop)
+        // Update drag preview position directly on the DOM (bypasses React re-renders)
         if (isDragging) {
-          setDragMousePosition({ x: moveEvent.clientX, y: moveEvent.clientY });
+          updateDragPreviewPosition(moveEvent.clientX, moveEvent.clientY);
         }
       };
 
@@ -344,8 +360,6 @@ export function MediaPoolPanel() {
         window.removeEventListener('mouseup', handleMouseUp);
 
         if (isDragging) {
-          // Clear drag preview position
-          setDragMousePosition(null);
           // Set final position for drop handling
           setDragPosition({ x: upEvent.clientX, y: upEvent.clientY });
           // The drop will be handled by EditorLayout listening to dragPosition changes
@@ -361,7 +375,7 @@ export function MediaPoolPanel() {
       window.addEventListener('mousemove', handleMouseMove);
       window.addEventListener('mouseup', handleMouseUp);
     },
-    [selectedMediaIds, selectMedia, setDraggingMedia, setDragMousePosition, setDragPosition]
+    [selectedMediaIds, selectMedia, setDraggingMedia, setDragPosition]
   );
 
   const handleDoubleClick = useCallback(async (media: MediaItem) => {

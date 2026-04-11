@@ -25,3 +25,4 @@ export function getSlideWidth(aspectRatio: AspectRatio): number {
   return DESIGN_HEIGHT * (aspectRatio.width / aspectRatio.height);
 }
 
+

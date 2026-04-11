@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useMemo } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import clsx from 'clsx';
 import { useProjectStore } from '../../../stores/projectStore';
@@ -6,14 +6,28 @@ import { useElementStore } from '../../../stores/elementStore';
 import type { Element } from '../../../types';
 
 export function LayersPanel() {
-  const { project } = useProjectStore();
-  const { selectedElementId, selectElement, reorderElements } = useElementStore();
+  const project = useProjectStore((s) => s.project);
+  const selectedElementId = useElementStore((s) => s.selectedElementId);
+  const selectElement = useElementStore((s) => s.selectElement);
+  const reorderElements = useElementStore((s) => s.reorderElements);
 
   // Global elements across all slides
   const elements = project?.elements || [];
 
-  // Sort by zIndex descending (top layers first)
-  const sortedElements = [...elements].sort((a, b) => b.zIndex - a.zIndex);
+  // Sort by zIndex descending (top layers first) - memoized
+  const sortedElements = useMemo(
+    () => [...elements].sort((a, b) => b.zIndex - a.zIndex),
+    [elements]
+  );
+
+  // Media pool lookup map for O(1) access
+  const mediaPoolMap = useMemo(() => {
+    const map = new Map<string, { fileName: string; thumbnailPath: string | null; filePath: string }>();
+    for (const m of project?.mediaPool || []) {
+      map.set(m.id, m);
+    }
+    return map;
+  }, [project?.mediaPool]);
 
   // Drag state
   const [draggedId, setDraggedId] = useState<string | null>(null);
@@ -127,10 +141,8 @@ export function LayersPanel() {
 
   const getLayerName = (element: Element, index: number) => {
     if (element.type === 'photo') {
-      // Try to get the media filename
-      const media = project?.mediaPool.find((m) => m.id === element.mediaId);
+      const media = element.mediaId ? mediaPoolMap.get(element.mediaId) : undefined;
       if (media) {
-        // Remove extension and truncate
         const name = media.fileName.replace(/\.[^/.]+$/, '');
         return name.length > 20 ? name.substring(0, 17) + '...' : name;
       }
@@ -211,7 +223,7 @@ export function LayersPanel() {
                 <div className="w-7 h-7 bg-theme-bg-tertiary rounded overflow-hidden flex items-center justify-center flex-shrink-0">
                   {element.type === 'photo' ? (
                     (() => {
-                      const media = project?.mediaPool.find((m) => m.id === element.mediaId);
+                      const media = element.mediaId ? mediaPoolMap.get(element.mediaId) : undefined;
                       const thumbnailSrc = media?.thumbnailPath
                         ? convertFileSrc(media.thumbnailPath)
                         : media?.filePath

@@ -9,7 +9,7 @@ import { useProjectStore } from '../../stores/projectStore';
  */
 export function useCanvasImages(elements: Element[]) {
   const [loadedImages, setLoadedImages] = useState<Map<string, HTMLImageElement>>(new Map());
-  const { project } = useProjectStore();
+  const project = useProjectStore((s) => s.project);
 
   // Track the image-relevant parts of elements to detect actual changes
   // Only id, mediaId, and assetPath matter for image loading - position changes are ignored

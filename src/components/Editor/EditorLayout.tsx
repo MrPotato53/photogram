@@ -14,6 +14,7 @@ import { TemplatesPanel } from './panels/TemplatesPanel';
 import { SlidesPanel } from './panels/SlidesPanel';
 import { DragPreview } from './DragPreview';
 import { ExportModal } from './ExportModal';
+import { PreviewModal } from './PreviewModal';
 import { exportSlides, showInFolder, type ExportOptions } from '../../services/tauri';
 
 interface EditorLayoutProps {
@@ -21,15 +22,22 @@ interface EditorLayoutProps {
 }
 
 export function EditorLayout({ projectId }: EditorLayoutProps) {
-  const { project, isLoading, error, loadProject, refreshProject } = useProjectStore();
-  const { currentSlideIndex } = useSlideStore();
-  const { draggingMediaId } = useMediaStore();
-  const { panels } = usePanelStore();
+  const project = useProjectStore((s) => s.project);
+  const isLoading = useProjectStore((s) => s.isLoading);
+  const error = useProjectStore((s) => s.error);
+  const loadProject = useProjectStore((s) => s.loadProject);
+  const refreshProject = useProjectStore((s) => s.refreshProject);
+  const currentSlideIndex = useSlideStore((s) => s.currentSlideIndex);
+  const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
+  const panels = usePanelStore((s) => s.panels);
 
-  // Export functionality
+  // Export & Preview functionality
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false);
+  const closePreview = useCallback(() => setIsPreviewModalOpen(false), []);
   const renderSlideForExportRef = useRef<((slideIndex: number, pixelRatio: number, format: 'png' | 'jpeg', quality: number) => string | null) | null>(null);
   const renderSlideThumbnailRef = useRef<((slideIndex: number) => string | null) | null>(null);
+  const renderSlideForPreviewRef = useRef<((slideIndex: number, targetWidth: number) => string | null) | null>(null);
 
   useEffect(() => {
     loadProject(projectId);
@@ -118,6 +126,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
     <div className="h-full flex flex-col bg-theme-bg-tertiary select-none">
       <EditorToolbar
         projectName={project.name}
+        onPreviewClick={() => setIsPreviewModalOpen(true)}
         onExportClick={() => setIsExportModalOpen(true)}
       />
       <EditBar />
@@ -129,6 +138,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
             aspectRatio={project.aspectRatio}
             onRenderSlideForExport={(fn) => { renderSlideForExportRef.current = fn; }}
             onRenderSlideThumbnail={(fn) => { renderSlideThumbnailRef.current = fn; }}
+            onRenderSlideForPreview={(fn) => { renderSlideForPreviewRef.current = fn; }}
           />
 
           {/* Floating Panels */}
@@ -188,6 +198,15 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
 
       {/* Drag preview that follows cursor */}
       <DragPreview />
+
+      {/* Preview modal */}
+      <PreviewModal
+        isOpen={isPreviewModalOpen}
+        onClose={closePreview}
+        aspectRatio={project.aspectRatio}
+        numSlides={project.slides.length}
+        renderSlideForPreview={(slideIndex, targetWidth) => renderSlideForPreviewRef.current?.(slideIndex, targetWidth) ?? null}
+      />
 
       {/* Export modal */}
       <ExportModal

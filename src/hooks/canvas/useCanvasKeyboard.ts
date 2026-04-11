@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import type { Element } from '../../types';
+import { useCropStore } from '../../stores/cropStore';
 
 interface UseCanvasKeyboardOptions {
   selectedElementId: string | null;
@@ -69,6 +70,13 @@ export function useCanvasKeyboard({
       // Undo with Cmd/Ctrl + Z (without shift)
       if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
+        // In crop mode, operate on the local crop-rect history only.
+        // This keeps crop-rect drag/resize/aspect-ratio/reset undoable
+        // without touching global project history.
+        if (cropModeElementId) {
+          useCropStore.getState().undoCropRect();
+          return;
+        }
         if (onUndo) {
           onUndo();
         }
@@ -78,6 +86,10 @@ export function useCanvasKeyboard({
       // Redo with Cmd/Ctrl + Shift + Z or Cmd/Ctrl + Y
       if ((e.metaKey || e.ctrlKey) && ((e.key === 'z' && e.shiftKey) || e.key === 'y')) {
         e.preventDefault();
+        if (cropModeElementId) {
+          useCropStore.getState().redoCropRect();
+          return;
+        }
         if (onRedo) {
           onRedo();
         }

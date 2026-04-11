@@ -1,35 +1,49 @@
+import { useRef, useEffect } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useProjectStore } from '../../stores/projectStore';
 import { useMediaStore } from '../../stores/mediaStore';
 
-export function DragPreview() {
-  const { project } = useProjectStore();
-  const { draggingMediaId, dragMousePosition } = useMediaStore();
+// Module-level ref for direct DOM updates (bypasses React re-renders)
+let dragPreviewElement: HTMLDivElement | null = null;
 
-  // Don't render if not dragging or no position
-  if (!draggingMediaId || !dragMousePosition || !project) {
+/**
+ * Update the drag preview position directly on the DOM element.
+ * Called from mousemove handlers — never goes through React state.
+ */
+export function updateDragPreviewPosition(x: number, y: number) {
+  if (dragPreviewElement) {
+    dragPreviewElement.style.transform = `translate(${x - 40}px, ${y - 40}px)`;
+  }
+}
+
+export function DragPreview() {
+  const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
+  const project = useProjectStore((s) => s.project);
+  const elRef = useRef<HTMLDivElement>(null);
+
+  // Register/unregister the DOM element
+  useEffect(() => {
+    dragPreviewElement = elRef.current;
+    return () => { dragPreviewElement = null; };
+  });
+
+  if (!draggingMediaId || !project) {
     return null;
   }
 
-  // Find the media being dragged
   const media = project.mediaPool.find((m) => m.id === draggingMediaId);
   if (!media) {
     return null;
   }
 
-  // Get the image source (prefer thumbnail for performance)
   const imageSrc = convertFileSrc(media.thumbnailPath || media.filePath);
-
-  // Preview size
   const previewSize = 80;
 
   return (
     <div
+      ref={elRef}
       className="fixed pointer-events-none z-[10000]"
-      style={{
-        left: dragMousePosition.x - previewSize / 2,
-        top: dragMousePosition.y - previewSize / 2,
-      }}
+      style={{ top: 0, left: 0, willChange: 'transform' }}
     >
       <div
         className="rounded-lg overflow-hidden shadow-2xl border-2 border-blue-500 bg-theme-bg-secondary"
@@ -42,7 +56,6 @@ export function DragPreview() {
           draggable={false}
         />
       </div>
-      {/* Drop hint */}
       <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 whitespace-nowrap text-xs text-white bg-black/70 px-2 py-1 rounded">
         Drop on canvas
       </div>

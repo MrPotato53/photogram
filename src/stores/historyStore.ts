@@ -242,13 +242,18 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
       // Update local store immediately
       projectStore.setProjectSilent(restoredProject);
 
+      // Clear the in-progress flag synchronously once local state is
+      // restored. The Tauri persist runs in the background and MUST NOT
+      // gate new user actions: otherwise any pushState fired during the
+      // async window is dropped, and future undo/redo appears to "skip"
+      // that action, bundling it with a neighbouring entry.
+      set({ isUndoRedoInProgress: false });
+
       // Async backend sync
       queueMicrotask(() => {
-        updateProject(restoredProject)
-          .catch((err) => console.error('Failed to persist undo:', err))
-          .finally(() => {
-            set({ isUndoRedoInProgress: false });
-          });
+        updateProject(restoredProject).catch((err) =>
+          console.error('Failed to persist undo:', err)
+        );
       });
     } else {
       set({ isUndoRedoInProgress: false });
@@ -284,13 +289,16 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
       // Update local store immediately
       projectStore.setProjectSilent(restoredProject);
 
+      // Clear flag synchronously so user actions during the async Tauri
+      // persist window are not silently dropped by pushState's early
+      // return. Same rationale as undo().
+      set({ isUndoRedoInProgress: false });
+
       // Async backend sync
       queueMicrotask(() => {
-        updateProject(restoredProject)
-          .catch((err) => console.error('Failed to persist redo:', err))
-          .finally(() => {
-            set({ isUndoRedoInProgress: false });
-          });
+        updateProject(restoredProject).catch((err) =>
+          console.error('Failed to persist redo:', err)
+        );
       });
     } else {
       set({ isUndoRedoInProgress: false });

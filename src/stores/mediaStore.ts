@@ -7,7 +7,6 @@ interface MediaState {
   lastSelectedMediaId: string | null;
   draggingMediaId: string | null;
   dragPosition: { x: number; y: number } | null;
-  dragMousePosition: { x: number; y: number } | null;
 
   selectMedia: (id: string | null, options?: { shift?: boolean; ctrl?: boolean }) => void;
   clearMediaSelection: () => void;
@@ -17,7 +16,6 @@ interface MediaState {
   isMediaInUse: (mediaId: string) => boolean;
   setDraggingMedia: (mediaId: string | null) => void;
   setDragPosition: (position: { x: number; y: number } | null) => void;
-  setDragMousePosition: (position: { x: number; y: number } | null) => void;
 }
 
 export const useMediaStore = create<MediaState>((set, get) => ({
@@ -25,7 +23,6 @@ export const useMediaStore = create<MediaState>((set, get) => ({
   lastSelectedMediaId: null,
   draggingMediaId: null,
   dragPosition: null,
-  dragMousePosition: null,
 
   selectMedia: (id: string | null, options = {}) => {
     const project = useProjectStore.getState().project;
@@ -153,10 +150,6 @@ export const useMediaStore = create<MediaState>((set, get) => ({
 
   setDragPosition: (position: { x: number; y: number } | null) => {
     set({ dragPosition: position });
-  },
-
-  setDragMousePosition: (position: { x: number; y: number } | null) => {
-    set({ dragMousePosition: position });
   },
 }));
 

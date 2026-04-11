@@ -32,10 +32,10 @@ export function useCanvasFileDrop({
   const [isFileDragOver, setIsFileDragOver] = useState(false);
   const fileDragPositionRef = useRef<{ x: number; y: number } | null>(null);
 
-  const { project } = useProjectStore();
-  const { setCurrentSlide } = useSlideStore();
-  const { addElement } = useElementStore();
-  const { importMedia } = useMediaStore();
+  const project = useProjectStore((s) => s.project);
+  const setCurrentSlide = useSlideStore((s) => s.setCurrentSlide);
+  const addElement = useElementStore((s) => s.addElement);
+  const importMedia = useMediaStore((s) => s.importMedia);
 
   // Refs for file drag-drop handling (to avoid Tauri event re-subscriptions)
   const fileDragDropStateRef = useRef({
