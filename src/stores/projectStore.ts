@@ -3,6 +3,7 @@ import type { Project } from '../types';
 import type { HistoryOperationContext } from '../types/history';
 import { getProject } from '../services/tauri';
 import { useHistoryStore, setCurrentProjectId, setProjectStoreGetter } from './historyStore';
+import { useSnapStore, setSnapProjectStoreGetter } from './snapStore';
 
 interface ProjectState {
   project: Project | null;
@@ -25,6 +26,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     try {
       const project = await getProject(id);
       set({ project, isLoading: false });
+
+      // Hydrate snap settings from persisted project data
+      useSnapStore.getState().hydrateFromProject(project.snapSettings);
 
       // Set project ID for asset retention
       setCurrentProjectId(project.id);
@@ -70,6 +74,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
 // Register getter for circular dependency with historyStore
 setProjectStoreGetter(() => ({
+  project: useProjectStore.getState().project,
+  setProjectSilent: useProjectStore.getState().setProjectSilent,
+}));
+
+// Register getter for snapStore persistence
+setSnapProjectStoreGetter(() => ({
   project: useProjectStore.getState().project,
   setProjectSilent: useProjectStore.getState().setProjectSilent,
 }));

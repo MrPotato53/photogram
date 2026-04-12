@@ -196,7 +196,7 @@ export function MediaPoolPanel() {
   const mediaPool = project?.mediaPool || [];
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const [previewMedia, setPreviewMedia] = useState<MediaItem | null>(null);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     isOpen: boolean;
     x: number;
@@ -390,8 +390,9 @@ export function MediaPoolPanel() {
       return;
     }
 
-    setPreviewMedia(media);
-  }, [missingMediaIds]);
+    const idx = mediaPool.findIndex((m) => m.id === media.id);
+    if (idx !== -1) setPreviewIndex(idx);
+  }, [missingMediaIds, mediaPool]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, media: MediaItem) => {
     e.preventDefault();
@@ -475,9 +476,10 @@ export function MediaPoolPanel() {
       return;
     }
 
-    setPreviewMedia(contextMenu.media);
+    const idx = mediaPool.findIndex((m) => m.id === contextMenu.media!.id);
+    if (idx !== -1) setPreviewIndex(idx);
     setContextMenu({ ...contextMenu, isOpen: false });
-  }, [contextMenu, missingMediaIds]);
+  }, [contextMenu, missingMediaIds, mediaPool]);
 
   const handleContextMenuDelete = useCallback(async () => {
     if (!contextMenu.media) return;
@@ -683,11 +685,12 @@ export function MediaPoolPanel() {
       />
 
       {/* Preview modal */}
-      {previewMedia && (
+      {previewIndex !== null && mediaPool[previewIndex] && (
         <MediaPreviewModal
-          filePath={previewMedia.filePath}
-          fileName={previewMedia.fileName}
-          onClose={() => setPreviewMedia(null)}
+          mediaPool={mediaPool}
+          currentIndex={previewIndex}
+          onNavigate={setPreviewIndex}
+          onClose={() => setPreviewIndex(null)}
         />
       )}
 
