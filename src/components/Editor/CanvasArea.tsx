@@ -24,7 +24,7 @@ import { CanvasElementRenderer } from './CanvasElementRenderer';
 import { v4 as uuidv4 } from 'uuid';
 import { DESIGN_HEIGHT, getDesignSize } from '../../utils/designConstants';
 import { getSlideIndex, getSlideIndexFromCenter } from '../../utils/slideUtils';
-import { useCanvasZoom, useCanvasFileDrop, useCanvasImages, useCanvasMediaDrop } from '../../hooks/canvas';
+import { useCanvasZoom, useCanvasFileDrop, useCanvasImages, useCanvasMediaDrop, useCanvasFillMode } from '../../hooks/canvas';
 import { useCanvasKeyboard } from '../../hooks/canvas/useCanvasKeyboard';
 import { useCanvasAutoScroll } from '../../hooks/canvas/useCanvasAutoScroll';
 import { useSlideExport } from '../../hooks/canvas/useSlideExport';
@@ -193,8 +193,17 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     totalDesignWidth,
   });
 
-  // Media drop hook
-  useCanvasMediaDrop({
+  // Fill mode hook (F-key fill, shared between media drop and element drag)
+  const { fillKeyRef, fillLinesRef, getFillBoundsExcluding } = useCanvasFillMode({
+    elements,
+    totalDesignWidth,
+    designSize,
+    numSlides,
+  });
+
+  // Media drop hook (fill preview state for F-key fill mode)
+  const [fillPreview, setFillPreviewState] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const { fillPreviewListenerRef } = useCanvasMediaDrop({
     stageContainerRef,
     numSlides,
     canvasSize,
@@ -203,7 +212,14 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     designSize,
     totalDesignWidth,
     elements,
+    fillKeyRef,
+    fillLinesRef,
   });
+  // Register listener so the hook can push fill preview updates without going through zustand
+  useEffect(() => {
+    fillPreviewListenerRef.current = setFillPreviewState;
+    return () => { fillPreviewListenerRef.current = null; };
+  }, [fillPreviewListenerRef]);
 
   // Export hook - expose rendering functions to parent
   const { renderSlideForExport, renderSlideThumbnail, renderSlideForPreview } = useSlideExport({ stageRef, project, scale });
@@ -324,7 +340,11 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       const height = Math.max(200, availableHeight);
       const width = height * targetRatio;
 
-      setCanvasSize({ width, height });
+      // Only update if values actually changed — avoids expensive re-render
+      // cascade when only container width changes (e.g. docked panel resize)
+      setCanvasSize(prev =>
+        prev.width === width && prev.height === height ? prev : { width, height }
+      );
     };
 
     updateCanvasSize();
@@ -651,6 +671,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // Auto-scroll logic is handled by useCanvasAutoScroll hook
 
   // Handle drag with snapping - THROTTLED to reduce CPU usage
+  // Fill preview for element drag (updated during handleDragMove)
+  const elementFillPreviewRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+
   const handleDragMove = useCallback(
     (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
       const node = e.target;
@@ -660,11 +683,31 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       let newX = node.x();
       let newY = node.y();
 
+      // Fill mode preview during element drag
+      if (fillKeyRef.current) {
+        const centerX = newX + element.width / 2;
+        const centerY = newY + element.height / 2;
+        const bounds = getFillBoundsExcluding(centerX, centerY, elementId);
+        if (bounds && (
+          !elementFillPreviewRef.current ||
+          elementFillPreviewRef.current.x !== bounds.x ||
+          elementFillPreviewRef.current.y !== bounds.y ||
+          elementFillPreviewRef.current.width !== bounds.width ||
+          elementFillPreviewRef.current.height !== bounds.height
+        )) {
+          elementFillPreviewRef.current = bounds;
+          setFillPreviewState(bounds);
+        }
+      } else if (elementFillPreviewRef.current) {
+        elementFillPreviewRef.current = null;
+        setFillPreviewState(null);
+      }
+
       // Apply snapping (snap to slide boundaries and other elements)
       // THROTTLED: Only recalculate snap lines if enough time/distance has passed,
       // but always apply the cached snap offset so the element "sticks" to the snap
       // position instead of jittering between raw and snapped positions.
-      if (snapEnabled) {
+      if (snapEnabled && !fillKeyRef.current) {
         const now = performance.now();
         const lastCalc = lastSnapCalcRef.current;
         const dx = Math.abs(newX - lastCalc.x);
@@ -721,7 +764,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       // Update auto-scroll based on mouse position
       updateScrollSpeed(e.evt.clientX);
     },
-    [elementMap, snapEnabled, snapSettings, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds, updateScrollSpeed, elements]
+    [elementMap, snapEnabled, snapSettings, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds, updateScrollSpeed, elements, fillKeyRef, getFillBoundsExcluding, setFillPreviewState]
   );
 
   // Handle drag start
@@ -730,7 +773,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     lastSnapTargetRef.current = { x: 0, y: 0, snappedX: false, snappedY: false };
   }, []);
 
-  // Handle drag end - apply final snap and persist position
+  // Handle drag end - apply final snap (or fill mode) and persist position
   const handleDragEnd = useCallback(
     (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
       const node = e.target;
@@ -741,8 +784,58 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       stopAutoScroll();
       isDraggingRef.current = false;
 
+      // Clear fill preview
+      elementFillPreviewRef.current = null;
+      setFillPreviewState(null);
+
       let newX = node.x();
       let newY = node.y();
+
+      // Fill mode: snap element into the bounded region
+      if (fillKeyRef.current) {
+        const centerX = newX + element.width / 2;
+        const centerY = newY + element.height / 2;
+        const bounds = getFillBoundsExcluding(centerX, centerY, elementId);
+        if (bounds) {
+          // Compute crop to cover the fill region using media's native aspect ratio
+          const mediaPool = project?.mediaPool || [];
+          const media = element.mediaId ? mediaPool.find(m => m.id === element.mediaId) : null;
+          const mediaRatio = media ? media.width / media.height : element.width / element.height;
+          const frameRatio = bounds.width / bounds.height;
+
+          let cropX = 0;
+          let cropY = 0;
+          let cropWidth = 1;
+          let cropHeight = 1;
+
+          if (mediaRatio > frameRatio) {
+            cropWidth = frameRatio / mediaRatio;
+            cropX = (1 - cropWidth) / 2;
+          } else if (mediaRatio < frameRatio) {
+            cropHeight = mediaRatio / frameRatio;
+            cropY = (1 - cropHeight) / 2;
+          }
+
+          setActiveGuides([]);
+          updateElement(elementId, {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+            cropX,
+            cropY,
+            cropWidth,
+            cropHeight,
+            lastCropRatio: null,
+          });
+
+          const slideIndex = getSlideIndexFromCenter(bounds.x, bounds.width, designSize.width);
+          if (slideIndex >= 0 && slideIndex < numSlides) {
+            setCurrentSlide(slideIndex);
+          }
+          return;
+        }
+      }
 
       // Apply final snap calculation on drop (since drag snap was throttled)
       if (snapEnabled) {
@@ -776,7 +869,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         setCurrentSlide(slideIndex);
       }
     },
-    [elementMap, updateElement, setActiveGuides, clampToVisibleBounds, designSize.width, designSize.height, numSlides, setCurrentSlide, stopAutoScroll, snapEnabled, snapSettings, totalDesignWidth, elements]
+    [elementMap, updateElement, setActiveGuides, clampToVisibleBounds, designSize.width, designSize.height, numSlides, setCurrentSlide, stopAutoScroll, snapEnabled, snapSettings, totalDesignWidth, elements, fillKeyRef, getFillBoundsExcluding, setFillPreviewState, project]
   );
 
   // Handle transform end
@@ -1373,6 +1466,12 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     }
   }, [cropModeElementId, updateElementLocal]);
 
+  const handleCropElementScale = useCallback((props: { cropX: number; cropY: number; cropWidth: number; cropHeight: number }) => {
+    if (cropModeElementId) {
+      updateElementLocal(cropModeElementId, props);
+    }
+  }, [cropModeElementId, updateElementLocal]);
+
   const croppingFullBounds = croppingElement
     ? {
         width: croppingElement.width / (croppingElement.cropWidth ?? 1),
@@ -1502,7 +1601,23 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
                   numSlides={numSlides}
                   scale={scale}
                   zoomLevel={zoomLevel}
+                  elements={elements}
                 />
+
+                {/* Fill preview overlay (F-key fill mode during media drag) */}
+                {fillPreview && (
+                  <Rect
+                    x={fillPreview.x}
+                    y={fillPreview.y}
+                    width={fillPreview.width}
+                    height={fillPreview.height}
+                    fill="rgba(59, 130, 246, 0.15)"
+                    stroke="#3b82f6"
+                    strokeWidth={2 / (scale * zoomLevel)}
+                    dash={[6 / (scale * zoomLevel), 4 / (scale * zoomLevel)]}
+                    listening={false}
+                  />
+                )}
 
                 {/* Transformer */}
                 {!cropModeElementId && (
@@ -1543,6 +1658,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
                       onCancel={handleCropCancel}
                       shiftPressed={cropShiftPressed}
                       onElementDrag={handleCropElementDrag}
+                      onElementScale={handleCropElementScale}
                       snapEnabled={snapEnabled}
                       snapSettings={snapSettings}
                       elements={elements}

@@ -20,6 +20,11 @@ interface UseCropRectOptions {
   // can restore both the rect and the underlying element position.
   elementX: number;
   elementY: number;
+  // Current element crop values — needed for undo/redo of in-crop scaling
+  elementCropX: number;
+  elementCropY: number;
+  elementCropWidth: number;
+  elementCropHeight: number;
 }
 
 /**
@@ -35,6 +40,10 @@ export function useCropRect({
   resetKey,
   elementX,
   elementY,
+  elementCropX,
+  elementCropY,
+  elementCropWidth,
+  elementCropHeight,
 }: UseCropRectOptions) {
   // Track previous aspect ratio to detect swaps
   const prevAspectRatio = useRef<number | null>(null);
@@ -51,10 +60,12 @@ export function useCropRect({
     height: existingCropH * fullBounds.height,
   }));
 
-  // Live ref to current element position so effect-driven pushes
+  // Live refs to current element state so effect-driven pushes
   // (reset/aspect-ratio) include it without adding extra deps.
   const elementPosRef = useRef({ x: elementX, y: elementY });
   elementPosRef.current = { x: elementX, y: elementY };
+  const elementCropRef = useRef({ cropX: elementCropX, cropY: elementCropY, cropWidth: elementCropWidth, cropHeight: elementCropHeight });
+  elementCropRef.current = { cropX: elementCropX, cropY: elementCropY, cropWidth: elementCropWidth, cropHeight: elementCropHeight };
 
   // Reset crop rect to full bounds when resetKey changes
   const prevResetKeyRef = useRef(resetKey);
@@ -71,6 +82,10 @@ export function useCropRect({
         cropRect: resetRect,
         elementX: elementPosRef.current.x,
         elementY: elementPosRef.current.y,
+        elementCropX: elementCropRef.current.cropX,
+        elementCropY: elementCropRef.current.cropY,
+        elementCropWidth: elementCropRef.current.cropWidth,
+        elementCropHeight: elementCropRef.current.cropHeight,
       });
     }
     prevResetKeyRef.current = resetKey;
@@ -149,6 +164,10 @@ export function useCropRect({
         cropRect: adjustedRect,
         elementX: elementPosRef.current.x,
         elementY: elementPosRef.current.y,
+        elementCropX: elementCropRef.current.cropX,
+        elementCropY: elementCropRef.current.cropY,
+        elementCropWidth: elementCropRef.current.cropWidth,
+        elementCropHeight: elementCropRef.current.cropHeight,
       });
     }
     prevAspectRatio.current = aspectRatio;
@@ -162,6 +181,10 @@ export function useCropRect({
         cropRect: cropRectRef.current,
         elementX: elementPosRef.current.x,
         elementY: elementPosRef.current.y,
+        elementCropX: elementCropRef.current.cropX,
+        elementCropY: elementCropRef.current.cropY,
+        elementCropWidth: elementCropRef.current.cropWidth,
+        elementCropHeight: elementCropRef.current.cropHeight,
       });
     }, 0);
     return () => clearTimeout(t);

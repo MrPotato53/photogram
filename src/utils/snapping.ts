@@ -503,3 +503,83 @@ export function generateStaticGuides(
 
   return guides;
 }
+
+export interface FillBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Find the rectangular region bounded by the nearest enabled snap lines
+ * (or canvas edges) surrounding a point. Used for fill-drop mode.
+ *
+ * Takes pre-sorted unique position arrays for efficiency — call
+ * `prepareFillLines` once when snap settings change, not per-mousemove.
+ */
+export function findFillBounds(
+  px: number,
+  py: number,
+  sortedVertical: number[],
+  sortedHorizontal: number[],
+): FillBounds {
+  // Binary-search helper: find index of first value > target
+  const upperBound = (arr: number[], target: number): number => {
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (arr[mid] <= target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+
+  const vi = upperBound(sortedVertical, px);
+  const left = vi > 0 ? sortedVertical[vi - 1] : sortedVertical[0] ?? 0;
+  const right = vi < sortedVertical.length ? sortedVertical[vi] : sortedVertical[sortedVertical.length - 1] ?? 0;
+
+  const hi = upperBound(sortedHorizontal, py);
+  const top = hi > 0 ? sortedHorizontal[hi - 1] : sortedHorizontal[0] ?? 0;
+  const bottom = hi < sortedHorizontal.length ? sortedHorizontal[hi] : sortedHorizontal[sortedHorizontal.length - 1] ?? 0;
+
+  return {
+    x: left,
+    y: top,
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top),
+  };
+}
+
+/**
+ * Build sorted, deduplicated position arrays from snap lines for fill mode.
+ * Includes canvas edges as implicit boundaries. Excludes 'center' type lines
+ * since they don't form natural region boundaries.
+ */
+export function prepareFillLines(
+  snapLines: SnapLines,
+  canvasHeight: number,
+  totalDesignWidth: number,
+): { vertical: number[]; horizontal: number[] } {
+  const vSet = new Set<number>();
+  const hSet = new Set<number>();
+
+  // Always include canvas edges as outer bounds
+  vSet.add(0);
+  vSet.add(totalDesignWidth);
+  hSet.add(0);
+  hSet.add(canvasHeight);
+
+  for (const line of snapLines.vertical) {
+    if (line.type !== 'center') vSet.add(line.position);
+  }
+  for (const line of snapLines.horizontal) {
+    if (line.type !== 'center') hSet.add(line.position);
+  }
+
+  return {
+    vertical: [...vSet].sort((a, b) => a - b),
+    horizontal: [...hSet].sort((a, b) => a - b),
+  };
+}

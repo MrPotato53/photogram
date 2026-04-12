@@ -10,6 +10,7 @@ interface FloatingPanelProps {
   defaultPosition: { x: number; y: number };
   minWidth?: number;
   minHeight?: number;
+  onDock?: () => void;
 }
 
 export function FloatingPanel({
@@ -19,6 +20,7 @@ export function FloatingPanel({
   defaultPosition,
   minWidth = 200,
   minHeight = 150,
+  onDock,
 }: FloatingPanelProps) {
   const panels = usePanelStore((s) => s.panels);
   const setPanelSize = usePanelStore((s) => s.setPanelSize);
@@ -44,7 +46,7 @@ export function FloatingPanel({
 
   const panelRef = useRef<HTMLDivElement>(null);
   const dragStartRef = useRef({ x: 0, y: 0, posX: 0, posY: 0 });
-  const resizeStartRef = useRef({ x: 0, y: 0, width: 0, height: 0 });
+  const resizeStartRef = useRef({ x: 0, y: 0, width: 0, height: 0, posX: 0, posY: 0 });
 
   // Ref to track pending store commit (for cancellation)
   const commitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -121,36 +123,47 @@ export function FloatingPanel({
         y: e.clientY,
         width: currentWidth,
         height: currentHeight,
+        posX: position.x,
+        posY: position.y,
       };
     },
-    [panelState.width, panelState.height, localSize]
+    [panelState.width, panelState.height, localSize, position]
   );
 
   const handleResize = useCallback(
     (e: MouseEvent) => {
       if (!isResizing || !resizeDirection) return;
 
-      const dx = e.clientX - resizeStartRef.current.x;
-      const dy = e.clientY - resizeStartRef.current.y;
+      const start = resizeStartRef.current;
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
 
-      let newWidth = resizeStartRef.current.width;
-      let newHeight = resizeStartRef.current.height;
+      let newWidth = start.width;
+      let newHeight = start.height;
+      let newPosX = start.posX;
+      let newPosY = start.posY;
 
       if (resizeDirection.includes('e')) {
-        newWidth = Math.max(minWidth, resizeStartRef.current.width + dx);
-      }
-      if (resizeDirection.includes('s')) {
-        newHeight = Math.max(minHeight, resizeStartRef.current.height + dy);
+        newWidth = Math.max(minWidth, start.width + dx);
       }
       if (resizeDirection.includes('w')) {
-        newWidth = Math.max(minWidth, resizeStartRef.current.width - dx);
+        const candidateWidth = start.width - dx;
+        newWidth = Math.max(minWidth, candidateWidth);
+        // Move position so the right edge stays fixed
+        newPosX = start.posX + (start.width - newWidth);
+      }
+      if (resizeDirection.includes('s')) {
+        newHeight = Math.max(minHeight, start.height + dy);
       }
       if (resizeDirection.includes('n')) {
-        newHeight = Math.max(minHeight, resizeStartRef.current.height - dy);
+        const candidateHeight = start.height - dy;
+        newHeight = Math.max(minHeight, candidateHeight);
+        // Move position so the bottom edge stays fixed
+        newPosY = start.posY + (start.height - newHeight);
       }
 
-      // Update local state during resize (fast, no store update)
       setLocalSize({ width: newWidth, height: newHeight });
+      setPosition({ x: Math.max(0, newPosX), y: Math.max(0, newPosY) });
     },
     [isResizing, resizeDirection, minWidth, minHeight]
   );
@@ -242,37 +255,43 @@ export function FloatingPanel({
         onMouseDown={handleDragStart}
       >
         <span className="text-sm font-medium text-theme-text">{title}</span>
-        <button
-          className="panel-controls p-0.5 text-theme-text-muted hover:text-theme-text hover:bg-theme-bg rounded transition-colors"
-          onClick={() => closePanel(panelId)}
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M6 18L18 6M6 6l12 12"
-            />
-          </svg>
-        </button>
+        <div className="flex items-center gap-1 panel-controls">
+          {onDock && (
+            <button
+              className="p-0.5 text-theme-text-muted hover:text-theme-text hover:bg-theme-bg rounded transition-colors"
+              onClick={onDock}
+              title="Dock to sidebar"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
+              </svg>
+            </button>
+          )}
+          <button
+            className="p-0.5 text-theme-text-muted hover:text-theme-text hover:bg-theme-bg rounded transition-colors"
+            onClick={() => closePanel(panelId)}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-auto">{children}</div>
 
-      {/* Resize handles */}
-      <div
-        className="absolute right-0 top-0 w-2 h-full cursor-e-resize"
-        onMouseDown={(e) => handleResizeStart(e, 'e')}
-      />
-      <div
-        className="absolute left-0 bottom-0 w-full h-2 cursor-s-resize"
-        onMouseDown={(e) => handleResizeStart(e, 's')}
-      />
-      <div
-        className="absolute right-0 bottom-0 w-3 h-3 cursor-se-resize"
-        onMouseDown={(e) => handleResizeStart(e, 'se')}
-      />
+      {/* Resize handles — edges */}
+      <div className="absolute right-0 top-0 w-2 h-full cursor-ew-resize" onMouseDown={(e) => handleResizeStart(e, 'e')} />
+      <div className="absolute left-0 top-0 w-2 h-full cursor-ew-resize" onMouseDown={(e) => handleResizeStart(e, 'w')} />
+      <div className="absolute left-0 bottom-0 w-full h-2 cursor-ns-resize" onMouseDown={(e) => handleResizeStart(e, 's')} />
+      <div className="absolute left-0 top-0 w-full h-2 cursor-ns-resize" onMouseDown={(e) => handleResizeStart(e, 'n')} />
+      {/* Resize handles — corners (overlap edges, higher z) */}
+      <div className="absolute right-0 bottom-0 w-3 h-3 cursor-nwse-resize z-10" onMouseDown={(e) => handleResizeStart(e, 'se')} />
+      <div className="absolute left-0 top-0 w-3 h-3 cursor-nwse-resize z-10" onMouseDown={(e) => handleResizeStart(e, 'nw')} />
+      <div className="absolute right-0 top-0 w-3 h-3 cursor-nesw-resize z-10" onMouseDown={(e) => handleResizeStart(e, 'ne')} />
+      <div className="absolute left-0 bottom-0 w-3 h-3 cursor-nesw-resize z-10" onMouseDown={(e) => handleResizeStart(e, 'sw')} />
     </div>
   );
 }

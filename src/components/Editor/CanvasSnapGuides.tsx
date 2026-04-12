@@ -2,6 +2,11 @@ import { memo, useMemo } from 'react';
 import { Group, Line } from 'react-konva';
 import { generateStaticGuides } from '../../utils/snapping';
 import { useSnapStore } from '../../stores/snapStore';
+import {
+  calculateSnapLines,
+  prepareFillLines,
+} from '../../utils/snapping';
+import type { Element } from '../../types';
 
 interface CanvasSnapGuidesProps {
   designSize: { width: number; height: number };
@@ -9,6 +14,7 @@ interface CanvasSnapGuidesProps {
   numSlides: number;
   scale: number;
   zoomLevel: number;
+  elements?: Element[];
 }
 
 export const CanvasSnapGuides = memo(function CanvasSnapGuides({
@@ -17,11 +23,14 @@ export const CanvasSnapGuides = memo(function CanvasSnapGuides({
   numSlides,
   scale,
   zoomLevel,
+  elements,
 }: CanvasSnapGuidesProps) {
   // Subscribe directly to snap store - isolates re-renders from activeGuides
   // changes so they don't cascade up to CanvasArea
   const snapSettings = useSnapStore((s) => s.snapSettings);
   const activeGuides = useSnapStore((s) => s.activeGuides);
+  const fillModeActive = useSnapStore((s) => s.fillModeActive);
+  const snapEnabled = useSnapStore((s) => s.snapEnabled);
 
   const staticGuides = useMemo(() => generateStaticGuides(
     snapSettings,
@@ -29,6 +38,26 @@ export const CanvasSnapGuides = memo(function CanvasSnapGuides({
     designSize.width,
     numSlides
   ), [snapSettings, designSize.height, designSize.width, numSlides]);
+
+  // Fill mode guides: show all enabled snap line positions as faint guides
+  // so the user can see the fill grid. Only computed when fill mode is active.
+  const fillGuides = useMemo(() => {
+    if (!fillModeActive || !snapEnabled) return [];
+    const snapLines = calculateSnapLines(
+      elements || [], '__fill_guide__', totalDesignWidth, designSize.height,
+      snapSettings, designSize.width, numSlides,
+    );
+    const lines = prepareFillLines(snapLines, designSize.height, totalDesignWidth);
+
+    const guides: { orientation: 'vertical' | 'horizontal'; position: number }[] = [];
+    for (const pos of lines.vertical) {
+      guides.push({ orientation: 'vertical', position: pos });
+    }
+    for (const pos of lines.horizontal) {
+      guides.push({ orientation: 'horizontal', position: pos });
+    }
+    return guides;
+  }, [fillModeActive, snapEnabled, snapSettings, elements, totalDesignWidth, designSize.height, designSize.width, numSlides]);
 
   return (
     <Group name="ui-guides" listening={false}>
@@ -67,6 +96,21 @@ export const CanvasSnapGuides = memo(function CanvasSnapGuides({
         );
       })}
 
+      {/* Fill mode guides (shown while F is held during drag) */}
+      {fillGuides.map((guide, index) => (
+        <Line
+          key={`fill-guide-${index}`}
+          points={
+            guide.orientation === 'vertical'
+              ? [guide.position, 0, guide.position, designSize.height]
+              : [0, guide.position, totalDesignWidth, guide.position]
+          }
+          stroke="rgba(59, 130, 246, 0.3)"
+          strokeWidth={1 / (scale * zoomLevel)}
+          dash={[3 / (scale * zoomLevel), 3 / (scale * zoomLevel)]}
+        />
+      ))}
+
       {/* Active snap guides (shown during drag/resize) */}
       {activeGuides.map((guide, index) => (
         <Line
@@ -84,4 +128,3 @@ export const CanvasSnapGuides = memo(function CanvasSnapGuides({
     </Group>
   );
 });
-

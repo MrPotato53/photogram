@@ -8,6 +8,7 @@ import { EditorToolbar } from './EditorToolbar';
 import { EditBar } from './EditBar';
 import { CanvasArea } from './CanvasArea';
 import { FloatingPanel } from './FloatingPanel';
+import { DockedMediaPanel } from './DockedMediaPanel';
 import { MediaPoolPanel } from './panels/MediaPoolPanel';
 import { LayersPanel } from './panels/LayersPanel';
 import { TemplatesPanel } from './panels/TemplatesPanel';
@@ -30,6 +31,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   const currentSlideIndex = useSlideStore((s) => s.currentSlideIndex);
   const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
   const panels = usePanelStore((s) => s.panels);
+  const mediaPoolDocked = usePanelStore((s) => s.mediaPoolDocked);
 
   // Export & Preview functionality
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -132,29 +134,39 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
       <EditBar />
 
       <div className="flex-1 flex flex-col min-h-0">
-        {/* Canvas area - takes remaining space */}
-        <div className="flex-1 relative overflow-hidden min-h-0">
-          <CanvasArea
-            aspectRatio={project.aspectRatio}
-            onRenderSlideForExport={(fn) => { renderSlideForExportRef.current = fn; }}
-            onRenderSlideThumbnail={(fn) => { renderSlideThumbnailRef.current = fn; }}
-            onRenderSlideForPreview={(fn) => { renderSlideForPreviewRef.current = fn; }}
-          />
-
-          {/* Floating Panels */}
-          {panels.mediaPool.isOpen && (
-            <FloatingPanel
-              title="Media Pool"
-              panelId="mediaPool"
-              defaultPosition={{ x: 20, y: 20 }}
-              minWidth={200}
-              minHeight={150}
-            >
+        {/* Canvas row: optional docked panel + canvas area */}
+        <div className="flex-1 flex min-h-0">
+          {/* Docked media panel */}
+          {panels.mediaPool.isOpen && mediaPoolDocked && (
+            <DockedMediaPanel>
               <MediaPoolPanel />
-            </FloatingPanel>
+            </DockedMediaPanel>
           )}
 
-          {panels.layers.isOpen && (
+          {/* Canvas area - takes remaining space */}
+          <div className="flex-1 relative overflow-hidden min-h-0">
+            <CanvasArea
+              aspectRatio={project.aspectRatio}
+              onRenderSlideForExport={(fn) => { renderSlideForExportRef.current = fn; }}
+              onRenderSlideThumbnail={(fn) => { renderSlideThumbnailRef.current = fn; }}
+              onRenderSlideForPreview={(fn) => { renderSlideForPreviewRef.current = fn; }}
+            />
+
+            {/* Floating Panels */}
+            {panels.mediaPool.isOpen && !mediaPoolDocked && (
+              <FloatingPanel
+                title="Media Pool"
+                panelId="mediaPool"
+                defaultPosition={{ x: 20, y: 20 }}
+                minWidth={200}
+                minHeight={150}
+                onDock={() => usePanelStore.getState().setMediaPoolDocked(true)}
+              >
+                <MediaPoolPanel />
+              </FloatingPanel>
+            )}
+
+            {panels.layers.isOpen && (
             <FloatingPanel
               title="Layers"
               panelId="layers"
@@ -177,6 +189,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
               <TemplatesPanel />
             </FloatingPanel>
           )}
+          </div>
         </div>
 
         {/* Slides panel - fixed at bottom (shows collapsed strip or full panel) */}

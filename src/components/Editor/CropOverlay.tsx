@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Group, Rect } from 'react-konva';
 import type Konva from 'konva';
 import type { Element } from '../../types';
@@ -32,6 +32,8 @@ interface CropOverlayProps {
   shiftPressed: boolean;
   // Callback for shift+pan element dragging
   onElementDrag: (x: number, y: number) => void;
+  // Callback for in-crop scaling (Option+scroll) — updates element crop values locally
+  onElementScale: (props: { cropX: number; cropY: number; cropWidth: number; cropHeight: number }) => void;
   // Snapping context
   snapEnabled: boolean;
   snapSettings: SnapSettings;
@@ -52,6 +54,7 @@ export function CropOverlay({
   onCancel,
   shiftPressed,
   onElementDrag,
+  onElementScale,
   snapEnabled,
   snapSettings,
   elements,
@@ -105,6 +108,10 @@ export function CropOverlay({
     resetKey,
     elementX: element.x,
     elementY: element.y,
+    elementCropX: existingCropX,
+    elementCropY: existingCropY,
+    elementCropWidth: existingCropW,
+    elementCropHeight: existingCropH,
   });
 
   // Snapping hook
@@ -469,24 +476,27 @@ export function CropOverlay({
     node.y(handlePos.y - handleSize / 2);
   };
 
+  // Helper to build a crop history entry with current state
+  const makeCropHistoryEntry = useCallback((rect: typeof cropRect = cropRect) => ({
+    cropRect: rect,
+    elementX: element.x,
+    elementY: element.y,
+    elementCropX: existingCropX,
+    elementCropY: existingCropY,
+    elementCropWidth: existingCropW,
+    elementCropHeight: existingCropH,
+  }), [cropRect, element.x, element.y, existingCropX, existingCropY, existingCropW, existingCropH]);
+
   // Handle corner drag end - clear guides and commit history snapshot
   const handleCornerDragEnd = () => {
     setActiveGuides([]);
-    useCropStore.getState().pushCropHistory({
-      cropRect,
-      elementX: element.x,
-      elementY: element.y,
-    });
+    useCropStore.getState().pushCropHistory(makeCropHistoryEntry());
   };
 
   // Wrap edge drag end to also commit a history snapshot
   const handleEdgeDragEndWithHistory = () => {
     handleEdgeDragEnd();
-    useCropStore.getState().pushCropHistory({
-      cropRect,
-      elementX: element.x,
-      elementY: element.y,
-    });
+    useCropStore.getState().pushCropHistory(makeCropHistoryEntry());
   };
 
   // Track element position for Shift+pan mode
@@ -558,11 +568,7 @@ export function CropOverlay({
 
   const handleCropRectDragEnd = () => {
     setActiveGuides([]);
-    useCropStore.getState().pushCropHistory({
-      cropRect,
-      elementX: element.x,
-      elementY: element.y,
-    });
+    useCropStore.getState().pushCropHistory(makeCropHistoryEntry());
   };
 
   // Restore element position on undo/redo signal. useCropRect already
@@ -582,7 +588,14 @@ export function CropOverlay({
     // adjustment to cropRect.
     elementPositionRef.current = { x: target.elementX, y: target.elementY };
     onElementDrag(target.elementX, target.elementY);
-  }, [restoreVersion, onElementDrag]);
+    // Restore element crop values (needed for undo/redo of in-crop scaling)
+    onElementScale({
+      cropX: target.elementCropX,
+      cropY: target.elementCropY,
+      cropWidth: target.elementCropWidth,
+      cropHeight: target.elementCropHeight,
+    });
+  }, [restoreVersion, onElementDrag, onElementScale]);
 
   // Listen for Enter/Escape keys
   useEffect(() => {
@@ -599,6 +612,124 @@ export function CropOverlay({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [cropRect, onCancel, onCropConfirm, confirmCrop]);
+
+  // Option/Alt + scroll wheel: scale the underlying image while keeping crop rect stationary
+  // Use refs for values that change rapidly during scroll to avoid stale closures
+  const scaleCropRectRef = useRef(cropRect);
+  scaleCropRectRef.current = cropRect;
+  const scaleCropWRef = useRef(existingCropW);
+  scaleCropWRef.current = existingCropW;
+  const scaleCropHRef = useRef(existingCropH);
+  scaleCropHRef.current = existingCropH;
+  const scaleFullBoundsRef = useRef(fullBounds);
+  scaleFullBoundsRef.current = fullBounds;
+  const scaleElementRef = useRef({ x: element.x, y: element.y });
+  scaleElementRef.current = { x: element.x, y: element.y };
+
+  const scaleHistoryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const handleWheel = (e: WheelEvent) => {
+      if (!e.altKey) return;
+      if (e.metaKey || e.ctrlKey) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const currentCropRect = scaleCropRectRef.current;
+      const currentFullBounds = scaleFullBoundsRef.current;
+      const currentCropW = scaleCropWRef.current;
+      const currentCropH = scaleCropHRef.current;
+
+      // Scale factor from wheel delta (positive = zoom in = image gets bigger)
+      const delta = -e.deltaY * 0.002;
+      const scaleFactor = Math.max(0.5, Math.min(2, 1 + delta));
+
+      const cropCenterX = currentCropRect.x + currentCropRect.width / 2;
+      const cropCenterY = currentCropRect.y + currentCropRect.height / 2;
+
+      // Min scale: fullBounds must be >= cropRect in both dimensions
+      const minSX = currentCropRect.width / currentFullBounds.width;
+      const minSY = currentCropRect.height / currentFullBounds.height;
+      // Ensure crop rect stays within new fullBounds after scaling around center
+      const minSXPos = currentCropRect.x > 0
+        ? currentCropRect.width / (2 * currentCropRect.x + currentCropRect.width)
+        : minSX;
+      const rightSpace = currentFullBounds.width - currentCropRect.x - currentCropRect.width;
+      const minSXRight = rightSpace > 0
+        ? currentCropRect.width / (2 * rightSpace + currentCropRect.width)
+        : minSX;
+      const minSYPos = currentCropRect.y > 0
+        ? currentCropRect.height / (2 * currentCropRect.y + currentCropRect.height)
+        : minSY;
+      const bottomSpace = currentFullBounds.height - currentCropRect.y - currentCropRect.height;
+      const minSYBottom = bottomSpace > 0
+        ? currentCropRect.height / (2 * bottomSpace + currentCropRect.height)
+        : minSY;
+
+      const minScale = Math.max(minSX, minSY, minSXPos, minSXRight, minSYPos, minSYBottom);
+      const clampedScale = Math.max(minScale, scaleFactor);
+
+      if (Math.abs(clampedScale - 1) < 0.001) return;
+
+      // New fullBounds
+      const newFullBoundsW = currentFullBounds.width * clampedScale;
+      const newFullBoundsH = currentFullBounds.height * clampedScale;
+
+      // New cropRect position (size stays same, scales around crop center)
+      const newCropRectX = clampedScale * cropCenterX - currentCropRect.width / 2;
+      const newCropRectY = clampedScale * cropCenterY - currentCropRect.height / 2;
+
+      // Clamp to new fullBounds (safety net)
+      const clampedCropX = Math.max(0, Math.min(newCropRectX, newFullBoundsW - currentCropRect.width));
+      const clampedCropY = Math.max(0, Math.min(newCropRectY, newFullBoundsH - currentCropRect.height));
+
+      const newCropRect = {
+        x: clampedCropX,
+        y: clampedCropY,
+        width: currentCropRect.width,
+        height: currentCropRect.height,
+      };
+
+      // New normalized element crop values
+      const newCropWidth = currentCropW / clampedScale;
+      const newCropHeight = currentCropH / clampedScale;
+      const newCropXNorm = clampedCropX / newFullBoundsW;
+      const newCropYNorm = clampedCropY / newFullBoundsH;
+
+      // Update element crop values (element.x/y and width/height stay same)
+      onElementScale({
+        cropX: newCropXNorm,
+        cropY: newCropYNorm,
+        cropWidth: newCropWidth,
+        cropHeight: newCropHeight,
+      });
+
+      // Update local crop rect
+      setCropRect(newCropRect);
+
+      // Debounced history push
+      if (scaleHistoryTimerRef.current) clearTimeout(scaleHistoryTimerRef.current);
+      const elPos = scaleElementRef.current;
+      scaleHistoryTimerRef.current = setTimeout(() => {
+        scaleHistoryTimerRef.current = null;
+        useCropStore.getState().pushCropHistory({
+          cropRect: newCropRect,
+          elementX: elPos.x,
+          elementY: elPos.y,
+          elementCropX: newCropXNorm,
+          elementCropY: newCropYNorm,
+          elementCropWidth: newCropWidth,
+          elementCropHeight: newCropHeight,
+        });
+      }, 150);
+    };
+
+    window.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      window.removeEventListener('wheel', handleWheel);
+      if (scaleHistoryTimerRef.current) clearTimeout(scaleHistoryTimerRef.current);
+    };
+  }, [onElementScale, setCropRect]);
 
   // During shift+pan, calculate crop rect position relative to current full bounds
   // The crop rect stays stationary in canvas coordinates, but full bounds moves
@@ -784,11 +915,7 @@ export function CropOverlay({
 
             // Commit shift+pan as a crop history entry so undo reverts both
             // the rect position and the element position together.
-            useCropStore.getState().pushCropHistory({
-              cropRect: finalCropRect,
-              elementX: element.x,
-              elementY: element.y,
-            });
+            useCropStore.getState().pushCropHistory(makeCropHistoryEntry(finalCropRect));
           }
           shiftPanStartRef.current = null;
           setShiftPanStart(null);
