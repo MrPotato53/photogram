@@ -77,9 +77,17 @@ export const useMediaStore = create<MediaState>((set, get) => ({
     if (!project) return;
 
     try {
-      await importMediaFiles(project.id, filePaths);
-      // Reload project to get updated media pool from backend
-      await useProjectStore.getState().loadProject(project.id);
+      const newItems = await importMediaFiles(project.id, filePaths);
+      // Merge new media into current project without a full reload so
+      // UI state (zoom, aspect-ratio toggle, scroll position) is preserved.
+      const updatedProject = {
+        ...project,
+        mediaPool: [...project.mediaPool, ...newItems],
+      };
+      useProjectStore.getState().setProject(updatedProject, {
+        source: 'media',
+        actionType: 'add',
+      });
     } catch (error) {
       console.error('Failed to import media:', error);
     }

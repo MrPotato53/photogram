@@ -94,6 +94,41 @@ pub struct Template {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SnapCanvasSettings {
+    pub enabled: bool,
+    pub show: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapMarginSettings {
+    pub enabled: bool,
+    pub show: bool,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapGridSettings {
+    pub enabled: bool,
+    pub show: bool,
+    pub horizontal: u32,
+    pub vertical: u32,
+    pub margin: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapSettings {
+    pub snap_enabled: bool,
+    pub canvas: SnapCanvasSettings,
+    pub elements: bool,
+    pub margin: SnapMarginSettings,
+    pub grid: SnapGridSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: String,
     pub name: String,
@@ -107,6 +142,8 @@ pub struct Project {
     pub updated_at: DateTime<Utc>,
     pub accessed_at: DateTime<Utc>,
     pub thumbnail: Option<String>,
+    #[serde(default)]
+    pub snap_settings: Option<SnapSettings>,
 }
 
 impl Project {
@@ -129,6 +166,7 @@ impl Project {
             updated_at: now,
             accessed_at: now,
             thumbnail: None,
+            snap_settings: None,
         }
     }
 }

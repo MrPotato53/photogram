@@ -465,24 +465,83 @@ export function EditBar() {
     });
   };
 
+  /**
+   * Compute the world-space center of an element, accounting for
+   * rotation and flip offsets (Konva rotates around (x, y)).
+   */
+  const getWorldCenter = (
+    x: number, y: number, w: number, h: number, rot: number,
+    flipX: boolean, flipY: boolean,
+  ) => {
+    const offX = flipX ? w : 0;
+    const offY = flipY ? h : 0;
+    const lcx = -offX + w / 2;
+    const lcy = -offY + h / 2;
+    const rad = (rot * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    return {
+      cx: x + lcx * cos - lcy * sin,
+      cy: y + lcx * sin + lcy * cos,
+    };
+  };
+
+  /**
+   * Solve for (x, y) so that the world center stays at (cx, cy)
+   * given new dimensions, rotation, and flip.
+   */
+  const solvePositionForCenter = (
+    cx: number, cy: number, w: number, h: number, rot: number,
+    flipX: boolean, flipY: boolean,
+  ) => {
+    const offX = flipX ? w : 0;
+    const offY = flipY ? h : 0;
+    const lcx = -offX + w / 2;
+    const lcy = -offY + h / 2;
+    const rad = (rot * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    return {
+      x: cx - (lcx * cos - lcy * sin),
+      y: cy - (lcx * sin + lcy * cos),
+    };
+  };
+
   const handleScaleChange = (percent: number) => {
     if (!selectedElement || !selectedMedia) return;
     const scale = percent / 100;
     const fitSize = getFitSize();
-    // Account for crop - the element shows cropWidth/cropHeight of the original
     const cropW = selectedElement.cropWidth ?? 1;
     const cropH = selectedElement.cropHeight ?? 1;
-    // Scale relative to fit size, then apply crop
     const newWidth = fitSize.width * scale * cropW;
     const newHeight = fitSize.height * scale * cropH;
-    updateElement(selectedElement.id, { width: newWidth, height: newHeight });
+
+    const rot = selectedElement.rotation ?? 0;
+    const fX = selectedElement.flipX ?? false;
+    const fY = selectedElement.flipY ?? false;
+    const { cx, cy } = getWorldCenter(
+      selectedElement.x, selectedElement.y,
+      selectedElement.width, selectedElement.height, rot, fX, fY,
+    );
+    const { x, y } = solvePositionForCenter(cx, cy, newWidth, newHeight, rot, fX, fY);
+    updateElement(selectedElement.id, { width: newWidth, height: newHeight, x, y });
   };
 
   const handleRotationChange = (degrees: number) => {
     if (!selectedElement) return;
-    // Normalize to 0-360
     const normalized = ((degrees % 360) + 360) % 360;
-    updateElement(selectedElement.id, { rotation: normalized });
+
+    const fX = selectedElement.flipX ?? false;
+    const fY = selectedElement.flipY ?? false;
+    const { cx, cy } = getWorldCenter(
+      selectedElement.x, selectedElement.y,
+      selectedElement.width, selectedElement.height,
+      selectedElement.rotation ?? 0, fX, fY,
+    );
+    const { x, y } = solvePositionForCenter(
+      cx, cy, selectedElement.width, selectedElement.height, normalized, fX, fY,
+    );
+    updateElement(selectedElement.id, { rotation: normalized, x, y });
   };
 
   const handlePositionXChange = (x: number) => {
@@ -497,18 +556,36 @@ export function EditBar() {
 
   const handleResetScale = () => {
     if (!selectedElement || !selectedMedia) return;
-    // Reset to 100% = fits canvas (accounting for crop)
     const fitSize = getFitSize();
     const cropW = selectedElement.cropWidth ?? 1;
     const cropH = selectedElement.cropHeight ?? 1;
     const newWidth = fitSize.width * cropW;
     const newHeight = fitSize.height * cropH;
-    updateElement(selectedElement.id, { width: newWidth, height: newHeight });
+
+    const rot = selectedElement.rotation ?? 0;
+    const fX = selectedElement.flipX ?? false;
+    const fY = selectedElement.flipY ?? false;
+    const { cx, cy } = getWorldCenter(
+      selectedElement.x, selectedElement.y,
+      selectedElement.width, selectedElement.height, rot, fX, fY,
+    );
+    const { x, y } = solvePositionForCenter(cx, cy, newWidth, newHeight, rot, fX, fY);
+    updateElement(selectedElement.id, { width: newWidth, height: newHeight, x, y });
   };
 
   const handleResetRotation = () => {
     if (!selectedElement) return;
-    updateElement(selectedElement.id, { rotation: 0 });
+    const fX = selectedElement.flipX ?? false;
+    const fY = selectedElement.flipY ?? false;
+    const { cx, cy } = getWorldCenter(
+      selectedElement.x, selectedElement.y,
+      selectedElement.width, selectedElement.height,
+      selectedElement.rotation ?? 0, fX, fY,
+    );
+    const { x, y } = solvePositionForCenter(
+      cx, cy, selectedElement.width, selectedElement.height, 0, fX, fY,
+    );
+    updateElement(selectedElement.id, { rotation: 0, x, y });
   };
 
   const hasCrop = selectedElement && (

@@ -61,6 +61,14 @@ export interface Template {
   createdAt: string;
 }
 
+export interface SnapSettingsData {
+  snapEnabled: boolean;
+  canvas: { enabled: boolean; show: boolean };
+  elements: boolean;
+  margin: { enabled: boolean; show: boolean; value: number };
+  grid: { enabled: boolean; show: boolean; horizontal: number; vertical: number; margin: number };
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -75,6 +83,7 @@ export interface Project {
   updatedAt: string;
   accessedAt: string;
   thumbnail: string | null;
+  snapSettings?: SnapSettingsData | null;
 }
 
 export interface ProjectSummary {
