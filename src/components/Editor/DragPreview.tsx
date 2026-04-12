@@ -5,6 +5,7 @@ import { useMediaStore } from '../../stores/mediaStore';
 
 // Module-level ref for direct DOM updates (bypasses React re-renders)
 let dragPreviewElement: HTMLDivElement | null = null;
+let dragLabelElement: HTMLDivElement | null = null;
 
 /**
  * Update the drag preview position directly on the DOM element.
@@ -13,6 +14,15 @@ let dragPreviewElement: HTMLDivElement | null = null;
 export function updateDragPreviewPosition(x: number, y: number) {
   if (dragPreviewElement) {
     dragPreviewElement.style.transform = `translate(${x - 40}px, ${y - 40}px)`;
+  }
+}
+
+/**
+ * Update the drag label text directly on the DOM (for fill mode hint).
+ */
+export function updateDragLabel(text: string) {
+  if (dragLabelElement) {
+    dragLabelElement.textContent = text;
   }
 }
 
@@ -56,7 +66,10 @@ export function DragPreview() {
           draggable={false}
         />
       </div>
-      <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 whitespace-nowrap text-xs text-white bg-black/70 px-2 py-1 rounded">
+      <div
+        ref={(el) => { dragLabelElement = el; }}
+        className="absolute -bottom-6 left-1/2 -translate-x-1/2 whitespace-nowrap text-xs text-white bg-black/70 px-2 py-1 rounded"
+      >
         Drop on canvas
       </div>
     </div>

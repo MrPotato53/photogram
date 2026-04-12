@@ -16,6 +16,11 @@ export interface CropHistoryEntry {
   cropRect: CropRect;
   elementX: number;
   elementY: number;
+  // Element crop values — needed for undo/redo of in-crop scaling
+  elementCropX: number;
+  elementCropY: number;
+  elementCropWidth: number;
+  elementCropHeight: number;
 }
 
 interface CropStoreState {
@@ -48,12 +53,20 @@ const entriesEqual = (a: CropHistoryEntry | undefined, b: CropHistoryEntry) =>
   a.cropRect.width === b.cropRect.width &&
   a.cropRect.height === b.cropRect.height &&
   a.elementX === b.elementX &&
-  a.elementY === b.elementY;
+  a.elementY === b.elementY &&
+  a.elementCropX === b.elementCropX &&
+  a.elementCropY === b.elementCropY &&
+  a.elementCropWidth === b.elementCropWidth &&
+  a.elementCropHeight === b.elementCropHeight;
 
 const cloneEntry = (e: CropHistoryEntry): CropHistoryEntry => ({
   cropRect: { ...e.cropRect },
   elementX: e.elementX,
   elementY: e.elementY,
+  elementCropX: e.elementCropX,
+  elementCropY: e.elementCropY,
+  elementCropWidth: e.elementCropWidth,
+  elementCropHeight: e.elementCropHeight,
 });
 
 export const useCropStore = create<CropStoreState>((set, get) => ({

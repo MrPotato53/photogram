@@ -41,11 +41,13 @@ interface SnapStoreState {
   snapEnabled: boolean;
   snapSettings: SnapSettings;
   activeGuides: Guide[];
+  fillModeActive: boolean;
 
   setSnapEnabled: (enabled: boolean) => void;
   setActiveGuides: (guides: Guide[]) => void;
   updateSnapSettings: (updates: SnapSettingsUpdate) => void;
   hydrateFromProject: (data: SnapSettingsData | null | undefined) => void;
+  setFillModeActive: (active: boolean) => void;
 }
 
 // Lazy getter to avoid circular dependency — set by projectStore on init
@@ -60,32 +62,43 @@ export function setSnapProjectStoreGetter(getter: typeof getProjectStore) {
 
 /**
  * Persist current snap settings into project and save to backend.
- * Fire-and-forget — UI already reflects the change via Zustand.
+ * Debounced and fully async — never blocks UI.
  */
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
 function persistSnapSettings(snapEnabled: boolean, snapSettings: SnapSettings) {
-  if (!getProjectStore) return;
-  const { project, setProjectSilent } = getProjectStore();
-  if (!project) return;
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    if (!getProjectStore) return;
+    const { project, setProjectSilent } = getProjectStore();
+    if (!project) return;
 
-  const data: SnapSettingsData = {
-    snapEnabled,
-    canvas: { ...snapSettings.canvas },
-    elements: snapSettings.elements,
-    margin: { ...snapSettings.margin },
-    grid: { ...snapSettings.grid },
-  };
+    const data: SnapSettingsData = {
+      snapEnabled,
+      canvas: { ...snapSettings.canvas },
+      elements: snapSettings.elements,
+      margin: { ...snapSettings.margin },
+      grid: { ...snapSettings.grid },
+    };
 
-  const updated = { ...project, snapSettings: data };
-  setProjectSilent(updated);
-  updateProject(updated).catch((err) =>
-    console.error('Failed to persist snap settings:', err)
-  );
+    const updated = { ...project, snapSettings: data };
+    setProjectSilent(updated);
+    updateProject(updated).catch((err) =>
+      console.error('Failed to persist snap settings:', err)
+    );
+  }, 300);
 }
 
 export const useSnapStore = create<SnapStoreState>((set, get) => ({
   snapEnabled: true,
   snapSettings: { ...defaultSnapSettings },
   activeGuides: [],
+  fillModeActive: false,
+
+  setFillModeActive: (active: boolean) => {
+    set({ fillModeActive: active });
+  },
 
   setSnapEnabled: (enabled: boolean) => {
     set({ snapEnabled: enabled });

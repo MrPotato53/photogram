@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import type { Element } from '../../types';
 import { getSlideIndex, getSlideIndexFromCenter } from '../../utils/slideUtils';
@@ -6,6 +6,8 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useSlideStore } from '../../stores/slideStore';
 import { useElementStore } from '../../stores/elementStore';
 import { useMediaStore } from '../../stores/mediaStore';
+import { updateDragLabel } from '../../components/Editor/DragPreview';
+import { findFillBounds, type FillBounds } from '../../utils/snapping';
 
 interface UseCanvasMediaDropOptions {
   stageContainerRef: React.RefObject<HTMLDivElement>;
@@ -16,10 +18,13 @@ interface UseCanvasMediaDropOptions {
   designSize: { width: number; height: number };
   totalDesignWidth: number;
   elements: Element[];
+  fillKeyRef: React.RefObject<boolean>;
+  fillLinesRef: React.RefObject<{ vertical: number[]; horizontal: number[] } | null>;
 }
 
 /**
- * Hook for handling media drop from media pool onto canvas
+ * Hook for handling media drop from media pool onto canvas.
+ * Fill mode (hold F) fills the snap-line-bounded region.
  */
 export function useCanvasMediaDrop({
   stageContainerRef,
@@ -30,6 +35,8 @@ export function useCanvasMediaDrop({
   designSize,
   totalDesignWidth,
   elements,
+  fillKeyRef,
+  fillLinesRef,
 }: UseCanvasMediaDropOptions) {
   const project = useProjectStore((s) => s.project);
   const setCurrentSlide = useSlideStore((s) => s.setCurrentSlide);
@@ -38,6 +45,17 @@ export function useCanvasMediaDrop({
   const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
   const setDraggingMedia = useMediaStore((s) => s.setDraggingMedia);
   const clearMediaSelection = useMediaStore((s) => s.clearMediaSelection);
+
+  // --- Fill preview state (exposed to CanvasArea for rendering) ---
+  const fillPreviewRef = useRef<FillBounds | null>(null);
+  const fillPreviewListenerRef = useRef<((bounds: FillBounds | null) => void) | null>(null);
+
+  const setFillPreview = useCallback((bounds: FillBounds | null) => {
+    const changed = (fillPreviewRef.current === null) !== (bounds === null);
+    fillPreviewRef.current = bounds;
+    fillPreviewListenerRef.current?.(bounds);
+    if (changed) updateDragLabel(bounds ? 'Fill area (F)' : 'Drop on canvas');
+  }, []);
 
   // Refs for drop handling (to avoid stale closures in always-attached listener)
   const dropStateRef = useRef({
@@ -52,7 +70,6 @@ export function useCanvasMediaDrop({
     elements: [] as Element[],
   });
 
-  // Keep refs updated
   useEffect(() => {
     dropStateRef.current = {
       draggingMediaId,
@@ -67,27 +84,68 @@ export function useCanvasMediaDrop({
     };
   }, [draggingMediaId, project, numSlides, canvasSize, scale, zoomLevel, designSize, totalDesignWidth, elements]);
 
-  // Handle drop of media onto canvas via window mouseup (always attached, reads from refs)
+  // Helper: screen position → design coordinates
+  const screenToDesign = useCallback((clientX: number, clientY: number): { x: number; y: number } | null => {
+    const container = stageContainerRef.current;
+    if (!container) return null;
+    const state = dropStateRef.current;
+    const rect = container.getBoundingClientRect();
+    const sx = clientX - rect.left - 24;
+    const sy = clientY - rect.top;
+    const totalScreenW = state.numSlides * state.canvasSize.width;
+    if (sx < 0 || sx > totalScreenW || sy < 0 || sy > state.canvasSize.height) return null;
+    return {
+      x: sx / (state.scale * state.zoomLevel),
+      y: sy / (state.scale * state.zoomLevel),
+    };
+  }, [stageContainerRef]);
+
+  // Mousemove handler for fill preview during media drag
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      const state = dropStateRef.current;
+      if (!state.draggingMediaId) return;
+
+      const lines = fillLinesRef.current;
+      if (!fillKeyRef.current || !lines) {
+        if (fillPreviewRef.current) setFillPreview(null);
+        return;
+      }
+      const pos = screenToDesign(e.clientX, e.clientY);
+      if (!pos) {
+        if (fillPreviewRef.current) setFillPreview(null);
+        return;
+      }
+      const bounds = findFillBounds(pos.x, pos.y, lines.vertical, lines.horizontal);
+      if (bounds.width > 0 && bounds.height > 0) {
+        setFillPreview(bounds);
+      } else {
+        setFillPreview(null);
+      }
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, [screenToDesign, setFillPreview, fillKeyRef, fillLinesRef]);
+
+  // Handle drop of media onto canvas via window mouseup
   useEffect(() => {
     const handleMouseUp = (e: MouseEvent) => {
       const state = dropStateRef.current;
-
-      // Only handle if we're dragging
       if (!state.draggingMediaId) return;
+
+      setFillPreview(null);
 
       if (!state.project || !stageContainerRef.current) {
         setDraggingMedia(null);
-
         return;
       }
 
-      // Check if mouse is over a panel or other drop-cancel zone
       const elementUnderMouse = document.elementFromPoint(e.clientX, e.clientY);
       if (elementUnderMouse) {
         const isOverPanel = elementUnderMouse.closest('[data-panel]') !== null;
         if (isOverPanel) {
           setDraggingMedia(null);
-  
           return;
         }
       }
@@ -95,43 +153,84 @@ export function useCanvasMediaDrop({
       const media = state.project.mediaPool.find((m) => m.id === state.draggingMediaId);
       if (!media) {
         setDraggingMedia(null);
-
         return;
       }
 
-      // Get the stage container's bounding rect
-      const stageRect = stageContainerRef.current.getBoundingClientRect();
-
-      // Calculate drop position relative to the stage container (accounting for padding)
-      const dropScreenX = e.clientX - stageRect.left - 24; // 24px left padding
-      const dropScreenY = e.clientY - stageRect.top;
-
-      // Check if drop is within canvas bounds
-      const totalScreenWidth = state.numSlides * state.canvasSize.width;
-      if (dropScreenX < 0 || dropScreenX > totalScreenWidth || dropScreenY < 0 || dropScreenY > state.canvasSize.height) {
+      const pos = screenToDesign(e.clientX, e.clientY);
+      if (!pos) {
         setDraggingMedia(null);
-
         return;
       }
 
-      // Convert to design coordinates (global across all slides)
-      const dropX = dropScreenX / (state.scale * state.zoomLevel);
-      const dropY = dropScreenY / (state.scale * state.zoomLevel);
+      const dropX = pos.x;
+      const dropY = pos.y;
 
-      // Check if dropping on a placeholder frame
+      // --- Fill mode: F key held + fill lines ready ---
+      const lines = fillLinesRef.current;
+      if (fillKeyRef.current && lines) {
+        const bounds = findFillBounds(dropX, dropY, lines.vertical, lines.horizontal);
+        if (bounds.width > 0 && bounds.height > 0) {
+          const frameRatio = bounds.width / bounds.height;
+          const mediaRatio = media.width / media.height;
+
+          let cropX = 0;
+          let cropY = 0;
+          let cropWidth = 1;
+          let cropHeight = 1;
+
+          if (mediaRatio > frameRatio) {
+            cropWidth = frameRatio / mediaRatio;
+            cropX = (1 - cropWidth) / 2;
+          } else if (mediaRatio < frameRatio) {
+            cropHeight = mediaRatio / frameRatio;
+            cropY = (1 - cropHeight) / 2;
+          }
+
+          const maxZIndex = state.elements.length > 0
+            ? Math.max(...state.elements.map(el => el.zIndex)) + 1
+            : 0;
+
+          const newElement: Element = {
+            id: uuidv4(),
+            type: 'photo',
+            mediaId: media.id,
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+            rotation: 0,
+            scale: 1,
+            locked: false,
+            zIndex: maxZIndex,
+            cropX,
+            cropY,
+            cropWidth,
+            cropHeight,
+            lastCropRatio: null,
+          };
+
+          setDraggingMedia(null);
+          clearMediaSelection();
+          addElement(newElement);
+
+          const slideIndex = getSlideIndexFromCenter(bounds.x, bounds.width, state.designSize.width);
+          if (slideIndex >= 0 && slideIndex < state.numSlides) {
+            setCurrentSlide(slideIndex);
+          }
+          return;
+        }
+      }
+
+      // --- Check if dropping on a placeholder frame ---
       const placeholderFrame = state.elements.find((el) => {
         if (el.type !== 'placeholder') return false;
-        const inX = dropX >= el.x && dropX <= el.x + el.width;
-        const inY = dropY >= el.y && dropY <= el.y + el.height;
-        return inX && inY;
+        return dropX >= el.x && dropX <= el.x + el.width && dropY >= el.y && dropY <= el.y + el.height;
       });
 
       if (placeholderFrame) {
-        // Fill the placeholder with the image, calculating crop to cover the frame
         const frameRatio = placeholderFrame.width / placeholderFrame.height;
         const mediaRatio = media.width / media.height;
 
-        // Calculate crop to fill the frame (cover mode)
         let cropX = 0;
         let cropY = 0;
         let cropWidth = 1;
@@ -146,7 +245,6 @@ export function useCanvasMediaDrop({
         }
 
         setDraggingMedia(null);
-
         clearMediaSelection();
 
         updateElement(placeholderFrame.id, {
@@ -165,7 +263,7 @@ export function useCanvasMediaDrop({
         return;
       }
 
-      // Calculate element size (50% of slide while maintaining aspect ratio)
+      // --- Normal drop ---
       const mediaRatio = media.width / media.height;
       let elementWidth = Math.min(state.designSize.width * 0.5, media.width);
       let elementHeight = elementWidth / mediaRatio;
@@ -175,11 +273,9 @@ export function useCanvasMediaDrop({
         elementWidth = elementHeight * mediaRatio;
       }
 
-      // Center on drop position, clamp to total canvas bounds
       const x = Math.max(0, Math.min(dropX - elementWidth / 2, state.totalDesignWidth - elementWidth));
       const y = Math.max(0, Math.min(dropY - elementHeight / 2, state.designSize.height - elementHeight));
 
-      // Calculate max zIndex
       const maxZIndex = state.elements.length > 0
         ? Math.max(...state.elements.map(el => el.zIndex)) + 1
         : 0;
@@ -200,7 +296,6 @@ export function useCanvasMediaDrop({
 
       setDraggingMedia(null);
       clearMediaSelection();
-
       addElement(newElement);
 
       const slideIndex = getSlideIndex(dropX, state.designSize.width);
@@ -211,8 +306,10 @@ export function useCanvasMediaDrop({
 
     window.addEventListener('mouseup', handleMouseUp);
     return () => window.removeEventListener('mouseup', handleMouseUp);
-  }, [setDraggingMedia, clearMediaSelection, addElement, updateElement, setCurrentSlide]);
+  }, [setDraggingMedia, clearMediaSelection, addElement, updateElement, setCurrentSlide, screenToDesign, setFillPreview, fillKeyRef, fillLinesRef]);
 
-  return {};
+  return {
+    fillPreviewRef,
+    fillPreviewListenerRef,
+  };
 }
-
