@@ -11,7 +11,7 @@ import { useCropStore } from '../../stores/cropStore';
 import { useTemplatesStore } from '../../stores/templatesStore';
 import { useClipboardStore } from '../../stores/clipboardStore';
 import { useHistoryStore } from '../../stores/historyStore';
-import { saveProjectThumbnail } from '../../services/tauri';
+import { saveProjectThumbnail, updateProject } from '../../services/tauri';
 import { calculateSnapLines, findSnap, findTransformSnap } from '../../utils/snapping';
 import { CropOverlay } from './CropOverlay';
 import { ContextMenu, ContextMenuItem } from '../common/ContextMenu';
@@ -93,6 +93,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // History store
   const undo = useHistoryStore((s) => s.undo);
   const redo = useHistoryStore((s) => s.redo);
+  const pushState = useHistoryStore((s) => s.pushState);
+  const setProjectSilent = useProjectStore((s) => s.setProjectSilent);
 
   // Template picker modal state
   const [isTemplatePickerOpen, setIsTemplatePickerOpen] = useState(false);
@@ -194,7 +196,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   });
 
   // Fill mode hook (F-key fill, shared between media drop and element drag)
-  const { fillKeyRef, fillLinesRef, getFillBoundsExcluding } = useCanvasFillMode({
+  // Replace mode hook (R-key replace, shared between media drop and element drag)
+  const { fillKeyRef, replaceKeyRef, fillLinesRef, getFillBoundsExcluding, getReplacementTarget } = useCanvasFillMode({
     elements,
     totalDesignWidth,
     designSize,
@@ -203,7 +206,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   // Media drop hook (fill preview state for F-key fill mode)
   const [fillPreview, setFillPreviewState] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
-  const { fillPreviewListenerRef } = useCanvasMediaDrop({
+  // Replace preview state (R-key replace mode — highlights the target element)
+  const [replacePreview, setReplacePreviewState] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const { fillPreviewListenerRef, replacePreviewListenerRef } = useCanvasMediaDrop({
     stageContainerRef,
     numSlides,
     canvasSize,
@@ -213,13 +218,19 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     totalDesignWidth,
     elements,
     fillKeyRef,
+    replaceKeyRef,
     fillLinesRef,
+    getReplacementTarget,
   });
-  // Register listener so the hook can push fill preview updates without going through zustand
+  // Register listeners so hooks can push preview updates without going through zustand
   useEffect(() => {
     fillPreviewListenerRef.current = setFillPreviewState;
     return () => { fillPreviewListenerRef.current = null; };
   }, [fillPreviewListenerRef]);
+  useEffect(() => {
+    replacePreviewListenerRef.current = setReplacePreviewState;
+    return () => { replacePreviewListenerRef.current = null; };
+  }, [replacePreviewListenerRef]);
 
   // Export hook - expose rendering functions to parent
   const { renderSlideForExport, renderSlideThumbnail, renderSlideForPreview } = useSlideExport({ stageRef, project, scale });
@@ -673,6 +684,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // Handle drag with snapping - THROTTLED to reduce CPU usage
   // Fill preview for element drag (updated during handleDragMove)
   const elementFillPreviewRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  // Replace preview for element drag (updated during handleDragMove)
+  const elementReplacePreviewRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
 
   const handleDragMove = useCallback(
     (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
@@ -683,16 +696,18 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       let newX = node.x();
       let newY = node.y();
 
-      // Fill mode preview during element drag — use cursor position, not element center
+      // Compute cursor position in design space (shared by fill + replace)
+      const stage = node.getStage();
+      const pointerPos = stage?.getPointerPosition();
+      const layer = node.getLayer();
+      const layerScale = layer?.scaleX() ?? 1;
+      const layerX = layer?.x() ?? 0;
+      const layerY = layer?.y() ?? 0;
+      const cursorX = pointerPos ? (pointerPos.x - layerX) / layerScale : newX + element.width / 2;
+      const cursorY = pointerPos ? (pointerPos.y - layerY) / layerScale : newY + element.height / 2;
+
+      // Fill mode preview during element drag
       if (fillKeyRef.current) {
-        const stage = node.getStage();
-        const pointerPos = stage?.getPointerPosition();
-        const layer = node.getLayer();
-        const layerScale = layer?.scaleX() ?? 1;
-        const layerX = layer?.x() ?? 0;
-        const layerY = layer?.y() ?? 0;
-        const cursorX = pointerPos ? (pointerPos.x - layerX) / layerScale : newX + element.width / 2;
-        const cursorY = pointerPos ? (pointerPos.y - layerY) / layerScale : newY + element.height / 2;
         const bounds = getFillBoundsExcluding(cursorX, cursorY, elementId);
         if (bounds && (
           !elementFillPreviewRef.current ||
@@ -709,11 +724,30 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         setFillPreviewState(null);
       }
 
+      // Replace mode preview during element drag
+      if (replaceKeyRef.current) {
+        const target = getReplacementTarget(cursorX, cursorY, elementId);
+        if (target && (
+          !elementReplacePreviewRef.current ||
+          elementReplacePreviewRef.current.x !== target.x ||
+          elementReplacePreviewRef.current.y !== target.y
+        )) {
+          elementReplacePreviewRef.current = target;
+          setReplacePreviewState(target);
+        } else if (!target && elementReplacePreviewRef.current) {
+          elementReplacePreviewRef.current = null;
+          setReplacePreviewState(null);
+        }
+      } else if (elementReplacePreviewRef.current) {
+        elementReplacePreviewRef.current = null;
+        setReplacePreviewState(null);
+      }
+
       // Apply snapping (snap to slide boundaries and other elements)
       // THROTTLED: Only recalculate snap lines if enough time/distance has passed,
       // but always apply the cached snap offset so the element "sticks" to the snap
       // position instead of jittering between raw and snapped positions.
-      if (snapEnabled && !fillKeyRef.current) {
+      if (snapEnabled && !fillKeyRef.current && !replaceKeyRef.current) {
         const now = performance.now();
         const lastCalc = lastSnapCalcRef.current;
         const dx = Math.abs(newX - lastCalc.x);
@@ -770,7 +804,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       // Update auto-scroll based on mouse position
       updateScrollSpeed(e.evt.clientX);
     },
-    [elementMap, snapEnabled, snapSettings, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds, updateScrollSpeed, elements, fillKeyRef, getFillBoundsExcluding, setFillPreviewState]
+    [elementMap, snapEnabled, snapSettings, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds, updateScrollSpeed, elements, fillKeyRef, replaceKeyRef, getFillBoundsExcluding, getReplacementTarget, setFillPreviewState, setReplacePreviewState]
   );
 
   // Handle drag start
@@ -790,12 +824,81 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       stopAutoScroll();
       isDraggingRef.current = false;
 
-      // Clear fill preview
+      // Clear fill/replace previews
       elementFillPreviewRef.current = null;
       setFillPreviewState(null);
+      elementReplacePreviewRef.current = null;
+      setReplacePreviewState(null);
 
       let newX = node.x();
       let newY = node.y();
+
+      // Replace mode: swap dragged element's media into the target element
+      if (replaceKeyRef.current && element.mediaId) {
+        const stage = node.getStage();
+        const pointerPos = stage?.getPointerPosition();
+        const layer = node.getLayer();
+        const layerScale = layer?.scaleX() ?? 1;
+        const layerX = layer?.x() ?? 0;
+        const layerY = layer?.y() ?? 0;
+        const cursorX = pointerPos ? (pointerPos.x - layerX) / layerScale : newX + element.width / 2;
+        const cursorY = pointerPos ? (pointerPos.y - layerY) / layerScale : newY + element.height / 2;
+        const target = getReplacementTarget(cursorX, cursorY, elementId);
+        if (target) {
+          // Compute crop to fit the dragged media into the target's frame
+          const mediaPool = project?.mediaPool || [];
+          const media = mediaPool.find(m => m.id === element.mediaId);
+          const mediaRatio = media ? media.width / media.height : element.width / element.height;
+          const frameRatio = target.width / target.height;
+
+          let cropX = 0;
+          let cropY = 0;
+          let cropWidth = 1;
+          let cropHeight = 1;
+
+          if (mediaRatio > frameRatio) {
+            cropWidth = frameRatio / mediaRatio;
+            cropX = (1 - cropWidth) / 2;
+          } else if (mediaRatio < frameRatio) {
+            cropHeight = mediaRatio / frameRatio;
+            cropY = (1 - cropHeight) / 2;
+          }
+
+          // Apply both mutations (update target + remove source) as a single
+          // atomic operation so undo/redo treats it as one step.
+          if (project) {
+            const updatedElements = project.elements
+              .filter(el => el.id !== elementId) // remove the replacer
+              .map(el => {
+                if (el.id !== target.elementId) return el;
+                return {
+                  ...el,
+                  mediaId: element.mediaId,
+                  assetPath: undefined,
+                  cropX,
+                  cropY,
+                  cropWidth,
+                  cropHeight,
+                  lastCropRatio: null,
+                };
+              });
+
+            const updatedProject = { ...project, elements: updatedElements };
+
+            // Synchronous local update for immediate UI
+            setProjectSilent(updatedProject);
+
+            // Single history entry
+            pushState(updatedProject, { source: 'element', actionType: 'update', elementId: target.elementId });
+
+            // Persist to backend
+            updateProject(updatedProject).catch(err => console.error('Failed to persist replace:', err));
+          }
+
+          setActiveGuides([]);
+          return;
+        }
+      }
 
       // Fill mode: snap element into the bounded region (use cursor, not element center)
       if (fillKeyRef.current) {
@@ -893,7 +996,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         setCurrentSlide(slideIndex);
       }
     },
-    [elementMap, updateElement, updateElementLocal, setActiveGuides, clampToVisibleBounds, designSize.width, designSize.height, numSlides, setCurrentSlide, stopAutoScroll, snapEnabled, snapSettings, totalDesignWidth, elements, fillKeyRef, getFillBoundsExcluding, setFillPreviewState, project]
+    [elementMap, updateElement, updateElementLocal, setProjectSilent, pushState, setActiveGuides, clampToVisibleBounds, designSize.width, designSize.height, numSlides, setCurrentSlide, stopAutoScroll, snapEnabled, snapSettings, totalDesignWidth, elements, fillKeyRef, replaceKeyRef, getFillBoundsExcluding, getReplacementTarget, setFillPreviewState, setReplacePreviewState, project]
   );
 
   // Handle transform end
@@ -1637,6 +1740,21 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
                     height={fillPreview.height}
                     fill="rgba(59, 130, 246, 0.15)"
                     stroke="#3b82f6"
+                    strokeWidth={2 / (scale * zoomLevel)}
+                    dash={[6 / (scale * zoomLevel), 4 / (scale * zoomLevel)]}
+                    listening={false}
+                  />
+                )}
+
+                {/* Replace preview overlay (R-key replace mode during drag) */}
+                {replacePreview && (
+                  <Rect
+                    x={replacePreview.x}
+                    y={replacePreview.y}
+                    width={replacePreview.width}
+                    height={replacePreview.height}
+                    fill="rgba(168, 85, 247, 0.2)"
+                    stroke="#a855f7"
                     strokeWidth={2 / (scale * zoomLevel)}
                     dash={[6 / (scale * zoomLevel), 4 / (scale * zoomLevel)]}
                     listening={false}

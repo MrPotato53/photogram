@@ -42,12 +42,14 @@ interface SnapStoreState {
   snapSettings: SnapSettings;
   activeGuides: Guide[];
   fillModeActive: boolean;
+  replaceModeActive: boolean;
 
   setSnapEnabled: (enabled: boolean) => void;
   setActiveGuides: (guides: Guide[]) => void;
   updateSnapSettings: (updates: SnapSettingsUpdate) => void;
   hydrateFromProject: (data: SnapSettingsData | null | undefined) => void;
   setFillModeActive: (active: boolean) => void;
+  setReplaceModeActive: (active: boolean) => void;
 }
 
 // Lazy getter to avoid circular dependency — set by projectStore on init
@@ -95,9 +97,14 @@ export const useSnapStore = create<SnapStoreState>((set, get) => ({
   snapSettings: { ...defaultSnapSettings },
   activeGuides: [],
   fillModeActive: false,
+  replaceModeActive: false,
 
   setFillModeActive: (active: boolean) => {
     set({ fillModeActive: active });
+  },
+
+  setReplaceModeActive: (active: boolean) => {
+    set({ replaceModeActive: active });
   },
 
   setSnapEnabled: (enabled: boolean) => {
