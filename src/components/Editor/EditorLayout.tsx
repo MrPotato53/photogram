@@ -30,7 +30,12 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   const refreshProject = useProjectStore((s) => s.refreshProject);
   const currentSlideIndex = useSlideStore((s) => s.currentSlideIndex);
   const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
-  const panels = usePanelStore((s) => s.panels);
+  // Granular selectors — only re-render when the specific value changes,
+  // not when unrelated panel fields (like width) change.
+  const mediaPoolOpen = usePanelStore((s) => s.panels.mediaPool.isOpen);
+  const layersOpen = usePanelStore((s) => s.panels.layers.isOpen);
+  const templatesOpen = usePanelStore((s) => s.panels.templates.isOpen);
+  const slidesOpen = usePanelStore((s) => s.panels.slides.isOpen);
   const mediaPoolDocked = usePanelStore((s) => s.mediaPoolDocked);
 
   // Export & Preview functionality
@@ -137,7 +142,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
         {/* Canvas row: optional docked panel + canvas area */}
         <div className="flex-1 flex min-h-0">
           {/* Docked media panel */}
-          {panels.mediaPool.isOpen && mediaPoolDocked && (
+          {mediaPoolOpen && mediaPoolDocked && (
             <DockedMediaPanel>
               <MediaPoolPanel />
             </DockedMediaPanel>
@@ -153,7 +158,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
             />
 
             {/* Floating Panels */}
-            {panels.mediaPool.isOpen && !mediaPoolDocked && (
+            {mediaPoolOpen && !mediaPoolDocked && (
               <FloatingPanel
                 title="Media Pool"
                 panelId="mediaPool"
@@ -166,7 +171,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
               </FloatingPanel>
             )}
 
-            {panels.layers.isOpen && (
+            {layersOpen && (
             <FloatingPanel
               title="Layers"
               panelId="layers"
@@ -178,7 +183,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
             </FloatingPanel>
           )}
 
-          {panels.templates.isOpen && (
+          {templatesOpen && (
             <FloatingPanel
               title="Templates"
               panelId="templates"
@@ -193,7 +198,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
         </div>
 
         {/* Slides panel - fixed at bottom (shows collapsed strip or full panel) */}
-        <div className="flex-shrink-0" style={panels.slides.isOpen ? { height: 120 } : undefined}>
+        <div className="flex-shrink-0" style={slidesOpen ? { height: 120 } : undefined}>
           <SlidesPanel />
         </div>
 

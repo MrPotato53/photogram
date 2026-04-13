@@ -22,11 +22,11 @@ export function FloatingPanel({
   minHeight = 150,
   onDock,
 }: FloatingPanelProps) {
-  const panels = usePanelStore((s) => s.panels);
+  const panelWidth = usePanelStore((s) => s.panels[panelId].width);
+  const panelHeight = usePanelStore((s) => s.panels[panelId].height);
   const setPanelSize = usePanelStore((s) => s.setPanelSize);
   const closePanel = usePanelStore((s) => s.closePanel);
   const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
-  const panelState = panels[panelId];
 
   // Allow drop events to bubble up to EditorLayout when media is being dragged
   const handleDragOver = (e: React.DragEvent) => {
@@ -109,8 +109,8 @@ export function FloatingPanel({
       setResizeDirection(direction);
 
       // Use pending size, local size, or panel state as starting point
-      const currentWidth = pendingSizeRef.current?.width ?? localSize?.width ?? panelState.width;
-      const currentHeight = pendingSizeRef.current?.height ?? localSize?.height ?? panelState.height;
+      const currentWidth = pendingSizeRef.current?.width ?? localSize?.width ?? panelWidth;
+      const currentHeight = pendingSizeRef.current?.height ?? localSize?.height ?? panelHeight;
 
       // If there was a pending size, apply it to local state immediately
       if (pendingSizeRef.current) {
@@ -127,7 +127,7 @@ export function FloatingPanel({
         posY: position.y,
       };
     },
-    [panelState.width, panelState.height, localSize, position]
+    [panelWidth, panelHeight, localSize, position]
   );
 
   const handleResize = useCallback(
@@ -229,8 +229,8 @@ export function FloatingPanel({
   }, []);
 
   // Calculate display size: prefer local (during resize), then pending (after resize, before commit), then store
-  const displayWidth = localSize?.width ?? pendingSizeRef.current?.width ?? panelState.width;
-  const displayHeight = localSize?.height ?? pendingSizeRef.current?.height ?? panelState.height;
+  const displayWidth = localSize?.width ?? pendingSizeRef.current?.width ?? panelWidth;
+  const displayHeight = localSize?.height ?? pendingSizeRef.current?.height ?? panelHeight;
 
   return (
     <div

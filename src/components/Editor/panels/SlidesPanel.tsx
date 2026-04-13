@@ -239,7 +239,7 @@ export function SlidesPanel() {
   const removeSlide = useSlideStore((s) => s.removeSlide);
   const reorderSlides = useSlideStore((s) => s.reorderSlides);
   const duplicateSlide = useSlideStore((s) => s.duplicateSlide);
-  const panels = usePanelStore((s) => s.panels);
+  const slidesOpen = usePanelStore((s) => s.panels.slides.isOpen);
   const togglePanel = usePanelStore((s) => s.togglePanel);
 
   const templates = useTemplatesStore((s) => s.templates);
@@ -555,7 +555,7 @@ export function SlidesPanel() {
   if (!project) return null;
 
   // Collapsed state - show a small strip at the bottom
-  if (!panels.slides.isOpen) {
+  if (!slidesOpen) {
     return (
       <div className="flex-shrink-0 bg-theme-bg-secondary border-t border-theme-border">
         <button
