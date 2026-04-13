@@ -8,6 +8,7 @@ import { useElementStore } from '../../stores/elementStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { updateDragLabel } from '../../components/Editor/DragPreview';
 import { findFillBounds, type FillBounds } from '../../utils/snapping';
+import type { ReplaceTarget } from './useCanvasFillMode';
 
 interface UseCanvasMediaDropOptions {
   stageContainerRef: React.RefObject<HTMLDivElement>;
@@ -19,7 +20,9 @@ interface UseCanvasMediaDropOptions {
   totalDesignWidth: number;
   elements: Element[];
   fillKeyRef: React.RefObject<boolean>;
+  replaceKeyRef: React.RefObject<boolean>;
   fillLinesRef: React.RefObject<{ vertical: number[]; horizontal: number[] } | null>;
+  getReplacementTarget: (designX: number, designY: number, excludeId?: string) => ReplaceTarget | null;
 }
 
 /**
@@ -36,7 +39,9 @@ export function useCanvasMediaDrop({
   totalDesignWidth,
   elements,
   fillKeyRef,
+  replaceKeyRef,
   fillLinesRef,
+  getReplacementTarget,
 }: UseCanvasMediaDropOptions) {
   const project = useProjectStore((s) => s.project);
   const setCurrentSlide = useSlideStore((s) => s.setCurrentSlide);
@@ -55,6 +60,17 @@ export function useCanvasMediaDrop({
     fillPreviewRef.current = bounds;
     fillPreviewListenerRef.current?.(bounds);
     if (changed) updateDragLabel(bounds ? 'Fill area (F)' : 'Drop on canvas');
+  }, []);
+
+  // --- Replace preview state (exposed to CanvasArea for rendering) ---
+  const replacePreviewRef = useRef<ReplaceTarget | null>(null);
+  const replacePreviewListenerRef = useRef<((target: ReplaceTarget | null) => void) | null>(null);
+
+  const setReplacePreview = useCallback((target: ReplaceTarget | null) => {
+    const changed = (replacePreviewRef.current === null) !== (target === null);
+    replacePreviewRef.current = target;
+    replacePreviewListenerRef.current?.(target);
+    if (changed) updateDragLabel(target ? 'Replace image (R)' : 'Drop on canvas');
   }, []);
 
   // Refs for drop handling (to avoid stale closures in always-attached listener)
@@ -100,33 +116,43 @@ export function useCanvasMediaDrop({
     };
   }, [stageContainerRef]);
 
-  // Mousemove handler for fill preview during media drag
+  // Mousemove handler for fill/replace preview during media drag
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       const state = dropStateRef.current;
       if (!state.draggingMediaId) return;
 
-      const lines = fillLinesRef.current;
-      if (!fillKeyRef.current || !lines) {
-        if (fillPreviewRef.current) setFillPreview(null);
-        return;
-      }
       const pos = screenToDesign(e.clientX, e.clientY);
-      if (!pos) {
-        if (fillPreviewRef.current) setFillPreview(null);
-        return;
-      }
-      const bounds = findFillBounds(pos.x, pos.y, lines.vertical, lines.horizontal);
-      if (bounds.width > 0 && bounds.height > 0) {
-        setFillPreview(bounds);
-      } else {
+
+      // Fill preview
+      const lines = fillLinesRef.current;
+      if (fillKeyRef.current && lines && pos) {
+        const bounds = findFillBounds(pos.x, pos.y, lines.vertical, lines.horizontal);
+        if (bounds.width > 0 && bounds.height > 0) {
+          setFillPreview(bounds);
+        } else {
+          setFillPreview(null);
+        }
+      } else if (fillPreviewRef.current) {
         setFillPreview(null);
+      }
+
+      // Replace preview
+      if (replaceKeyRef.current && pos) {
+        const target = getReplacementTarget(pos.x, pos.y);
+        if (target) {
+          setReplacePreview(target);
+        } else {
+          setReplacePreview(null);
+        }
+      } else if (replacePreviewRef.current) {
+        setReplacePreview(null);
       }
     };
 
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);
-  }, [screenToDesign, setFillPreview, fillKeyRef, fillLinesRef]);
+  }, [screenToDesign, setFillPreview, setReplacePreview, fillKeyRef, replaceKeyRef, fillLinesRef, getReplacementTarget]);
 
   // Handle drop of media onto canvas via window mouseup
   useEffect(() => {
@@ -135,6 +161,7 @@ export function useCanvasMediaDrop({
       if (!state.draggingMediaId) return;
 
       setFillPreview(null);
+      setReplacePreview(null);
 
       if (!state.project || !stageContainerRef.current) {
         setDraggingMedia(null);
@@ -164,6 +191,47 @@ export function useCanvasMediaDrop({
 
       const dropX = pos.x;
       const dropY = pos.y;
+
+      // --- Replace mode: R key held, replace target element's media ---
+      if (replaceKeyRef.current) {
+        const target = getReplacementTarget(dropX, dropY);
+        if (target) {
+          const frameRatio = target.width / target.height;
+          const mediaRatio = media.width / media.height;
+
+          let cropX = 0;
+          let cropY = 0;
+          let cropWidth = 1;
+          let cropHeight = 1;
+
+          if (mediaRatio > frameRatio) {
+            cropWidth = frameRatio / mediaRatio;
+            cropX = (1 - cropWidth) / 2;
+          } else if (mediaRatio < frameRatio) {
+            cropHeight = mediaRatio / frameRatio;
+            cropY = (1 - cropHeight) / 2;
+          }
+
+          setDraggingMedia(null);
+          clearMediaSelection();
+
+          updateElement(target.elementId, {
+            mediaId: media.id,
+            assetPath: undefined,
+            cropX,
+            cropY,
+            cropWidth,
+            cropHeight,
+            lastCropRatio: null,
+          });
+
+          const slideIndex = getSlideIndexFromCenter(target.x, target.width, state.designSize.width);
+          if (slideIndex >= 0 && slideIndex < state.numSlides) {
+            setCurrentSlide(slideIndex);
+          }
+          return;
+        }
+      }
 
       // --- Fill mode: F key held + fill lines ready ---
       const lines = fillLinesRef.current;
@@ -306,10 +374,11 @@ export function useCanvasMediaDrop({
 
     window.addEventListener('mouseup', handleMouseUp);
     return () => window.removeEventListener('mouseup', handleMouseUp);
-  }, [setDraggingMedia, clearMediaSelection, addElement, updateElement, setCurrentSlide, screenToDesign, setFillPreview, fillKeyRef, fillLinesRef]);
+  }, [setDraggingMedia, clearMediaSelection, addElement, updateElement, setCurrentSlide, screenToDesign, setFillPreview, setReplacePreview, fillKeyRef, replaceKeyRef, fillLinesRef, getReplacementTarget]);
 
   return {
     fillPreviewRef,
     fillPreviewListenerRef,
+    replacePreviewListenerRef,
   };
 }

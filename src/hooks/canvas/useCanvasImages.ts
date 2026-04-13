@@ -57,8 +57,11 @@ export function useCanvasImages(elements: Element[]) {
 
           if (imagePath) {
             const existingImage = currentImages.get(element.id);
-            // Reuse existing image if it loaded successfully
-            if (existingImage && existingImage.complete && existingImage.naturalWidth > 0) {
+            const existingSrc = existingImage?.src;
+            const expectedSrc = convertFileSrc(imagePath);
+            // Reuse existing image only if it loaded successfully AND source matches
+            // (mediaId may have changed via replace mode)
+            if (existingImage && existingImage.complete && existingImage.naturalWidth > 0 && existingSrc === expectedSrc) {
               newLoadedImages.set(element.id, existingImage);
             } else {
               // Need to load this image

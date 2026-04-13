@@ -8,6 +8,14 @@ import {
   type FillBounds,
 } from '../../utils/snapping';
 
+export interface ReplaceTarget {
+  elementId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 interface UseCanvasFillModeOptions {
   elements: Element[];
   totalDesignWidth: number;
@@ -28,6 +36,7 @@ export function useCanvasFillMode({
   const snapEnabled = useSnapStore((s) => s.snapEnabled);
   const snapSettings = useSnapStore((s) => s.snapSettings);
   const setFillModeActive = useSnapStore((s) => s.setFillModeActive);
+  const setReplaceModeActive = useSnapStore((s) => s.setReplaceModeActive);
 
   // Pre-computed fill lines, updated asynchronously
   const fillLinesRef = useRef<{ vertical: number[]; horizontal: number[] } | null>(null);
@@ -67,17 +76,28 @@ export function useCanvasFillMode({
     });
   }, [snapEnabled, snapSettings, elements, totalDesignWidth, designSize.width, designSize.height, numSlides]);
 
-  // F key tracking
+  // F key tracking (fill mode) and R key tracking (replace mode)
+  // Mutual exclusion: whichever key was pressed first wins; the other is ignored until both are released
   const fillKeyRef = useRef(false);
+  const replaceKeyRef = useRef(false);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
       if (e.key === 'f' || e.key === 'F') {
-        const tag = (e.target as HTMLElement).tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-        if (!fillKeyRef.current) {
+        // Only activate fill if replace is not already active
+        if (!fillKeyRef.current && !replaceKeyRef.current) {
           fillKeyRef.current = true;
           setFillModeActive(true);
+        }
+      }
+      if (e.key === 'r' || e.key === 'R') {
+        // Only activate replace if fill is not already active
+        if (!replaceKeyRef.current && !fillKeyRef.current) {
+          replaceKeyRef.current = true;
+          setReplaceModeActive(true);
         }
       }
     };
@@ -86,6 +106,10 @@ export function useCanvasFillMode({
         fillKeyRef.current = false;
         setFillModeActive(false);
       }
+      if (e.key === 'r' || e.key === 'R') {
+        replaceKeyRef.current = false;
+        setReplaceModeActive(false);
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
@@ -93,7 +117,7 @@ export function useCanvasFillMode({
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [setFillModeActive]);
+  }, [setFillModeActive, setReplaceModeActive]);
 
   /**
    * Look up fill bounds for a design-space point. Returns null if fill
@@ -130,10 +154,32 @@ export function useCanvasFillMode({
     return (bounds.width > 0 && bounds.height > 0) ? bounds : null;
   }, [snapEnabled, snapSettings, elements, totalDesignWidth, designSize.width, designSize.height, numSlides]);
 
+  /**
+   * Find the topmost image element under the given design-space point,
+   * optionally excluding a specific element (the one being dragged).
+   */
+  const getReplacementTarget = useCallback((designX: number, designY: number, excludeId?: string): ReplaceTarget | null => {
+    if (!replaceKeyRef.current) return null;
+
+    // Iterate in reverse z-order (highest zIndex first)
+    const sorted = [...elements].sort((a, b) => b.zIndex - a.zIndex);
+    for (const el of sorted) {
+      if (excludeId && el.id === excludeId) continue;
+      // Only replace image elements (photos with a mediaId), not placeholders
+      if (el.type !== 'photo' || !el.mediaId) continue;
+      if (designX >= el.x && designX <= el.x + el.width && designY >= el.y && designY <= el.y + el.height) {
+        return { elementId: el.id, x: el.x, y: el.y, width: el.width, height: el.height };
+      }
+    }
+    return null;
+  }, [elements]);
+
   return {
     fillKeyRef,
+    replaceKeyRef,
     fillLinesRef,
     getFillBounds,
     getFillBoundsExcluding,
+    getReplacementTarget,
   };
 }
