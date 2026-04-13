@@ -34,8 +34,16 @@ function ToolbarButton({ label, icon, isActive, onClick }: ToolbarButtonProps) {
 }
 
 export function EditorToolbar({ projectName, onPreviewClick, onExportClick }: EditorToolbarProps) {
-  const panels = usePanelStore((s) => s.panels);
+  const mediaPoolOpen = usePanelStore((s) => s.panels.mediaPool.isOpen);
+  const layersOpen = usePanelStore((s) => s.panels.layers.isOpen);
+  const templatesOpen = usePanelStore((s) => s.panels.templates.isOpen);
+  const slidesOpen = usePanelStore((s) => s.panels.slides.isOpen);
+  const editBarOpen = usePanelStore((s) => s.panels.editBar.isOpen);
   const togglePanel = usePanelStore((s) => s.togglePanel);
+  const panelOpen: Record<PanelId, boolean> = {
+    mediaPool: mediaPoolOpen, layers: layersOpen, templates: templatesOpen,
+    slides: slidesOpen, editBar: editBarOpen,
+  };
   const canUndo = useCanUndo();
   const canRedo = useCanRedo();
   const undo = useHistoryStore((s) => s.undo);
@@ -149,7 +157,7 @@ export function EditorToolbar({ projectName, onPreviewClick, onExportClick }: Ed
             key={button.id}
             label={button.label}
             icon={button.icon}
-            isActive={panels[button.id].isOpen}
+            isActive={panelOpen[button.id]}
             onClick={() => togglePanel(button.id)}
           />
         ))}
@@ -170,7 +178,7 @@ export function EditorToolbar({ projectName, onPreviewClick, onExportClick }: Ed
               />
             </svg>
           }
-          isActive={panels.editBar.isOpen}
+          isActive={editBarOpen}
           onClick={() => togglePanel('editBar')}
         />
       </div>

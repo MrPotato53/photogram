@@ -376,7 +376,7 @@ export function EditBar() {
   const project = useProjectStore((s) => s.project);
   const selectedElementId = useElementStore((s) => s.selectedElementId);
   const updateElement = useElementStore((s) => s.updateElement);
-  const panels = usePanelStore((s) => s.panels);
+  const editBarOpen = usePanelStore((s) => s.panels.editBar.isOpen);
   const togglePanel = usePanelStore((s) => s.togglePanel);
   const cropModeElementId = useCropStore((s) => s.cropModeElementId);
   const enterCropMode = useCropStore((s) => s.enterCropMode);
@@ -595,7 +595,7 @@ export function EditBar() {
     (selectedElement.cropHeight ?? 1) !== 1
   );
 
-  if (!panels.editBar.isOpen) {
+  if (!editBarOpen) {
     return (
       <div className="flex-shrink-0 bg-theme-bg-secondary border-b border-theme-border">
         <button

@@ -683,11 +683,17 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       let newX = node.x();
       let newY = node.y();
 
-      // Fill mode preview during element drag
+      // Fill mode preview during element drag — use cursor position, not element center
       if (fillKeyRef.current) {
-        const centerX = newX + element.width / 2;
-        const centerY = newY + element.height / 2;
-        const bounds = getFillBoundsExcluding(centerX, centerY, elementId);
+        const stage = node.getStage();
+        const pointerPos = stage?.getPointerPosition();
+        const layer = node.getLayer();
+        const layerScale = layer?.scaleX() ?? 1;
+        const layerX = layer?.x() ?? 0;
+        const layerY = layer?.y() ?? 0;
+        const cursorX = pointerPos ? (pointerPos.x - layerX) / layerScale : newX + element.width / 2;
+        const cursorY = pointerPos ? (pointerPos.y - layerY) / layerScale : newY + element.height / 2;
+        const bounds = getFillBoundsExcluding(cursorX, cursorY, elementId);
         if (bounds && (
           !elementFillPreviewRef.current ||
           elementFillPreviewRef.current.x !== bounds.x ||
@@ -791,11 +797,17 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       let newX = node.x();
       let newY = node.y();
 
-      // Fill mode: snap element into the bounded region
+      // Fill mode: snap element into the bounded region (use cursor, not element center)
       if (fillKeyRef.current) {
-        const centerX = newX + element.width / 2;
-        const centerY = newY + element.height / 2;
-        const bounds = getFillBoundsExcluding(centerX, centerY, elementId);
+        const stage = node.getStage();
+        const pointerPos = stage?.getPointerPosition();
+        const layer = node.getLayer();
+        const layerScale = layer?.scaleX() ?? 1;
+        const layerX = layer?.x() ?? 0;
+        const layerY = layer?.y() ?? 0;
+        const cursorX = pointerPos ? (pointerPos.x - layerX) / layerScale : newX + element.width / 2;
+        const cursorY = pointerPos ? (pointerPos.y - layerY) / layerScale : newY + element.height / 2;
+        const bounds = getFillBoundsExcluding(cursorX, cursorY, elementId);
         if (bounds) {
           // Compute crop to cover the fill region using media's native aspect ratio
           const mediaPool = project?.mediaPool || [];
@@ -816,8 +828,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
             cropY = (1 - cropHeight) / 2;
           }
 
-          setActiveGuides([]);
-          updateElement(elementId, {
+          const fillUpdates = {
             x: bounds.x,
             y: bounds.y,
             width: bounds.width,
@@ -827,7 +838,20 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
             cropWidth,
             cropHeight,
             lastCropRatio: null,
-          });
+          };
+
+          // Set node position immediately so Konva doesn't flash the drag position
+          node.x(bounds.x);
+          node.y(bounds.y);
+
+          // Synchronous local update so React renders correct position immediately
+          // (updateElement is async — without this, a re-render from setFillPreviewState
+          // would briefly show the element at its pre-drag position)
+          updateElementLocal(elementId, fillUpdates);
+          // Persist + push history entry
+          updateElement(elementId, fillUpdates);
+
+          setActiveGuides([]);
 
           const slideIndex = getSlideIndexFromCenter(bounds.x, bounds.width, designSize.width);
           if (slideIndex >= 0 && slideIndex < numSlides) {
@@ -869,7 +893,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         setCurrentSlide(slideIndex);
       }
     },
-    [elementMap, updateElement, setActiveGuides, clampToVisibleBounds, designSize.width, designSize.height, numSlides, setCurrentSlide, stopAutoScroll, snapEnabled, snapSettings, totalDesignWidth, elements, fillKeyRef, getFillBoundsExcluding, setFillPreviewState, project]
+    [elementMap, updateElement, updateElementLocal, setActiveGuides, clampToVisibleBounds, designSize.width, designSize.height, numSlides, setCurrentSlide, stopAutoScroll, snapEnabled, snapSettings, totalDesignWidth, elements, fillKeyRef, getFillBoundsExcluding, setFillPreviewState, project]
   );
 
   // Handle transform end
