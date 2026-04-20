@@ -18,6 +18,7 @@ import { DragPreview } from './DragPreview';
 import { ExportModal } from './ExportModal';
 import { PreviewModal } from './PreviewModal';
 import { exportSlides, showInFolder, type ExportOptions } from '../../services/tauri';
+import { useEditorShortcuts } from '../../hooks/useEditorShortcuts';
 
 interface EditorLayoutProps {
   projectId: string;
@@ -76,6 +77,11 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
       document.body.style.cursor = '';
     };
   }, [draggingMediaId]);
+
+  useEditorShortcuts({
+    onPreview: useCallback(() => setIsPreviewModalOpen(true), []),
+    onExport: useCallback(() => setIsExportModalOpen(true), []),
+  });
 
   // Export handler
   const handleExport = useCallback(async (slideIndices: number[], options: ExportOptions) => {

@@ -35,9 +35,10 @@ export const useSlideStore = create<SlideState>((set, get) => ({
     // Maximum 20 slides
     if (project.slides.length >= 20) return;
 
+    const newSlideIndex = project.slides.length;
     const newSlide: Slide = {
       id: uuidv4(),
-      order: project.slides.length,
+      order: newSlideIndex,
     };
 
     const updatedProject = {
@@ -51,6 +52,7 @@ export const useSlideStore = create<SlideState>((set, get) => ({
         source: 'slide',
         actionType: 'add',
       });
+      set({ currentSlideIndex: newSlideIndex });
     } catch (error) {
       console.error('Failed to add slide:', error);
     }

@@ -12,12 +12,16 @@ interface PanelStoreState {
   panels: Record<PanelId, PanelState>;
   mediaPoolDocked: boolean;
   layersDocked: boolean;
+  // Template picker modal. Lives here (not in a component) so the Cmd+Shift+T
+  // shortcut wired in EditorLayout can open it without lifting state up.
+  templatePickerOpen: boolean;
 
   togglePanel: (panelId: PanelId) => void;
   setPanelSize: (panelId: PanelId, size: { width?: number; height?: number }) => void;
   closePanel: (panelId: PanelId) => void;
   setMediaPoolDocked: (docked: boolean) => void;
   setLayersDocked: (docked: boolean) => void;
+  setTemplatePickerOpen: (open: boolean) => void;
 }
 
 const defaultPanelState: Record<PanelId, PanelState> = {
@@ -32,6 +36,7 @@ export const usePanelStore = create<PanelStoreState>((set) => ({
   panels: { ...defaultPanelState },
   mediaPoolDocked: true,
   layersDocked: true,
+  templatePickerOpen: false,
 
   togglePanel: (panelId: PanelId) => {
     set((state) => ({
@@ -76,6 +81,10 @@ export const usePanelStore = create<PanelStoreState>((set) => ({
 
   setLayersDocked: (docked: boolean) => {
     set({ layersDocked: docked });
+  },
+
+  setTemplatePickerOpen: (open: boolean) => {
+    set({ templatePickerOpen: open });
   },
 }));
 
