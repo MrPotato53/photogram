@@ -2,10 +2,13 @@ import { useEffect, useState, useRef, useMemo } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { Element } from '../../types';
 import { useProjectStore } from '../../stores/projectStore';
+import { preloadImage, getCachedImage } from '../../utils/imageCache';
 
 /**
- * Hook for loading and managing images for canvas elements
- * Optimized to avoid re-running during drag operations (position-only changes)
+ * Hook for loading and managing images for canvas elements.
+ * Uses a module-level image cache so preloads started elsewhere (e.g.
+ * media-pool drag start) are reused without reloading. Falls back to
+ * the media's thumbnail while the full-size image is still decoding.
  */
 export function useCanvasImages(elements: Element[]) {
   const [loadedImages, setLoadedImages] = useState<Map<string, HTMLImageElement>>(new Map());
@@ -20,88 +23,115 @@ export function useCanvasImages(elements: Element[]) {
       .join('|');
   }, [elements]);
 
-  // Track the last processed key to avoid redundant work
   const lastProcessedKeyRef = useRef<string>('');
   const loadedImagesRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  // Tracks which URL each element is currently displaying so we can detect
+  // when a swap is needed (thumbnail → full, or media changed)
+  const elementSrcRef = useRef<Map<string, string>>(new Map());
 
-  // Load images for all elements - only runs when image-relevant data changes
   useEffect(() => {
-    // Skip if nothing image-relevant changed (e.g., just position updates during drag)
-    if (imageRelevantKey === lastProcessedKeyRef.current) {
-      return;
-    }
+    if (imageRelevantKey === lastProcessedKeyRef.current) return;
     lastProcessedKeyRef.current = imageRelevantKey;
 
-    const loadImages = async () => {
-      const currentImages = loadedImagesRef.current;
-      const newLoadedImages = new Map<string, HTMLImageElement>();
-      let hasChanges = false;
+    const currentImages = loadedImagesRef.current;
+    const newLoadedImages = new Map<string, HTMLImageElement>();
+    const elementTargets = new Map<string, { fullUrl: string; thumbUrl: string | null }>();
 
-      // Build a set of element IDs we need images for
-      const neededElementIds = new Set<string>();
+    // Pass 1: synchronously build map from cache + thumbnail fallback.
+    // No awaits here — this path must be instant so the drop doesn't block.
+    for (const element of elements) {
+      if (element.type !== 'photo' || !element.mediaId) continue;
 
-      for (const element of elements) {
-        if (element.type === 'photo' && element.mediaId) {
-          neededElementIds.add(element.id);
+      const media = project?.mediaPool.find((m) => m.id === element.mediaId);
+      const fullPath = element.assetPath || media?.filePath;
+      const thumbPath = media?.thumbnailPath || null;
+      if (!fullPath) continue;
 
-          let imagePath: string | null = null;
+      const fullUrl = convertFileSrc(fullPath);
+      const thumbUrl = thumbPath ? convertFileSrc(thumbPath) : null;
+      elementTargets.set(element.id, { fullUrl, thumbUrl });
 
-          if (element.assetPath) {
-            imagePath = element.assetPath;
-          } else {
-            const media = project?.mediaPool.find((m) => m.id === element.mediaId);
-            if (media) {
-              imagePath = media.filePath;
-            }
-          }
+      // Reuse existing if its source matches the full URL
+      const existing = currentImages.get(element.id);
+      if (existing && existing.complete && existing.naturalWidth > 0 && existing.src === fullUrl) {
+        newLoadedImages.set(element.id, existing);
+        continue;
+      }
 
-          if (imagePath) {
-            const existingImage = currentImages.get(element.id);
-            const existingSrc = existingImage?.src;
-            const expectedSrc = convertFileSrc(imagePath);
-            // Reuse existing image only if it loaded successfully AND source matches
-            // (mediaId may have changed via replace mode)
-            if (existingImage && existingImage.complete && existingImage.naturalWidth > 0 && existingSrc === expectedSrc) {
-              newLoadedImages.set(element.id, existingImage);
-            } else {
-              // Need to load this image
-              hasChanges = true;
-              const img = new window.Image();
-              img.crossOrigin = 'anonymous';
-              img.src = convertFileSrc(imagePath);
-              const loaded = await new Promise<boolean>((resolve) => {
-                img.onload = () => resolve(true);
-                img.onerror = () => {
-                  console.warn(`Failed to load image for element ${element.id}: ${imagePath}`);
-                  resolve(false);
-                };
-              });
-              // Only add to map if image loaded successfully
-              if (loaded && img.complete && img.naturalWidth > 0) {
-                newLoadedImages.set(element.id, img);
-              }
-            }
-          }
+      // Full image in cache — use it instantly
+      const cachedFull = getCachedImage(fullUrl);
+      if (cachedFull) {
+        newLoadedImages.set(element.id, cachedFull);
+        continue;
+      }
+
+      // Thumbnail as placeholder while full image loads
+      if (thumbUrl) {
+        const cachedThumb = getCachedImage(thumbUrl);
+        if (cachedThumb) {
+          newLoadedImages.set(element.id, cachedThumb);
         }
       }
+    }
 
-      // Check if any images were removed
-      for (const id of currentImages.keys()) {
-        if (!neededElementIds.has(id)) {
-          hasChanges = true;
-        }
+    // Update display map immediately with whatever is ready
+    const prev = loadedImagesRef.current;
+    const changed =
+      newLoadedImages.size !== prev.size ||
+      [...newLoadedImages].some(([k, v]) => prev.get(k) !== v);
+    if (changed) {
+      loadedImagesRef.current = newLoadedImages;
+      setLoadedImages(newLoadedImages);
+    }
+
+    // Pass 2: kick off async loads for anything not yet at full res.
+    // Runs in parallel; each completion swaps its element's image in.
+    for (const element of elements) {
+      if (element.type !== 'photo' || !element.mediaId) continue;
+      const target = elementTargets.get(element.id);
+      if (!target) continue;
+
+      const currentlyShown = loadedImagesRef.current.get(element.id);
+      if (currentlyShown && currentlyShown.src === target.fullUrl) continue;
+
+      // Start full-image load in parallel (preloadImage dedupes in-flight requests)
+      preloadImage(target.fullUrl).then((img) => {
+        if (!img) return;
+        // Stale guard: only apply if the element still needs this URL
+        const stillNeeded = elementSrcRef.current.get(element.id) === target.fullUrl;
+        if (!stillNeeded) return;
+        // Another run may have already applied it
+        const existing = loadedImagesRef.current.get(element.id);
+        if (existing === img) return;
+        const next = new Map(loadedImagesRef.current);
+        next.set(element.id, img);
+        loadedImagesRef.current = next;
+        setLoadedImages(next);
+      });
+
+      elementSrcRef.current.set(element.id, target.fullUrl);
+
+      // If we don't have a thumbnail fallback loaded yet, preload that too
+      if (!newLoadedImages.has(element.id) && target.thumbUrl) {
+        preloadImage(target.thumbUrl).then((img) => {
+          if (!img) return;
+          // Only apply if the full hasn't arrived in the meantime
+          const existing = loadedImagesRef.current.get(element.id);
+          if (existing && existing.src === target.fullUrl) return;
+          const next = new Map(loadedImagesRef.current);
+          next.set(element.id, img);
+          loadedImagesRef.current = next;
+          setLoadedImages(next);
+        });
       }
+    }
 
-      // Only update state if there are actual changes
-      if (hasChanges || newLoadedImages.size !== currentImages.size) {
-        loadedImagesRef.current = newLoadedImages;
-        setLoadedImages(newLoadedImages);
-      }
-    };
-
-    loadImages();
+    // Clean up elementSrcRef for removed elements
+    const neededIds = new Set(elementTargets.keys());
+    for (const id of elementSrcRef.current.keys()) {
+      if (!neededIds.has(id)) elementSrcRef.current.delete(id);
+    }
   }, [imageRelevantKey, project?.mediaPool]);
 
   return loadedImages;
 }
-

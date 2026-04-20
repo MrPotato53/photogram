@@ -8,8 +8,13 @@ import { useHistoryStore } from './historyStore';
 
 interface ElementState {
   selectedElementId: string | null;
+  // Monotonic counter. Incremented whenever a caller requests the canvas
+  // to scroll/center on the currently-selected element (e.g. double-click
+  // in the layers panel). CanvasArea watches this and runs its focus logic.
+  focusRequestId: number;
 
   selectElement: (id: string | null) => void;
+  focusElement: (id: string) => void;
   addElement: (element: Element) => Promise<void>;
   updateElement: (elementId: string, updates: Partial<Element>) => Promise<void>;
   // Local-only element update: mutates the in-memory project via
@@ -20,6 +25,10 @@ interface ElementState {
   updateElementLocal: (elementId: string, updates: Partial<Element>) => void;
   removeElement: (elementId: string) => Promise<void>;
   reorderElements: (orderedIds: string[]) => Promise<void>;
+  // Local-only reorder for live preview during layer drag. Same zIndex
+  // math as reorderElements but skips the backend round-trip and history
+  // push — commit the final order via reorderElements on drag end.
+  reorderElementsLocal: (orderedIds: string[]) => void;
   sendToFront: (elementId: string) => Promise<void>;
   sendToBack: (elementId: string) => Promise<void>;
   copySelectedElement: () => void;
@@ -28,9 +37,17 @@ interface ElementState {
 
 export const useElementStore = create<ElementState>((set, get) => ({
   selectedElementId: null,
+  focusRequestId: 0,
 
   selectElement: (id: string | null) => {
     set({ selectedElementId: id });
+  },
+
+  focusElement: (id: string) => {
+    set((state) => ({
+      selectedElementId: id,
+      focusRequestId: state.focusRequestId + 1,
+    }));
   },
 
   addElement: async (element: Element) => {
@@ -203,6 +220,36 @@ export const useElementStore = create<ElementState>((set, get) => ({
     } catch (error) {
       console.error('Failed to reorder elements:', error);
     }
+  },
+
+  reorderElementsLocal: (orderedIds: string[]) => {
+    const project = useProjectStore.getState().project;
+    if (!project) return;
+
+    // Build id → new zIndex map.
+    const newZIndex = new Map<string, number>();
+    for (let i = 0; i < orderedIds.length; i++) {
+      newZIndex.set(orderedIds[i], orderedIds.length - 1 - i);
+    }
+
+    // Preserve object references for elements whose zIndex didn't change —
+    // React.memo on CanvasElementRenderer relies on prop identity, so
+    // rebuilding every element (as we used to) would re-render the entire
+    // canvas on each live-reorder tick.
+    let changed = false;
+    const updatedElements = project.elements.map((el) => {
+      const z = newZIndex.get(el.id);
+      if (z === undefined || z === el.zIndex) return el;
+      changed = true;
+      return { ...el, zIndex: z };
+    });
+
+    if (!changed) return;
+
+    useProjectStore.getState().setProjectSilent({
+      ...project,
+      elements: updatedElements,
+    });
   },
 
   sendToFront: async (elementId: string) => {

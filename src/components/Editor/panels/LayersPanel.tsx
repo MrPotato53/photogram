@@ -8,15 +8,18 @@ import type { Element } from '../../../types';
 export function LayersPanel() {
   const project = useProjectStore((s) => s.project);
   const selectedElementId = useElementStore((s) => s.selectedElementId);
-  const selectElement = useElementStore((s) => s.selectElement);
+  const focusElement = useElementStore((s) => s.focusElement);
   const reorderElements = useElementStore((s) => s.reorderElements);
+  const reorderElementsLocal = useElementStore((s) => s.reorderElementsLocal);
 
   // Global elements across all slides
   const elements = project?.elements || [];
 
-  // Sort by zIndex descending (top layers first) - memoized
+  // Sort ascending by zIndex so the bottom of the list is the frontmost
+  // layer. Drag/commit handlers reverse the visual order before calling
+  // reorderElements[Local], whose contract is "first id gets highest zIndex".
   const sortedElements = useMemo(
-    () => [...elements].sort((a, b) => b.zIndex - a.zIndex),
+    () => [...elements].sort((a, b) => a.zIndex - b.zIndex),
     [elements]
   );
 
@@ -45,6 +48,39 @@ export function LayersPanel() {
       e.stopPropagation();
       setDraggedId(elementId);
       dragStartY.current = e.clientY;
+
+      // Focus the element in the canvas on drag start.
+      focusElement(elementId);
+
+      // Snapshot the starting order and track the last order we applied
+      // via reorderElementsLocal so mousemove only fires a reorder when the
+      // drop slot actually changes (not on every mouse pixel).
+      const initialOrder = sortedElements.map((el) => el.id);
+      let lastAppliedOrder = initialOrder;
+
+      const computeNewOrder = (
+        targetId: string,
+        position: 'above' | 'below'
+      ): string[] | null => {
+        const order = [...lastAppliedOrder];
+        const draggedIndex = order.indexOf(elementId);
+        if (draggedIndex === -1 || order.indexOf(targetId) === -1) return null;
+        order.splice(draggedIndex, 1);
+        const targetIndex = order.indexOf(targetId);
+        if (targetIndex === -1) return null;
+        if (position === 'below') {
+          order.splice(targetIndex + 1, 0, elementId);
+        } else {
+          order.splice(targetIndex, 0, elementId);
+        }
+        return order;
+      };
+
+      const ordersEqual = (a: string[], b: string[]) => {
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+        return true;
+      };
 
       const handleMouseMove = (moveEvent: MouseEvent) => {
         // Find which element we're hovering over
@@ -92,38 +128,32 @@ export function LayersPanel() {
         setDropPosition(newDropPosition);
         dragOverIdRef.current = newDragOverId;
         dropPositionRef.current = newDropPosition;
+
+        // Live preview: apply the reorder to the in-memory project so the
+        // canvas re-renders with the new z-order. Only apply when the
+        // computed order actually differs from what we last applied — this
+        // debounces work down to "user crossed a layer boundary".
+        if (newDragOverId && newDropPosition) {
+          const candidate = computeNewOrder(newDragOverId, newDropPosition);
+          if (candidate && !ordersEqual(candidate, lastAppliedOrder)) {
+            lastAppliedOrder = candidate;
+            // Visual order is now ascending (top of list = lowest zIndex),
+            // but reorderElementsLocal expects first id = highest zIndex.
+            reorderElementsLocal([...candidate].reverse());
+          }
+        }
       };
 
       const handleMouseUp = () => {
         window.removeEventListener('mousemove', handleMouseMove);
         window.removeEventListener('mouseup', handleMouseUp);
 
-        // Get current values from refs (not stale closure state)
-        const currentDragOverId = dragOverIdRef.current;
-        const currentDropPosition = dropPositionRef.current;
-
-        // Perform the reorder if we have a valid drop target
-        if (currentDragOverId && currentDropPosition) {
-          const currentOrder = sortedElements.map((el) => el.id);
-          const draggedIndex = currentOrder.indexOf(elementId);
-          let targetIndex = currentOrder.indexOf(currentDragOverId);
-
-          if (draggedIndex !== -1 && targetIndex !== -1 && draggedIndex !== targetIndex) {
-            // Remove dragged item
-            currentOrder.splice(draggedIndex, 1);
-
-            // Recalculate target index after removal
-            targetIndex = currentOrder.indexOf(currentDragOverId);
-
-            // Insert at new position
-            if (currentDropPosition === 'below') {
-              currentOrder.splice(targetIndex + 1, 0, elementId);
-            } else {
-              currentOrder.splice(targetIndex, 0, elementId);
-            }
-
-            reorderElements(currentOrder);
-          }
+        // Commit the final order via the persisting path (writes to backend,
+        // pushes a single history entry) — only if anything actually changed.
+        // Same reversal as the local path: reorderElements' contract is
+        // "first id = highest zIndex" but our visual order is ascending.
+        if (!ordersEqual(lastAppliedOrder, initialOrder)) {
+          reorderElements([...lastAppliedOrder].reverse());
         }
 
         setDraggedId(null);
@@ -136,7 +166,7 @@ export function LayersPanel() {
       window.addEventListener('mousemove', handleMouseMove);
       window.addEventListener('mouseup', handleMouseUp);
     },
-    [sortedElements, reorderElements]
+    [sortedElements, reorderElements, reorderElementsLocal, focusElement]
   );
 
   const getLayerName = (element: Element, index: number) => {
@@ -146,9 +176,9 @@ export function LayersPanel() {
         const name = media.fileName.replace(/\.[^/.]+$/, '');
         return name.length > 20 ? name.substring(0, 17) + '...' : name;
       }
-      return `Photo ${elements.length - index}`;
+      return `Photo ${index + 1}`;
     }
-    return `Placeholder ${elements.length - index}`;
+    return `Placeholder ${index + 1}`;
   };
 
   return (
@@ -181,7 +211,7 @@ export function LayersPanel() {
               <div
                 key={element.id}
                 data-layer-id={element.id}
-                onClick={() => selectElement(element.id)}
+                onClick={() => focusElement(element.id)}
                 className={clsx(
                   'relative flex items-center gap-2 px-2 py-1.5 rounded transition-colors',
                   isDragging && 'opacity-50',

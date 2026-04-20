@@ -11,11 +11,13 @@ interface PanelState {
 interface PanelStoreState {
   panels: Record<PanelId, PanelState>;
   mediaPoolDocked: boolean;
+  layersDocked: boolean;
 
   togglePanel: (panelId: PanelId) => void;
   setPanelSize: (panelId: PanelId, size: { width?: number; height?: number }) => void;
   closePanel: (panelId: PanelId) => void;
   setMediaPoolDocked: (docked: boolean) => void;
+  setLayersDocked: (docked: boolean) => void;
 }
 
 const defaultPanelState: Record<PanelId, PanelState> = {
@@ -29,6 +31,7 @@ const defaultPanelState: Record<PanelId, PanelState> = {
 export const usePanelStore = create<PanelStoreState>((set) => ({
   panels: { ...defaultPanelState },
   mediaPoolDocked: true,
+  layersDocked: true,
 
   togglePanel: (panelId: PanelId) => {
     set((state) => ({
@@ -69,6 +72,10 @@ export const usePanelStore = create<PanelStoreState>((set) => ({
 
   setMediaPoolDocked: (docked: boolean) => {
     set({ mediaPoolDocked: docked });
+  },
+
+  setLayersDocked: (docked: boolean) => {
+    set({ layersDocked: docked });
   },
 }));
 

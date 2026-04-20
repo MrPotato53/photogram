@@ -10,6 +10,7 @@ import { MediaPreviewModal } from '../MediaPreviewModal';
 import { showInFolder, checkMediaExists, relinkMedia } from '../../../services/tauri';
 import type { MediaItem } from '../../../types';
 import { updateDragPreviewPosition } from '../DragPreview';
+import { preloadImage } from '../../../utils/imageCache';
 
 // Zoom settings
 const MIN_ZOOM = 0.5;
@@ -347,6 +348,14 @@ export function MediaPoolPanel() {
             selectMedia(mediaId);
           }
           setDraggingMedia(mediaId);
+          // Kick off async preload of full-size image so it's ready on drop
+          const media = mediaPool.find((m) => m.id === mediaId);
+          if (media) {
+            preloadImage(convertFileSrc(media.filePath));
+            if (media.thumbnailPath) {
+              preloadImage(convertFileSrc(media.thumbnailPath));
+            }
+          }
         }
 
         // Update drag preview position directly on the DOM (bypasses React re-renders)
@@ -375,7 +384,7 @@ export function MediaPoolPanel() {
       window.addEventListener('mousemove', handleMouseMove);
       window.addEventListener('mouseup', handleMouseUp);
     },
-    [selectedMediaIds, selectMedia, setDraggingMedia, setDragPosition]
+    [selectedMediaIds, selectMedia, setDraggingMedia, setDragPosition, mediaPool]
   );
 
   const handleDoubleClick = useCallback(async (media: MediaItem) => {
