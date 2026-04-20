@@ -19,6 +19,13 @@ interface UseCanvasKeyboardOptions {
   onPaste?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
+  onDuplicate?: () => void;
+  onBringForward?: (id: string) => void;
+  onSendBackward?: (id: string) => void;
+  onBringToFront?: (id: string) => void;
+  onSendToBack?: (id: string) => void;
+  onPrevSlide?: () => void;
+  onNextSlide?: () => void;
 }
 
 /**
@@ -41,6 +48,13 @@ export function useCanvasKeyboard({
   onPaste,
   onUndo,
   onRedo,
+  onDuplicate,
+  onBringForward,
+  onSendBackward,
+  onBringToFront,
+  onSendToBack,
+  onPrevSlide,
+  onNextSlide,
 }: UseCanvasKeyboardOptions) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -93,6 +107,60 @@ export function useCanvasKeyboard({
         if (onRedo) {
           onRedo();
         }
+        return;
+      }
+
+      // Duplicate with Cmd/Ctrl + D
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        if (onDuplicate) onDuplicate();
+        return;
+      }
+
+      // Layer order: Cmd/Ctrl + [ / ] (one step), + Shift for front/back.
+      // Checking e.key instead of e.code so the shortcut fires on the
+      // resolved bracket character regardless of keyboard layout.
+      if ((e.metaKey || e.ctrlKey) && (e.key === ']' || e.key === '[')) {
+        e.preventDefault();
+        if (!selectedElementId) return;
+        const forward = e.key === ']';
+        if (e.shiftKey) {
+          if (forward) onBringToFront?.(selectedElementId);
+          else onSendToBack?.(selectedElementId);
+        } else {
+          if (forward) onBringForward?.(selectedElementId);
+          else onSendBackward?.(selectedElementId);
+        }
+        return;
+      }
+
+      // Prev/next slide: PageUp/PageDown, or Cmd/Ctrl + Arrow left/right.
+      // Cmd+Arrow gets precedence over the selection-gated arrow nudge below.
+      if (e.key === 'PageUp' || ((e.metaKey || e.ctrlKey) && e.key === 'ArrowLeft')) {
+        e.preventDefault();
+        onPrevSlide?.();
+        return;
+      }
+      if (e.key === 'PageDown' || ((e.metaKey || e.ctrlKey) && e.key === 'ArrowRight')) {
+        e.preventDefault();
+        onNextSlide?.();
+        return;
+      }
+
+      // Tab / Shift+Tab — cycle selection left-to-right through elements,
+      // using x (then y as tiebreak). Wraps at either end.
+      if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (elements.length === 0) return;
+        e.preventDefault();
+        const ordered = [...elements].sort((a, b) => a.x - b.x || a.y - b.y);
+        const currentIdx = selectedElementId
+          ? ordered.findIndex((el) => el.id === selectedElementId)
+          : -1;
+        const step = e.shiftKey ? -1 : 1;
+        const nextIdx = currentIdx === -1
+          ? (step === 1 ? 0 : ordered.length - 1)
+          : (currentIdx + step + ordered.length) % ordered.length;
+        onSelectElement(ordered[nextIdx].id);
         return;
       }
 
@@ -187,6 +255,13 @@ export function useCanvasKeyboard({
     onPaste,
     onUndo,
     onRedo,
+    onDuplicate,
+    onBringForward,
+    onSendBackward,
+    onBringToFront,
+    onSendToBack,
+    onPrevSlide,
+    onNextSlide,
   ]);
 }
 

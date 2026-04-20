@@ -53,8 +53,19 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
       onElementClick(element.id, e as unknown as Konva.KonvaEventObject<MouseEvent>),
     [element.id, onElementClick]
   );
+  const strokeRef = useRef<Konva.Rect>(null);
   const handleDragMove = useCallback(
-    (e: Konva.KonvaEventObject<DragEvent>) => onDragMove(element.id, e),
+    (e: Konva.KonvaEventObject<DragEvent>) => {
+      // Stroke is a sibling node (so selection doesn't invalidate the image
+      // cache). Konva updates e.target.x/y imperatively during drag, but the
+      // stroke's x/y props only refresh on React re-render (after drag end),
+      // so we sync it here or the border appears to lag behind.
+      if (strokeRef.current) {
+        strokeRef.current.x(e.target.x());
+        strokeRef.current.y(e.target.y());
+      }
+      onDragMove(element.id, e);
+    },
     [element.id, onDragMove]
   );
   const handleDragEnd = useCallback(
@@ -308,6 +319,7 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
           invalidate the KonvaImage cache (a full re-rasterize of the source). */}
       {isSelected && (
         <Rect
+          ref={strokeRef}
           x={element.x}
           y={element.y}
           width={element.width}

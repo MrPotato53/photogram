@@ -245,8 +245,10 @@ export function SlidesPanel() {
   const templates = useTemplatesStore((s) => s.templates);
   const saveSlideAsTemplate = useTemplatesStore((s) => s.saveSlideAsTemplate);
 
-  // Template picker modal state
-  const [isTemplatePickerOpen, setIsTemplatePickerOpen] = useState(false);
+  // Template picker modal state lives in panelStore so it can be opened
+  // from a keyboard shortcut wired in EditorLayout.
+  const isTemplatePickerOpen = usePanelStore((s) => s.templatePickerOpen);
+  const setIsTemplatePickerOpen = usePanelStore((s) => s.setTemplatePickerOpen);
 
   const handleSelectTemplate = useCallback((template: Template) => {
     addSlideWithTemplate(template);

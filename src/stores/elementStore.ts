@@ -31,8 +31,13 @@ interface ElementState {
   reorderElementsLocal: (orderedIds: string[]) => void;
   sendToFront: (elementId: string) => Promise<void>;
   sendToBack: (elementId: string) => Promise<void>;
+  // Move one layer toward front/back (swap zIndex with neighbor).
+  moveLayerForward: (elementId: string) => Promise<void>;
+  moveLayerBackward: (elementId: string) => Promise<void>;
   copySelectedElement: () => void;
   pasteElements: (options?: { centerX?: number; centerY?: number }) => Promise<string[]>;
+  // In-place duplicate (Cmd+D). Does not touch the clipboard.
+  duplicateSelectedElement: () => Promise<string | null>;
 }
 
 export const useElementStore = create<ElementState>((set, get) => ({
@@ -108,7 +113,6 @@ export const useElementStore = create<ElementState>((set, get) => ({
   },
 
   updateElement: async (elementId: string, updates: Partial<Element>) => {
-    console.time('updateElement');
     const project = useProjectStore.getState().project;
     if (!project) return;
 
@@ -122,20 +126,20 @@ export const useElementStore = create<ElementState>((set, get) => ({
     };
 
     const updatedProject = { ...project, elements: updatedElements };
-    try {
-      console.time('updateProject-tauri');
-      const savedProject = await updateProject(updatedProject);
-      console.timeEnd('updateProject-tauri');
-      useProjectStore.getState().setProject(savedProject, {
-        source: 'transform',
-        actionType: 'update',
-        elementId,
-      });
-      console.timeEnd('updateElement');
-    } catch (error) {
-      console.error('Failed to update element:', error);
-      console.timeEnd('updateElement');
-    }
+
+    // Optimistic write: swap in-memory state + push history synchronously so
+    // cmd-z works immediately on drag end instead of waiting for the backend
+    // round-trip. Backend update_project only mutates updated_at (metadata),
+    // so we skip the savedProject echo — no reconciliation needed.
+    useProjectStore.getState().setProject(updatedProject, {
+      source: 'transform',
+      actionType: 'update',
+      elementId,
+    });
+
+    updateProject(updatedProject).catch((error) => {
+      console.error('Failed to persist element update:', error);
+    });
   },
 
   removeElement: async (elementId: string) => {
@@ -286,6 +290,31 @@ export const useElementStore = create<ElementState>((set, get) => ({
     await get().reorderElements(orderedIds);
   },
 
+  moveLayerForward: async (elementId: string) => {
+    const project = useProjectStore.getState().project;
+    if (!project) return;
+
+    // Sort front-to-back (highest zIndex first) so index 0 = frontmost.
+    const sorted = [...project.elements].sort((a, b) => b.zIndex - a.zIndex);
+    const idx = sorted.findIndex((e) => e.id === elementId);
+    if (idx <= 0) return; // already at or past front
+
+    [sorted[idx - 1], sorted[idx]] = [sorted[idx], sorted[idx - 1]];
+    await get().reorderElements(sorted.map((e) => e.id));
+  },
+
+  moveLayerBackward: async (elementId: string) => {
+    const project = useProjectStore.getState().project;
+    if (!project) return;
+
+    const sorted = [...project.elements].sort((a, b) => b.zIndex - a.zIndex);
+    const idx = sorted.findIndex((e) => e.id === elementId);
+    if (idx === -1 || idx === sorted.length - 1) return; // already at back
+
+    [sorted[idx], sorted[idx + 1]] = [sorted[idx + 1], sorted[idx]];
+    await get().reorderElements(sorted.map((e) => e.id));
+  },
+
   copySelectedElement: () => {
     const project = useProjectStore.getState().project;
     const { selectedElementId } = get();
@@ -395,6 +424,61 @@ export const useElementStore = create<ElementState>((set, get) => ({
     } catch (error) {
       console.error('Failed to paste elements:', error);
       return [];
+    }
+  },
+
+  duplicateSelectedElement: async () => {
+    const project = useProjectStore.getState().project;
+    const { selectedElementId } = get();
+    if (!project || !selectedElementId) return null;
+
+    const element = project.elements.find((e) => e.id === selectedElementId);
+    if (!element) return null;
+
+    const PASTE_OFFSET = 20;
+    const maxZIndex = project.elements.length > 0
+      ? Math.max(...project.elements.map((e) => e.zIndex))
+      : -1;
+
+    const newElement: Element = {
+      ...element,
+      id: crypto.randomUUID(),
+      x: element.x + PASTE_OFFSET,
+      y: element.y + PASTE_OFFSET,
+      zIndex: maxZIndex + 1,
+    };
+
+    // Photo elements need their own embedded asset copy so the two elements
+    // don't share a file path (deleting one would dangle the other).
+    if (newElement.type === 'photo' && newElement.mediaId) {
+      const media = project.mediaPool.find((m) => m.id === newElement.mediaId);
+      if (media) {
+        try {
+          const assetPath = await embedElementAsset(project.id, newElement.id, media.filePath);
+          newElement.assetPath = assetPath;
+        } catch (error) {
+          console.error('Failed to embed asset for duplicate:', error);
+        }
+      }
+    }
+
+    const updatedProject = {
+      ...project,
+      elements: [...project.elements, newElement],
+    };
+
+    try {
+      const savedProject = await updateProject(updatedProject);
+      useProjectStore.getState().setProject(savedProject, {
+        source: 'element',
+        actionType: 'duplicate',
+        elementId: newElement.id,
+      });
+      set({ selectedElementId: newElement.id });
+      return newElement.id;
+    } catch (error) {
+      console.error('Failed to duplicate element:', error);
+      return null;
     }
   },
 }));

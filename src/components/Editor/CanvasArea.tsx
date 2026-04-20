@@ -11,6 +11,7 @@ import { useCropStore } from '../../stores/cropStore';
 import { useTemplatesStore } from '../../stores/templatesStore';
 import { useClipboardStore } from '../../stores/clipboardStore';
 import { useHistoryStore } from '../../stores/historyStore';
+import { usePanelStore } from '../../stores/panelStore';
 import { saveProjectThumbnail, updateProject } from '../../services/tauri';
 import { calculateSnapLines, findSnap, findTransformSnap } from '../../utils/snapping';
 import { CropOverlay } from './CropOverlay';
@@ -70,6 +71,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   const removeElement = useElementStore((s) => s.removeElement);
   const sendToFront = useElementStore((s) => s.sendToFront);
   const sendToBack = useElementStore((s) => s.sendToBack);
+  const moveLayerForward = useElementStore((s) => s.moveLayerForward);
+  const moveLayerBackward = useElementStore((s) => s.moveLayerBackward);
+  const duplicateSelectedElement = useElementStore((s) => s.duplicateSelectedElement);
   const addElement = useElementStore((s) => s.addElement);
   const copySelectedElement = useElementStore((s) => s.copySelectedElement);
   const pasteElements = useElementStore((s) => s.pasteElements);
@@ -100,8 +104,10 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   const pushState = useHistoryStore((s) => s.pushState);
   const setProjectSilent = useProjectStore((s) => s.setProjectSilent);
 
-  // Template picker modal state
-  const [isTemplatePickerOpen, setIsTemplatePickerOpen] = useState(false);
+  // Template picker modal state lives in panelStore so it can be opened
+  // from a keyboard shortcut wired in EditorLayout.
+  const isTemplatePickerOpen = usePanelStore((s) => s.templatePickerOpen);
+  const setIsTemplatePickerOpen = usePanelStore((s) => s.setTemplatePickerOpen);
 
   const handleSelectTemplate = useCallback((template: Template) => {
     addSlideWithTemplate(template);
@@ -281,25 +287,38 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     }
   }, [onRenderSlideForPreview, renderSlideForPreview]);
 
-  // Middle-mouse panning. Press-and-hold middle button anywhere inside the
-  // scroll container to drag-scroll the canvas; releases or pointer leaves
-  // the window to cancel. Prevents the browser's native middle-click
-  // auto-scroll from activating.
+  // Canvas panning. Two triggers:
+  //   - Middle mouse button (hold + drag)
+  //   - Space held + left-click drag (Figma-style; hand cursor while Space
+  //     is held so the affordance is visible before the user clicks)
+  // Releases or window blur cancels. Space is suppressed while typing in
+  // inputs so it doesn't hijack the space bar.
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
 
     let panning = false;
+    let spaceHeld = false;
     let startClientX = 0;
     let startClientY = 0;
     let startScrollLeft = 0;
     let startScrollTop = 0;
     const prevCursor = container.style.cursor;
 
+    const setHandCursor = () => {
+      container.style.cursor = panning ? 'grabbing' : 'grab';
+    };
+    const resetCursor = () => {
+      container.style.cursor = prevCursor;
+    };
+
     const onMouseDown = (e: MouseEvent) => {
-      if (e.button !== 1) return;
-      // Suppress the browser's native auto-scroll UI.
+      // Middle button always pans. Left button only pans when Space is held.
+      if (e.button !== 1 && !(e.button === 0 && spaceHeld)) return;
       e.preventDefault();
+      // Space+left: stop propagation so Konva doesn't start an element drag
+      // or deselect on click.
+      if (e.button === 0) e.stopPropagation();
       panning = true;
       startClientX = e.clientX;
       startClientY = e.clientY;
@@ -319,11 +338,12 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     const endPan = () => {
       if (!panning) return;
       panning = false;
-      container.style.cursor = prevCursor;
+      if (spaceHeld) setHandCursor();
+      else resetCursor();
     };
 
-    const onMouseUp = (e: MouseEvent) => {
-      if (e.button !== 1) return;
+    const onMouseUp = () => {
+      // End on any button release; we started the drag, so we finish it.
       endPan();
     };
 
@@ -332,18 +352,46 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       if (e.button === 1) e.preventDefault();
     };
 
-    container.addEventListener('mousedown', onMouseDown);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      // Don't swallow Space while typing.
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      // Ignore autorepeat — only care about the first press.
+      if (spaceHeld) {
+        e.preventDefault();
+        return;
+      }
+      spaceHeld = true;
+      e.preventDefault();
+      if (!panning) setHandCursor();
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      spaceHeld = false;
+      if (!panning) resetCursor();
+    };
+
+    // Capture-phase so the Space+drag intercept beats Konva's mousedown
+    // handler on the inner Stage (otherwise the click would start an
+    // element drag or deselect before we see it).
+    container.addEventListener('mousedown', onMouseDown, { capture: true });
     container.addEventListener('auxclick', onAuxClick);
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
     window.addEventListener('blur', endPan);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
 
     return () => {
-      container.removeEventListener('mousedown', onMouseDown);
+      container.removeEventListener('mousedown', onMouseDown, { capture: true } as any);
       container.removeEventListener('auxclick', onAuxClick);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
       window.removeEventListener('blur', endPan);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      container.style.cursor = prevCursor;
     };
   }, []);
 
@@ -601,6 +649,13 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         }
       }
     },
+    onDuplicate: duplicateSelectedElement,
+    onBringForward: moveLayerForward,
+    onSendBackward: moveLayerBackward,
+    onBringToFront: sendToFront,
+    onSendToBack: sendToBack,
+    onPrevSlide: () => setCurrentSlide(Math.max(0, currentSlideIndex - 1)),
+    onNextSlide: () => setCurrentSlide(Math.min(numSlides - 1, currentSlideIndex + 1)),
   });
 
   // Removed: This effect was conflicting with the restore ratio effect below.
