@@ -9,6 +9,7 @@ import { EditBar } from './EditBar';
 import { CanvasArea } from './CanvasArea';
 import { FloatingPanel } from './FloatingPanel';
 import { DockedMediaPanel } from './DockedMediaPanel';
+import { DockedLayersPanel } from './DockedLayersPanel';
 import { MediaPoolPanel } from './panels/MediaPoolPanel';
 import { LayersPanel } from './panels/LayersPanel';
 import { TemplatesPanel } from './panels/TemplatesPanel';
@@ -37,6 +38,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   const templatesOpen = usePanelStore((s) => s.panels.templates.isOpen);
   const slidesOpen = usePanelStore((s) => s.panels.slides.isOpen);
   const mediaPoolDocked = usePanelStore((s) => s.mediaPoolDocked);
+  const layersDocked = usePanelStore((s) => s.layersDocked);
 
   // Export & Preview functionality
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -45,6 +47,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   const renderSlideForExportRef = useRef<((slideIndex: number, pixelRatio: number, format: 'png' | 'jpeg', quality: number) => string | null) | null>(null);
   const renderSlideThumbnailRef = useRef<((slideIndex: number) => string | null) | null>(null);
   const renderSlideForPreviewRef = useRef<((slideIndex: number, targetWidth: number) => string | null) | null>(null);
+  const canvasContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadProject(projectId);
@@ -149,7 +152,7 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
           )}
 
           {/* Canvas area - takes remaining space */}
-          <div className="flex-1 relative overflow-hidden min-h-0">
+          <div ref={canvasContainerRef} className="flex-1 relative overflow-hidden min-h-0">
             <CanvasArea
               aspectRatio={project.aspectRatio}
               onRenderSlideForExport={(fn) => { renderSlideForExportRef.current = fn; }}
@@ -171,13 +174,17 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
               </FloatingPanel>
             )}
 
-            {layersOpen && (
+            {layersOpen && !layersDocked && (
             <FloatingPanel
               title="Layers"
               panelId="layers"
-              defaultPosition={{ x: window.innerWidth - 290, y: 20 }}
+              defaultPosition={{
+                x: Math.max(20, (canvasContainerRef.current?.clientWidth ?? 0) - 270),
+                y: 20,
+              }}
               minWidth={180}
               minHeight={200}
+              onDock={() => usePanelStore.getState().setLayersDocked(true)}
             >
               <LayersPanel />
             </FloatingPanel>
@@ -195,6 +202,13 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
             </FloatingPanel>
           )}
           </div>
+
+          {/* Docked layers panel (right side) */}
+          {layersOpen && layersDocked && (
+            <DockedLayersPanel>
+              <LayersPanel />
+            </DockedLayersPanel>
+          )}
         </div>
 
         {/* Slides panel - fixed at bottom (shows collapsed strip or full panel) */}
@@ -226,16 +240,20 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
         renderSlideForPreview={(slideIndex, targetWidth) => renderSlideForPreviewRef.current?.(slideIndex, targetWidth) ?? null}
       />
 
-      {/* Export modal */}
-      <ExportModal
-        isOpen={isExportModalOpen}
-        onClose={() => setIsExportModalOpen(false)}
-        projectName={project.name}
-        aspectRatio={project.aspectRatio}
-        numSlides={project.slides.length}
-        onExport={handleExport}
-        renderSlideThumbnail={(slideIndex) => renderSlideThumbnailRef.current?.(slideIndex) ?? null}
-      />
+      {/* Export modal — gated on isOpen to avoid calling renderSlideThumbnail
+          (which invokes stage.toDataURL per slide) on every parent re-render.
+          Measured: unmounted-gating cuts ~1.7s from drag-start on large projects. */}
+      {isExportModalOpen && (
+        <ExportModal
+          isOpen={isExportModalOpen}
+          onClose={() => setIsExportModalOpen(false)}
+          projectName={project.name}
+          aspectRatio={project.aspectRatio}
+          numSlides={project.slides.length}
+          onExport={handleExport}
+          renderSlideThumbnail={(slideIndex) => renderSlideThumbnailRef.current?.(slideIndex) ?? null}
+        />
+      )}
     </div>
   );
 }

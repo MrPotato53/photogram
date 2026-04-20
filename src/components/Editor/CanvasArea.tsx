@@ -64,6 +64,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // Element store
   const selectedElementId = useElementStore((s) => s.selectedElementId);
   const selectElement = useElementStore((s) => s.selectElement);
+  const focusRequestId = useElementStore((s) => s.focusRequestId);
   const updateElement = useElementStore((s) => s.updateElement);
   const updateElementLocal = useElementStore((s) => s.updateElementLocal);
   const removeElement = useElementStore((s) => s.removeElement);
@@ -73,8 +74,11 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   const copySelectedElement = useElementStore((s) => s.copySelectedElement);
   const pasteElements = useElementStore((s) => s.pasteElements);
 
-  // Media store - use selector to avoid re-renders from drag position updates
-  const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
+  // NOTE: draggingMediaId is NOT subscribed here — it would trigger a full
+  // CanvasArea re-render on drag start (measured at >1.5s on large projects).
+  // The two places that need it (drop-zone ring + Stage pointerEvents) are
+  // toggled imperatively via refs in the effect below.
+  const backdropRef = useRef<HTMLDivElement>(null);
 
   // Snap store - activeGuides is subscribed directly in CanvasSnapGuides
   // to avoid re-rendering the entire CanvasArea on every guide change during drag
@@ -194,6 +198,30 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     designSize,
     totalDesignWidth,
   });
+
+  // Imperative subscription to mediaStore.draggingMediaId — avoids
+  // re-rendering this component (a full pass is ~1.5s on large projects)
+  // on drag start. Toggles the drop-zone ring and Stage pointerEvents.
+  useEffect(() => {
+    const apply = (draggingId: string | null) => {
+      const show = draggingId !== null;
+      const el = backdropRef.current;
+      if (el) {
+        if (show) {
+          el.classList.add('ring-2', 'ring-blue-400', 'ring-opacity-50');
+        } else if (!isFileDragOver) {
+          el.classList.remove('ring-2', 'ring-blue-400', 'ring-opacity-50');
+        }
+      }
+      const stage = stageRef.current;
+      if (stage) {
+        const container = stage.container();
+        if (container) container.style.pointerEvents = show ? 'none' : '';
+      }
+    };
+    apply(useMediaStore.getState().draggingMediaId);
+    return useMediaStore.subscribe((s) => apply(s.draggingMediaId));
+  }, [isFileDragOver]);
 
   // Fill mode hook (F-key fill, shared between media drop and element drag)
   // Replace mode hook (R-key replace, shared between media drop and element drag)
@@ -1006,11 +1034,18 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       const scaleX = node.scaleX();
       const scaleY = node.scaleY();
 
-      node.scaleX(1);
-      node.scaleY(1);
-
       const newWidth = Math.max(20, node.width() * scaleX);
       const newHeight = Math.max(20, node.height() * scaleY);
+
+      // Imperatively sync the Konva node to the new committed state BEFORE
+      // React dispatches the state update. Otherwise the node has scale=1 but
+      // width/height still at the pre-resize value until React's commit syncs
+      // them — any paint in that window (combined with cleared cache) would
+      // render the image at its original pre-resize size for one frame.
+      node.scaleX(1);
+      node.scaleY(1);
+      node.width(newWidth);
+      node.height(newHeight);
 
       // Clear guides and anchor ref
       setActiveGuides([]);
@@ -1467,6 +1502,36 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     }
   };
 
+  // External focus request (e.g. layers panel double-click / drag start).
+  // Switches to the element's slide and centers it in the viewport.
+  useEffect(() => {
+    if (focusRequestId === 0 || !selectedElementId) return;
+    const element = elementMap.get(selectedElementId);
+    if (!element) return;
+
+    const slideIndex = getSlideIndexFromCenter(element.x, element.width, designSize.width);
+    if (slideIndex >= 0 && slideIndex < numSlides) {
+      setCurrentSlide(slideIndex);
+    }
+
+    // Defer to rAF so the slide-switch effect's scroll (triggered by the
+    // setCurrentSlide above) runs first. Our scroll then supersedes it and
+    // centers the element specifically. paddingTop: 30 on the scroll container
+    // offsets the stage's top edge inside the scroll content.
+    requestAnimationFrame(() => {
+      const container = scrollContainerRef.current;
+      if (!container) return;
+      const elementCenterX = (element.x + element.width / 2) * scale * zoomLevel + 24;
+      const elementCenterY = (element.y + element.height / 2) * scale * zoomLevel + 30;
+      container.scrollTo({
+        left: Math.max(0, elementCenterX - container.clientWidth / 2),
+        top: Math.max(0, elementCenterY - container.clientHeight / 2),
+        behavior: 'smooth',
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequestId]);
+
   const handleAddSlide = () => {
     if (slides.length < MAX_SLIDES) {
       addSlide();
@@ -1606,7 +1671,6 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       }
     : null;
 
-  const showDropZone = draggingMediaId !== null;
   const totalCanvasWidth = numSlides * canvasSize.width;
 
   // Dynamic Stage overflow so Transformer handles are never clipped.
@@ -1663,7 +1727,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
           {/* Canvas background (white slides) */}
           <div
-            className={`absolute bg-white shadow-lg ${showDropZone || isFileDragOver ? 'ring-2 ring-blue-400 ring-opacity-50' : ''}`}
+            ref={backdropRef}
+            className={`absolute bg-white shadow-lg ${isFileDragOver ? 'ring-2 ring-blue-400 ring-opacity-50' : ''}`}
             style={{
               left: 24,
               top: 0,
@@ -1678,7 +1743,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
               ref={stageRef}
               width={totalCanvasWidth * zoomLevel + 2 * stageOverflow}
               height={canvasSize.height * zoomLevel + stageOverflow}
-              style={{ position: 'absolute', left: 24 - stageOverflow, top: -stageOverflow, pointerEvents: showDropZone ? 'none' : undefined }}
+              style={{ position: 'absolute', left: 24 - stageOverflow, top: -stageOverflow }}
               onClick={handleStageClick}
               onContextMenu={handleStageContextMenu}
             >
