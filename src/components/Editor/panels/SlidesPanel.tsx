@@ -1,13 +1,12 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import { Stage, Layer, Image as KonvaImage, Rect } from 'react-konva';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import type { Element, Template } from '../../../types';
+import type { Element } from '../../../types';
 import { useProjectStore } from '../../../stores/projectStore';
 import { useSlideStore } from '../../../stores/slideStore';
 import { usePanelStore } from '../../../stores/panelStore';
 import { useTemplatesStore } from '../../../stores/templatesStore';
 import { ContextMenu, ContextMenuItem } from '../../common/ContextMenu';
-import { TemplatePickerModal } from '../TemplatePickerModal';
 
 import { DESIGN_HEIGHT, getDesignSize } from '../../../utils/designConstants';
 const THUMBNAIL_HEIGHT = 80;
@@ -239,7 +238,6 @@ export function SlidesPanel() {
   const currentSlideIndex = useSlideStore((s) => s.currentSlideIndex);
   const setCurrentSlide = useSlideStore((s) => s.setCurrentSlide);
   const addSlide = useSlideStore((s) => s.addSlide);
-  const addSlideWithTemplate = useSlideStore((s) => s.addSlideWithTemplate);
   const removeSlide = useSlideStore((s) => s.removeSlide);
   const reorderSlides = useSlideStore((s) => s.reorderSlides);
   const duplicateSlide = useSlideStore((s) => s.duplicateSlide);
@@ -249,15 +247,10 @@ export function SlidesPanel() {
   const templates = useTemplatesStore((s) => s.templates);
   const saveSlideAsTemplate = useTemplatesStore((s) => s.saveSlideAsTemplate);
 
-  // Template picker modal state lives in panelStore so it can be opened
-  // from a keyboard shortcut wired in EditorLayout.
-  const isTemplatePickerOpen = usePanelStore((s) => s.templatePickerOpen);
+  // Template picker modal itself is rendered in EditorLayout so the
+  // Cmd+Shift+T shortcut works even when the slides panel is collapsed.
+  // This panel still uses the same store flag to open it via its own button.
   const setIsTemplatePickerOpen = usePanelStore((s) => s.setTemplatePickerOpen);
-
-  const handleSelectTemplate = useCallback((template: Template) => {
-    addSlideWithTemplate(template);
-    setIsTemplatePickerOpen(false);
-  }, [addSlideWithTemplate]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const slidesContainerRef = useRef<HTMLDivElement>(null);
@@ -693,16 +686,6 @@ export function SlidesPanel() {
           </ContextMenuItem>
         )}
       </ContextMenu>
-
-      {/* Template picker modal */}
-      {project && (
-        <TemplatePickerModal
-          isOpen={isTemplatePickerOpen}
-          onClose={() => setIsTemplatePickerOpen(false)}
-          onSelect={handleSelectTemplate}
-          aspectRatio={project.aspectRatio}
-        />
-      )}
     </div>
   );
 }

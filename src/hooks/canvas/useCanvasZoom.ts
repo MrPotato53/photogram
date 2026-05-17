@@ -67,8 +67,41 @@ export function useCanvasZoom({
     return () => container.removeEventListener('wheel', handleWheel);
   }, [zoomLevel, numSlides, canvasSize.width, canvasSize.height, scrollContainerRef, stageContainerRef]);
 
-  const zoomIn = () => setZoomLevel((z) => Math.min(MAX_ZOOM, z + ZOOM_STEP));
-  const zoomOut = () => setZoomLevel((z) => Math.max(MIN_ZOOM, z - ZOOM_STEP));
+  // Button/keyboard zoom anchored on the current viewport center. Without
+  // this anchor the scroll offset is preserved in pixels, which means the
+  // top-left of the visible region drifts toward the canvas origin — the
+  // user perceives this as "the viewport keeps snapping to slide 1".
+  const zoomBy = (delta: number) => {
+    setZoomLevel((z) => {
+      const next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z + delta));
+      if (next === z) return z;
+      const scroll = scrollContainerRef.current;
+      const stage = stageContainerRef.current;
+      if (!scroll || !stage) return next;
+      // Pin the canvas point currently at the viewport center.
+      const stageRect = stage.getBoundingClientRect();
+      const scrollRect = scroll.getBoundingClientRect();
+      const viewportCenterX = scrollRect.left + scroll.clientWidth / 2;
+      const viewportCenterY = scrollRect.top + scroll.clientHeight / 2;
+      const canvasX = (viewportCenterX - stageRect.left - 24) / z;
+      const canvasY = (viewportCenterY - stageRect.top) / z;
+      // Apply scroll correction after React re-renders at the new zoom.
+      requestAnimationFrame(() => {
+        const s = scrollContainerRef.current;
+        const st = stageContainerRef.current;
+        if (!s || !st) return;
+        const newStageRect = st.getBoundingClientRect();
+        const desiredStageLeft = viewportCenterX - 24 - canvasX * next;
+        const desiredStageTop = viewportCenterY - canvasY * next;
+        s.scrollLeft += newStageRect.left - desiredStageLeft;
+        s.scrollTop += newStageRect.top - desiredStageTop;
+      });
+      return next;
+    });
+  };
+
+  const zoomIn = () => zoomBy(ZOOM_STEP);
+  const zoomOut = () => zoomBy(-ZOOM_STEP);
   const resetZoom = () => setZoomLevel(1);
 
   return {
