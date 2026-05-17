@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { Stage, Layer, Group, Transformer, Rect } from 'react-konva';
 import type Konva from 'konva';
-import type { AspectRatio, Element, Template } from '../../types';
+import type { AspectRatio, Element } from '../../types';
 import { useProjectStore } from '../../stores/projectStore';
 import { useSlideStore } from '../../stores/slideStore';
 import { useElementStore } from '../../stores/elementStore';
@@ -16,7 +16,6 @@ import { saveProjectThumbnail, updateProject } from '../../services/tauri';
 import { calculateSnapLines, findSnap, findTransformSnap } from '../../utils/snapping';
 import { CropOverlay } from './CropOverlay';
 import { ContextMenu, ContextMenuItem } from '../common/ContextMenu';
-import { TemplatePickerModal } from './TemplatePickerModal';
 import { CanvasSlideIndicators } from './CanvasSlideIndicators';
 import { CanvasZoomControls } from './CanvasZoomControls';
 import { CanvasCropToolbar } from './CanvasCropToolbar';
@@ -39,6 +38,18 @@ interface CanvasAreaProps {
 
 const MAX_SLIDES = 20;
 
+// Pixel buffer around the canvas where the Konva Stage continues to render
+// and accept input. Lets Transformer handles (rotation knob, corner anchors)
+// and partly-off-canvas image content remain visible past the canvas edge.
+// The scroll container is extended vertically beyond the viewport (negative
+// top/bottom inset, matched by paddingTop/paddingBottom = STAGE_OVERFLOW)
+// and clipped by the outer container's overflow-hidden, so this Stage
+// extension lives entirely inside scroll padding — it never inflates
+// scrollHeight at default zoom, even though the canvas now fills the viewport.
+// Kept at 60 (covers Konva's 50px rotation knob + handle radius) because
+// every extra pixel of Stage grows the GPU composite cost on every redraw.
+const STAGE_OVERFLOW = 60;
+
 export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideThumbnail, onRenderSlideForPreview }: CanvasAreaProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -59,7 +70,6 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   const currentSlideIndex = useSlideStore((s) => s.currentSlideIndex);
   const setCurrentSlide = useSlideStore((s) => s.setCurrentSlide);
   const addSlide = useSlideStore((s) => s.addSlide);
-  const addSlideWithTemplate = useSlideStore((s) => s.addSlideWithTemplate);
   const removeSlide = useSlideStore((s) => s.removeSlide);
 
   // Element store
@@ -104,15 +114,10 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   const pushState = useHistoryStore((s) => s.pushState);
   const setProjectSilent = useProjectStore((s) => s.setProjectSilent);
 
-  // Template picker modal state lives in panelStore so it can be opened
-  // from a keyboard shortcut wired in EditorLayout.
-  const isTemplatePickerOpen = usePanelStore((s) => s.templatePickerOpen);
+  // Template picker open state lives in panelStore; the modal itself is
+  // rendered by SlidesPanel. Only the setter is needed here for the
+  // "Add slide from template" button below.
   const setIsTemplatePickerOpen = usePanelStore((s) => s.setTemplatePickerOpen);
-
-  const handleSelectTemplate = useCallback((template: Template) => {
-    addSlideWithTemplate(template);
-    setIsTemplatePickerOpen(false);
-  }, [addSlideWithTemplate]);
 
   const slides = project?.slides || [];
   const elements = project?.elements || [];
@@ -151,6 +156,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // Zoom hook (must be before other hooks that use zoomLevel)
   const { zoomLevel, zoomIn, zoomOut, resetZoom } = useCanvasZoom({
     scrollContainerRef,
+    stageContainerRef,
     numSlides,
     canvasSize,
   });
@@ -420,11 +426,10 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
       const targetRatio = aspectRatio.width / aspectRatio.height;
 
-      // Use most of the available height (leaving minimal padding)
-      const padding = 60;
-      const availableHeight = containerHeight - padding;
-
-      const height = Math.max(200, availableHeight);
+      // Canvas fills the viewport vertically at default zoom. The Stage's
+      // handle-rendering buffer is absorbed by scrollContainer's padding
+      // (which lives outside the viewport via negative inset — see render).
+      const height = Math.max(200, containerHeight);
       const width = height * targetRatio;
 
       // Only update if values actually changed — avoids expensive re-render
@@ -1571,13 +1576,19 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
     // Defer to rAF so the slide-switch effect's scroll (triggered by the
     // setCurrentSlide above) runs first. Our scroll then supersedes it and
-    // centers the element specifically. paddingTop: 30 on the scroll container
-    // offsets the stage's top edge inside the scroll content.
+    // centers the element specifically. Use the live stage rect to compute
+    // the element's position in scroll-content coords (handles paddingTop
+    // and flex centering offsets without hardcoded constants).
     requestAnimationFrame(() => {
       const container = scrollContainerRef.current;
-      if (!container) return;
-      const elementCenterX = (element.x + element.width / 2) * scale * zoomLevel + 24;
-      const elementCenterY = (element.y + element.height / 2) * scale * zoomLevel + 30;
+      const stage = stageContainerRef.current;
+      if (!container || !stage) return;
+      const stageRect = stage.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      const stageLeftInScrollContent = (stageRect.left - containerRect.left) + container.scrollLeft;
+      const stageTopInScrollContent = (stageRect.top - containerRect.top) + container.scrollTop;
+      const elementCenterX = stageLeftInScrollContent + element.x * scale * zoomLevel + (element.width / 2) * scale * zoomLevel + 24;
+      const elementCenterY = stageTopInScrollContent + (element.y + element.height / 2) * scale * zoomLevel;
       container.scrollTo({
         left: Math.max(0, elementCenterX - container.clientWidth / 2),
         top: Math.max(0, elementCenterY - container.clientHeight / 2),
@@ -1728,36 +1739,39 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   const totalCanvasWidth = numSlides * canvasSize.width;
 
-  // Dynamic Stage overflow so Transformer handles are never clipped.
-  // Sized to the largest element (handles can be at most elementSize away from canvas edge).
-  const maxElementDim = useMemo(() => {
-    let max = 0;
-    for (const el of elements) {
-      if (el.width > max) max = el.width;
-      if (el.height > max) max = el.height;
-    }
-    return max;
-  }, [elements]);
-  const stageOverflow = Math.min(Math.ceil(maxElementDim * scale * zoomLevel) + 20, 800);
+  const stageOverflow = STAGE_OVERFLOW;
   stageOverflowRef.current = stageOverflow;
 
   // Check if content should be centered (when it doesn't overflow)
   const containerWidth = containerRef.current?.clientWidth || 0;
   const containerHeight = containerRef.current?.clientHeight || 0;
   const contentFitsWidth = totalCanvasWidth * zoomLevel + 48 < containerWidth;
-  const contentFitsHeight = canvasSize.height * zoomLevel + 40 < containerHeight; // 40 = paddingTop + paddingBottom
+  const contentFitsHeight = canvasSize.height * zoomLevel <= containerHeight;
 
   return (
     <div
       ref={containerRef}
-      className="absolute inset-0 flex flex-col overflow-hidden"
+      className="absolute inset-0 overflow-hidden"
       onContextMenu={handleContextMenu}
     >
-      {/* Scrolling canvas container - overflow-auto for zoom support */}
+      {/* Scroll container extends STAGE_OVERFLOW px above/below the viewport
+          (negative top/bottom inset), matched by paddingTop/paddingBottom.
+          The outer container's overflow-hidden clips the overhang, so the
+          Stage's handle buffer renders inside scroll padding without ever
+          inflating scrollHeight at default zoom. Scrollbar hidden because
+          its track would otherwise be clipped at top/bottom; horizontal
+          scrolling is preserved via mouse wheel / pan. */}
       <div
         ref={scrollContainerRef}
-        className={`flex-1 overflow-auto flex ${contentFitsHeight ? 'items-center' : 'items-start'} ${contentFitsWidth ? 'justify-center' : ''}`}
-        style={{ paddingTop: 30, paddingBottom: 10 }}
+        className={`absolute overflow-auto flex ${contentFitsHeight ? 'items-center' : 'items-start'} ${contentFitsWidth ? 'justify-center' : ''} [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`}
+        style={{
+          top: -stageOverflow,
+          bottom: -stageOverflow,
+          left: 0,
+          right: 0,
+          paddingTop: stageOverflow,
+          paddingBottom: stageOverflow,
+        }}
       >
         <div
           ref={stageContainerRef}
@@ -1797,7 +1811,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
             <Stage
               ref={stageRef}
               width={totalCanvasWidth * zoomLevel + 2 * stageOverflow}
-              height={canvasSize.height * zoomLevel + stageOverflow}
+              height={canvasSize.height * zoomLevel + 2 * stageOverflow}
               style={{ position: 'absolute', left: 24 - stageOverflow, top: -stageOverflow }}
               onClick={handleStageClick}
               onContextMenu={handleStageContextMenu}
@@ -2115,14 +2129,6 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
           </>
         )}
       </ContextMenu>
-
-      {/* Template picker modal */}
-      <TemplatePickerModal
-        isOpen={isTemplatePickerOpen}
-        onClose={() => setIsTemplatePickerOpen(false)}
-        onSelect={handleSelectTemplate}
-        aspectRatio={aspectRatio}
-      />
     </div>
   );
 }

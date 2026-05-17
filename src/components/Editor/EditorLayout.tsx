@@ -16,6 +16,7 @@ import { TemplatesPanel } from './panels/TemplatesPanel';
 import { SlidesPanel } from './panels/SlidesPanel';
 import { DragPreview } from './DragPreview';
 import { ExportModal } from './ExportModal';
+import { ExportProgressToast } from './ExportProgressToast';
 import { PreviewModal } from './PreviewModal';
 import { exportSlides, showInFolder, type ExportOptions } from '../../services/tauri';
 import { useEditorShortcuts } from '../../hooks/useEditorShortcuts';
@@ -50,6 +51,15 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   const renderSlideForPreviewRef = useRef<((slideIndex: number, targetWidth: number) => string | null) | null>(null);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
 
+  // Persistent export progress (visible after modal closes, Lightroom-style).
+  // phase 'rendering' = JS toDataURL per slide; 'saving' = backend write.
+  const [exportProgress, setExportProgress] = useState<{
+    current: number;
+    total: number;
+    phase: 'rendering' | 'saving' | 'done' | 'error';
+    errorMessage?: string;
+  } | null>(null);
+
   useEffect(() => {
     loadProject(projectId);
   }, [projectId, loadProject]);
@@ -83,44 +93,76 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
     onExport: useCallback(() => setIsExportModalOpen(true), []),
   });
 
-  // Export handler
+  // Export handler — runs after modal closes. Yields to the event loop between
+  // each slide render so the UI stays responsive (toDataURL at high pixelRatio
+  // can take 100-300ms per slide). Progress is reported via exportProgress
+  // state so the toast can show n/total.
   const handleExport = useCallback(async (slideIndices: number[], options: ExportOptions) => {
     if (!renderSlideForExportRef.current) {
       console.error('Render function not available');
       return;
     }
 
+    const total = slideIndices.length;
+    setExportProgress({ current: 0, total, phase: 'rendering' });
+
+    // Yield = wait for the next paint, THEN return on the macrotask queue.
+    // The rAF lets the browser actually commit/paint pending DOM changes
+    // (modal close, progress update). The setTimeout 0 after rAF ensures
+    // we resume on a macrotask so we don't block the very paint we waited
+    // for. Without the rAF, setTimeout 0 alone can run before any paint
+    // and the UI appears frozen.
+    const yieldToBrowser = () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => setTimeout(resolve, 0));
+      });
+
     try {
-      // Render each slide
       const slideImageData: string[] = [];
-      for (const slideIndex of slideIndices) {
+      for (let i = 0; i < slideIndices.length; i++) {
+        // Yield BEFORE every render — including the first, so the modal-close
+        // commit paints before we start the (synchronous, blocking)
+        // toDataURL call. Without this, the modal appears frozen until
+        // slide 1 finishes rendering.
+        await yieldToBrowser();
         const imageData = renderSlideForExportRef.current(
-          slideIndex,
+          slideIndices[i],
           options.pixelRatio,
           options.format,
           options.quality
         );
-        if (imageData) {
-          slideImageData.push(imageData);
-        } else {
-          throw new Error(`Failed to render slide ${slideIndex + 1}`);
+        if (!imageData) {
+          throw new Error(`Failed to render slide ${slideIndices[i] + 1}`);
         }
+        slideImageData.push(imageData);
+        setExportProgress({ current: i + 1, total, phase: 'rendering' });
       }
 
-      // Call backend to save files
+      setExportProgress({ current: total, total, phase: 'saving' });
       const filePaths = await exportSlides(options, slideImageData);
 
-      console.log(`Successfully exported ${filePaths.length} slides`);
-
-      // Optionally open folder
+      setExportProgress({ current: total, total, phase: 'done' });
       if (filePaths.length > 0) {
         await showInFolder(filePaths[0]);
       }
+
+      // Auto-dismiss the toast after a short delay so the user sees the
+      // completed state, then it disappears on its own.
+      setTimeout(() => {
+        setExportProgress((prev) => (prev?.phase === 'done' ? null : prev));
+      }, 2500);
     } catch (error) {
       console.error('Export failed:', error);
-      throw error;
+      setExportProgress({
+        current: 0,
+        total,
+        phase: 'error',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
     }
   }, []);
+
+  const dismissExportProgress = useCallback(() => setExportProgress(null), []);
 
   if (isLoading) {
     return (
@@ -260,6 +302,8 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
           renderSlideThumbnail={(slideIndex) => renderSlideThumbnailRef.current?.(slideIndex) ?? null}
         />
       )}
+
+      <ExportProgressToast progress={exportProgress} onDismiss={dismissExportProgress} />
     </div>
   );
 }
