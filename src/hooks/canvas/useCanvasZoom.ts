@@ -6,6 +6,7 @@ const ZOOM_STEP = 0.1;
 
 interface UseCanvasZoomOptions {
   scrollContainerRef: React.RefObject<HTMLDivElement>;
+  stageContainerRef: React.RefObject<HTMLDivElement>;
   numSlides: number;
   canvasSize: { width: number; height: number };
 }
@@ -16,6 +17,7 @@ interface UseCanvasZoomOptions {
  */
 export function useCanvasZoom({
   scrollContainerRef,
+  stageContainerRef,
   numSlides,
   canvasSize,
 }: UseCanvasZoomOptions) {
@@ -29,78 +31,41 @@ export function useCanvasZoom({
     const handleWheel = (e: WheelEvent) => {
       if (e.metaKey || e.ctrlKey) {
         e.preventDefault();
+        const stage = stageContainerRef.current;
+        if (!stage) return;
 
-        const totalContentWidth = numSlides * canvasSize.width * zoomLevel + 48;
-        const totalContentHeight = canvasSize.height * zoomLevel;
-        const isScrollable = totalContentWidth > container.clientWidth || totalContentHeight > container.clientHeight;
-
-        // Calculate the point under the mouse in content coordinates (before zoom)
-        // When content is centered, there's an offset we need to account for
-        let contentOffsetX = 0;
-        let contentOffsetY = 0;
-        if (!isScrollable) {
-          // Content is centered - calculate the offset
-          contentOffsetX = Math.max(0, (container.clientWidth - totalContentWidth) / 2);
-          contentOffsetY = Math.max(0, (container.clientHeight - totalContentHeight) / 2);
-        }
-
-        // Mouse position relative to scroll container
-        const containerRect = container.getBoundingClientRect();
-        const mouseXInContainer = e.clientX - containerRect.left;
-        const mouseYInContainer = e.clientY - containerRect.top;
-
-        // Convert to content coordinates (accounting for scroll and centering offset)
-        const mouseXInContent = container.scrollLeft + mouseXInContainer - contentOffsetX;
-        const mouseYInContent = container.scrollTop + mouseYInContainer - contentOffsetY;
-
-        // Convert to canvas coordinates (in unzoomed space, excluding padding)
-        const canvasX = (mouseXInContent - 24) / zoomLevel;
-        const canvasY = mouseYInContent / zoomLevel;
+        // Canvas point under the mouse, in unzoomed canvas-pixel coordinates.
+        // (stageContainer has paddingLeft: 24; canvas content starts there.)
+        const stageRect = stage.getBoundingClientRect();
+        const canvasX = (e.clientX - stageRect.left - 24) / zoomLevel;
+        const canvasY = (e.clientY - stageRect.top) / zoomLevel;
 
         // Normalize scroll delta and apply zoom
         const zoomDelta = -e.deltaY * 0.002;
         const newZoomLevel = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomLevel + zoomDelta));
+        if (newZoomLevel === zoomLevel) return;
 
-        if (newZoomLevel !== zoomLevel) {
-          // Calculate new content dimensions
-          const newContentWidth = numSlides * canvasSize.width * newZoomLevel + 48;
-          const newContentHeight = canvasSize.height * newZoomLevel;
-          const widthOverflows = newContentWidth > container.clientWidth;
-          const heightOverflows = newContentHeight > container.clientHeight;
+        setZoomLevel(newZoomLevel);
 
-          // Calculate target scroll positions based on canvas point under mouse
-          const newMouseXInContent = canvasX * newZoomLevel + 24;
-          const newMouseYInContent = canvasY * newZoomLevel;
-
-          // Only adjust scroll for dimensions that overflow; let flexbox center the rest
-          const targetScrollLeft = widthOverflows
-            ? Math.max(0, Math.min(newMouseXInContent - mouseXInContainer, newContentWidth - container.clientWidth))
-            : 0;
-          const targetScrollTop = heightOverflows
-            ? Math.max(0, Math.min(newMouseYInContent - mouseYInContainer, newContentHeight - container.clientHeight))
-            : 0;
-
-          // Store scroll targets before zoom change
-          const scrollTargets = { left: targetScrollLeft, top: targetScrollTop };
-
-          setZoomLevel(newZoomLevel);
-
-          // Apply scroll adjustment after React re-renders with new zoom
-          requestAnimationFrame(() => {
-            if (!scrollContainerRef.current) return;
-            scrollContainerRef.current.scrollTo({
-              left: scrollTargets.left,
-              top: scrollTargets.top,
-              behavior: 'auto',
-            });
-          });
-        }
+        // After React re-renders with the new zoom, the stage rect has shifted
+        // (centering / size change). Compute scroll so the same canvas point
+        // ends up under the mouse again. Browser clamps to scroll bounds.
+        requestAnimationFrame(() => {
+          const scroll = scrollContainerRef.current;
+          const stageEl = stageContainerRef.current;
+          if (!scroll || !stageEl) return;
+          const newStageRect = stageEl.getBoundingClientRect();
+          const desiredStageLeft = e.clientX - 24 - canvasX * newZoomLevel;
+          const desiredStageTop = e.clientY - canvasY * newZoomLevel;
+          scroll.scrollLeft += newStageRect.left - desiredStageLeft;
+          scroll.scrollTop += newStageRect.top - desiredStageTop;
+        });
       }
     };
 
     container.addEventListener('wheel', handleWheel, { passive: false });
     return () => container.removeEventListener('wheel', handleWheel);
-  }, [zoomLevel, numSlides, canvasSize.width, canvasSize.height, scrollContainerRef]);
+  }, [zoomLevel, numSlides, canvasSize.width, canvasSize.height, scrollContainerRef, stageContainerRef]);
 
   const zoomIn = () => setZoomLevel((z) => Math.min(MAX_ZOOM, z + ZOOM_STEP));
   const zoomOut = () => setZoomLevel((z) => Math.max(MIN_ZOOM, z - ZOOM_STEP));
@@ -117,4 +82,3 @@ export function useCanvasZoom({
     zoomStep: ZOOM_STEP,
   };
 }
-

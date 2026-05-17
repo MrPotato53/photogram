@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Modal, Button } from '../common';
 import type { ExportOptions } from '../../services/tauri';
@@ -35,7 +35,22 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [quality, setQuality] = useState(90); // 0-100
   const [resolution, setResolution] = useState(instagramMultiplier); // Default to Instagram optimal
   const [outputFolder, setOutputFolder] = useState<string | null>(null);
-  const [isExporting, setIsExporting] = useState(false);
+
+  // Generate ALL thumbnails synchronously once when the modal opens, then
+  // cache in state so re-renders (e.g. checkbox toggles) don't re-invoke
+  // stage.toDataURL. The original perf bug was inline renderSlideThumbnail(i)
+  // in JSX firing on every render — caching alone fixes that. Doing it sync
+  // produces one brief pause when the modal opens, after which all slides
+  // (including offscreen ones the user scrolls to later) are instantly ready.
+  const [thumbnails, setThumbnails] = useState<(string | null)[]>([]);
+  useEffect(() => {
+    if (!isOpen || !renderSlideThumbnail) return;
+    const all: (string | null)[] = [];
+    for (let i = 0; i < numSlides; i++) {
+      all.push(renderSlideThumbnail(i));
+    }
+    setThumbnails(all);
+  }, [isOpen, numSlides, renderSlideThumbnail]);
 
   // Calculate output dimensions for a given multiplier
   const getOutputDimensions = useCallback((multiplier: number) => {
@@ -123,29 +138,26 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     }
   }, []);
 
-  const handleExport = useCallback(async () => {
+  const handleExport = useCallback(() => {
     if (!outputFolder || selectedSlides.size === 0) return;
 
-    setIsExporting(true);
-    try {
-      const slideIndices = Array.from(selectedSlides).sort((a, b) => a - b);
-      const options: ExportOptions = {
-        projectName,
-        slideIndices,
-        outputFolder,
-        format,
-        quality: quality / 100, // Convert to 0-1 range
-        pixelRatio: resolution,
-      };
+    const slideIndices = Array.from(selectedSlides).sort((a, b) => a - b);
+    const options: ExportOptions = {
+      projectName,
+      slideIndices,
+      outputFolder,
+      format,
+      quality: quality / 100, // Convert to 0-1 range
+      pixelRatio: resolution,
+    };
 
-      await onExport(slideIndices, options);
-      onClose();
-    } catch (error) {
+    // Close modal immediately — export runs in the background and reports
+    // progress via the parent's persistent toast. Don't await; the user can
+    // keep editing while it runs.
+    onClose();
+    void onExport(slideIndices, options).catch((error) => {
       console.error('Export failed:', error);
-      // TODO: Show error toast/notification
-    } finally {
-      setIsExporting(false);
-    }
+    });
   }, [outputFolder, selectedSlides, projectName, format, quality, resolution, onExport, onClose]);
 
   const isValid = selectedSlides.size > 0 && outputFolder !== null;
@@ -174,7 +186,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <div className="flex gap-3 pb-1">
               {Array.from({ length: numSlides }, (_, i) => {
                 const isSelected = selectedSlides.has(i);
-                const thumbnail = renderSlideThumbnail?.(i);
+                const thumbnail = thumbnails[i] ?? null;
 
                 return (
                   <div
@@ -203,15 +215,37 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                       </div>
                     )}
 
-                    {/* Checkbox overlay */}
-                    <div className="absolute top-1 left-1">
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => toggleSlide(i)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="w-5 h-5 rounded bg-white/90 border-2 border-white shadow-lg text-blue-500 focus:ring-blue-500 focus:ring-offset-0 cursor-pointer"
-                      />
+                    {/* Checkbox overlay — custom-styled so checked color
+                        is driven by React state, not the WebView's native
+                        accent rendering (which can drop after focus shifts
+                        from the system file dialog). */}
+                    <div
+                      role="checkbox"
+                      aria-checked={isSelected}
+                      aria-label={`Select slide ${i + 1}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSlide(i);
+                      }}
+                      className={`absolute top-1 left-1 w-5 h-5 rounded shadow-lg flex items-center justify-center cursor-pointer transition-colors ${
+                        isSelected
+                          ? 'bg-blue-500 border-2 border-blue-500'
+                          : 'bg-white/90 border-2 border-white'
+                      }`}
+                    >
+                      {isSelected && (
+                        <svg
+                          viewBox="0 0 16 16"
+                          className="w-3.5 h-3.5 text-white"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="3"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <polyline points="3,8 7,12 13,4" />
+                        </svg>
+                      )}
                     </div>
 
                     {/* Slide number badge */}
@@ -318,17 +352,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
         {/* Action Buttons */}
         <div className="flex justify-end gap-2 pt-4 border-t border-theme-border">
-          <Button variant="secondary" onClick={onClose} disabled={isExporting}>
+          <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
           <Button
             variant="primary"
             onClick={handleExport}
-            disabled={!isValid || isExporting}
+            disabled={!isValid}
           >
-            {isExporting
-              ? 'Exporting...'
-              : `Export (${selectedSlides.size} slide${selectedSlides.size !== 1 ? 's' : ''})`}
+            {`Export (${selectedSlides.size} slide${selectedSlides.size !== 1 ? 's' : ''})`}
           </Button>
         </div>
       </div>

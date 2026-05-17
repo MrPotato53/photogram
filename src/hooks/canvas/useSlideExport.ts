@@ -41,27 +41,45 @@ export function useSlideExport({ stageRef, project, scale }: UseSlideExportProps
         }
       }
 
+      // The Layer has an x/y offset (stageOverflow) and a scale that includes both
+      // the design-to-canvas ratio and the user's zoom level.
+      // stage.toDataURL x/y/width/height are in stage pixel coordinates.
+      // We read the layer's actual transform so the capture is correct at any zoom level.
+      const layer = stage.getLayers()[0];
+      const layerX = layer ? layer.x() : 0;
+      const layerY = layer ? layer.y() : 0;
+      const layerScale = layer ? layer.scaleX() : scale; // scale * zoomLevel
+
+      // Region in stage pixels for exactly one slide
+      const regionX = layerX + slideLeft * layerScale;
+      const regionY = layerY;
+      const regionWidth = slideWidth * layerScale;
+      const regionHeight = DESIGN_HEIGHT * layerScale;
+
+      // Convert design multiplier → Konva pixelRatio (output pixels per stage pixel).
+      // output = regionWidth * effectivePixelRatio = slideWidth * layerScale * (pixelRatio / layerScale)
+      //        = slideWidth * pixelRatio  ← correct regardless of zoom or viewport size
+      const effectivePixelRatio = pixelRatio / layerScale;
+
+      // Clear KonvaImage node caches ONLY when the export resolution exceeds
+      // the cached resolution — otherwise the cache is already at least as
+      // detailed as the output and re-rasterizing is pure waste (esp. for
+      // thumbnails at 0.25x which never need this). CanvasElementRenderer
+      // caches at min(devicePixelRatio, 2) Konva pixels per stage pixel.
+      const displayPixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      const needsCacheRefresh = effectivePixelRatio > displayPixelRatio + 0.01;
+      const wereCached: Konva.Image[] = [];
+      if (needsCacheRefresh) {
+        const imageNodes = stage.find('Image') as Konva.Image[];
+        for (const node of imageNodes) {
+          if (node.isCached()) {
+            wereCached.push(node);
+            node.clearCache();
+          }
+        }
+      }
+
       try {
-        // The Layer has an x/y offset (stageOverflow) and a scale that includes both
-        // the design-to-canvas ratio and the user's zoom level.
-        // stage.toDataURL x/y/width/height are in stage pixel coordinates.
-        // We read the layer's actual transform so the capture is correct at any zoom level.
-        const layer = stage.getLayers()[0];
-        const layerX = layer ? layer.x() : 0;
-        const layerY = layer ? layer.y() : 0;
-        const layerScale = layer ? layer.scaleX() : scale; // scale * zoomLevel
-
-        // Region in stage pixels for exactly one slide
-        const regionX = layerX + slideLeft * layerScale;
-        const regionY = layerY;
-        const regionWidth = slideWidth * layerScale;
-        const regionHeight = DESIGN_HEIGHT * layerScale;
-
-        // Convert design multiplier → Konva pixelRatio (output pixels per stage pixel).
-        // output = regionWidth * effectivePixelRatio = slideWidth * layerScale * (pixelRatio / layerScale)
-        //        = slideWidth * pixelRatio  ← correct regardless of zoom or viewport size
-        const effectivePixelRatio = pixelRatio / layerScale;
-
         const dataURL = stage.toDataURL({
           x: regionX,
           y: regionY,
@@ -80,6 +98,18 @@ export function useSlideExport({ stageRef, project, scale }: UseSlideExportProps
         // Restore hidden nodes
         for (const node of hiddenNodes) {
           node.show();
+        }
+        // Re-cache images at display pixelRatio so drag perf isn't degraded
+        // after export. Matches CanvasElementRenderer's cache pixelRatio.
+        if (wereCached.length > 0) {
+          for (const node of wereCached) {
+            try {
+              node.cache({ pixelRatio: displayPixelRatio });
+            } catch {
+              // cache() throws on zero-size nodes; safe to skip
+            }
+          }
+          stage.batchDraw();
         }
       }
     },

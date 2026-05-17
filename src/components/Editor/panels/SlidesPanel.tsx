@@ -95,9 +95,12 @@ function SlidePreview({
           }
 
           if (imagePath) {
-            const existingImage = loadedImages.get(element.id);
+            // Cache key includes mediaId/assetPath so a replace (same element id,
+            // new media) busts the prior loaded image instead of reusing the old one.
+            const cacheKey = `${element.id}:${element.mediaId}:${element.assetPath || ''}`;
+            const existingImage = loadedImages.get(cacheKey);
             if (existingImage && existingImage.complete && existingImage.naturalWidth > 0) {
-              newLoadedImages.set(element.id, existingImage);
+              newLoadedImages.set(cacheKey, existingImage);
             } else {
               hasChanges = true;
               const img = new window.Image();
@@ -108,7 +111,7 @@ function SlidePreview({
                 img.onerror = () => resolve();
               });
               if (img.complete && img.naturalWidth > 0) {
-                newLoadedImages.set(element.id, img);
+                newLoadedImages.set(cacheKey, img);
               }
             }
           }
@@ -158,7 +161,8 @@ function SlidePreview({
           {slideElements
             .sort((a, b) => a.zIndex - b.zIndex)
             .map((element) => {
-              const loadedImage = loadedImages.get(element.id);
+              const cacheKey = `${element.id}:${element.mediaId}:${element.assetPath || ''}`;
+              const loadedImage = loadedImages.get(cacheKey);
               if (!loadedImage) return null;
 
               const flipScaleX = element.flipX ? -1 : 1;
