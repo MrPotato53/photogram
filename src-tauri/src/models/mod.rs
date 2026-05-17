@@ -210,6 +210,11 @@ impl From<&Project> for ProjectSummary {
 pub struct Preferences {
     pub theme: String,
     pub sort_by: String,
+    // Stable preset key (e.g. "instagram2x") chosen by user as the export
+    // default. Empty string falls back to the app default. Stored as string
+    // (not enum) so adding new presets later doesn't break older configs.
+    #[serde(default)]
+    pub default_export_resolution: String,
 }
 
 impl Preferences {
@@ -217,6 +222,7 @@ impl Preferences {
         Preferences {
             theme: "dark".to_string(),
             sort_by: "accessedAt".to_string(),
+            default_export_resolution: "instagram2x".to_string(),
         }
     }
 }

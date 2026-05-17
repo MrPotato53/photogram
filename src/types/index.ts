@@ -104,6 +104,10 @@ export interface ProjectSummary {
 export interface Preferences {
   theme: 'light' | 'dark';
   sortBy: 'accessedAt' | 'createdAt' | 'name';
+  // Stable preset key for the export resolution. Empty string falls back to
+  // the app default ("instagram2x"). Not typed as a union so new presets
+  // can be added without breaking older user configs on disk.
+  defaultExportResolution: string;
 }
 
 export type SortOption = {
