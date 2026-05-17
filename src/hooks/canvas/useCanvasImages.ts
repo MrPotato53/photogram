@@ -14,14 +14,20 @@ export function useCanvasImages(elements: Element[]) {
   const [loadedImages, setLoadedImages] = useState<Map<string, HTMLImageElement>>(new Map());
   const project = useProjectStore((s) => s.project);
 
-  // Track the image-relevant parts of elements to detect actual changes
-  // Only id, mediaId, and assetPath matter for image loading - position changes are ignored
+  // Track the image-relevant parts of elements to detect actual changes.
+  // Includes the resolved media filePath + thumbnailPath so a relink (which
+  // keeps mediaId stable but swaps the underlying file) re-runs the loader.
+  // Position changes are still ignored because none of these fields change
+  // during drag.
   const imageRelevantKey = useMemo(() => {
     return elements
       .filter((el) => el.type === 'photo' && el.mediaId)
-      .map((el) => `${el.id}:${el.mediaId}:${el.assetPath || ''}`)
+      .map((el) => {
+        const media = project?.mediaPool.find((m) => m.id === el.mediaId);
+        return `${el.id}:${el.mediaId}:${el.assetPath || ''}:${media?.filePath || ''}:${media?.thumbnailPath || ''}`;
+      })
       .join('|');
-  }, [elements]);
+  }, [elements, project?.mediaPool]);
 
   const lastProcessedKeyRef = useRef<string>('');
   const loadedImagesRef = useRef<Map<string, HTMLImageElement>>(new Map());

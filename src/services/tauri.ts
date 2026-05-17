@@ -73,6 +73,28 @@ export async function relinkMedia(
   return invoke('relink_media', { projectId, mediaId, newFilePath });
 }
 
+export type RelinkResult =
+  | { status: 'exact'; mediaId: string; newPath: string }
+  | { status: 'renamed'; mediaId: string; newPath: string; oldName: string; newName: string }
+  | { status: 'resaved'; mediaId: string; newPath: string; sizeDelta: number }
+  | { status: 'ambiguous'; mediaId: string; candidatePaths: string[] }
+  | { status: 'notFound'; mediaId: string };
+
+export interface BulkRelinkResponse {
+  project: Project;
+  results: RelinkResult[];
+  scannedCount: number;
+}
+
+export async function bulkRelinkMedia(
+  projectId: string,
+  mediaIds: string[],
+  scanPaths: string[],
+  maxDepth = 3
+): Promise<BulkRelinkResponse> {
+  return invoke('bulk_relink_media', { projectId, mediaIds, scanPaths, maxDepth });
+}
+
 export async function embedElementAsset(
   projectId: string,
   elementId: string,

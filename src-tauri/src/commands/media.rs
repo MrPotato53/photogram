@@ -63,6 +63,11 @@ pub fn import_media_files(
         // Get image dimensions without loading full image into memory
         let (width, height) = get_image_dimensions(&source_path).unwrap_or((1080, 1080));
 
+        // Read exact byte size for relink matching. Cheap (single stat call).
+        let file_size = fs::metadata(&source_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
         // Queue thumbnail generation for background processing
         let thumb_filename = format!("{}.jpg", media_id);
         let thumb_path = thumbnails_dir.join(&thumb_filename);
@@ -80,6 +85,7 @@ pub fn import_media_files(
             thumbnail_path: None,
             width,
             height,
+            file_size,
         });
     }
 
@@ -216,11 +222,13 @@ pub fn relink_media(
 
     // Get new dimensions from the new file location
     let (width, height) = get_image_dimensions(&new_path).unwrap_or((1080, 1080));
+    let new_size = fs::metadata(&new_path).map(|m| m.len()).unwrap_or(0);
 
     // Update media item to point to new location (no file copying)
     media_item.file_path = new_file_path;
     media_item.width = width;
     media_item.height = height;
+    media_item.file_size = new_size;
 
     // Delete old thumbnail if exists
     if let Some(ref thumb_path) = media_item.thumbnail_path {
@@ -266,6 +274,266 @@ pub fn relink_media(
     });
 
     Ok(project)
+}
+
+// =============== Bulk relink ===============
+
+/// Per-item result returned to the frontend so the summary toast can report
+/// what happened. Tier names mirror the matching strategy in `bulk_relink_media`.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
+pub enum RelinkResult {
+    /// Filename + size + dimensions all matched a unique candidate.
+    Exact { media_id: String, new_path: String },
+    /// Size + dimensions matched (filename differs — user renamed the file).
+    Renamed { media_id: String, new_path: String, old_name: String, new_name: String },
+    /// Filename + dimensions matched, size differed (file was re-saved/compressed).
+    Resaved { media_id: String, new_path: String, size_delta: i64 },
+    /// Multiple candidates matched at the same confidence tier; can't pick one.
+    Ambiguous { media_id: String, candidate_paths: Vec<String> },
+    /// Nothing in the scanned directories matched this media item.
+    NotFound { media_id: String },
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkRelinkResponse {
+    pub project: Project,
+    pub results: Vec<RelinkResult>,
+    /// Total candidate image files discovered across the scanned paths.
+    pub scanned_count: usize,
+}
+
+/// Walk a directory up to `max_depth` levels deep, collecting image files.
+/// Depth 0 = only the directory itself. Depth 1 = directory + immediate children.
+fn walk_images_capped(root: &PathBuf, max_depth: usize, out: &mut Vec<PathBuf>) {
+    if !root.exists() { return; }
+    if root.is_file() {
+        if is_image_file(root) { out.push(root.clone()); }
+        return;
+    }
+    let mut stack: Vec<(PathBuf, usize)> = vec![(root.clone(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if is_image_file(&path) { out.push(path); }
+            } else if path.is_dir() && depth < max_depth {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+}
+
+#[command]
+pub fn bulk_relink_media(
+    app: AppHandle,
+    project_id: String,
+    media_ids: Vec<String>,
+    scan_paths: Vec<String>,
+    max_depth: usize,
+) -> Result<BulkRelinkResponse, String> {
+    let projects_dir = get_projects_dir(&app);
+    let project_path = projects_dir.join(format!("{}.json", project_id));
+    let thumbnails_dir = get_thumbnails_dir(&app, &project_id);
+
+    let contents = fs::read_to_string(&project_path)
+        .map_err(|e| format!("Failed to read project: {}", e))?;
+    let mut project: Project =
+        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse project: {}", e))?;
+
+    // Phase 1: walk the scan paths to gather all candidate image files.
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for p in &scan_paths {
+        let path = PathBuf::from(p);
+        walk_images_capped(&path, max_depth, &mut candidates);
+    }
+    let scanned_count = candidates.len();
+
+    // Pre-index candidates by filename and by file size (cheap metadata reads).
+    // Dimensions are deferred until a target needs them, to keep the scan fast
+    // even when scanning thousands of files.
+    use std::collections::HashMap;
+    let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut sizes: Vec<u64> = Vec::with_capacity(candidates.len());
+    for (i, p) in candidates.iter().enumerate() {
+        let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        sizes.push(size);
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        by_name.entry(name.to_lowercase()).or_default().push(i);
+        by_size.entry(size).or_default().push(i);
+    }
+    // Lazy dimensions cache — populated only for candidates we actually inspect.
+    let mut dims_cache: HashMap<usize, Option<(u32, u32)>> = HashMap::new();
+    let mut get_dims = |idx: usize| -> Option<(u32, u32)> {
+        if let Some(v) = dims_cache.get(&idx) { return *v; }
+        let d = get_image_dimensions(&candidates[idx]);
+        dims_cache.insert(idx, d);
+        d
+    };
+
+    // Phase 2: match each requested media item against the candidate pool.
+    let mut results: Vec<RelinkResult> = Vec::new();
+    let mut to_apply: Vec<(String, String, u64, u32, u32)> = Vec::new(); // (media_id, new_path, new_size, w, h)
+
+    for media_id in &media_ids {
+        let Some(media) = project.media_pool.iter().find(|m| m.id == *media_id) else {
+            results.push(RelinkResult::NotFound { media_id: media_id.clone() });
+            continue;
+        };
+        // Skip if the file currently linked still exists — nothing to relink.
+        if PathBuf::from(&media.file_path).exists() {
+            continue;
+        }
+        let target_name = media.file_name.to_lowercase();
+        let target_size = media.file_size;
+        let target_w = media.width;
+        let target_h = media.height;
+
+        // Tier 1 (exact): same filename, same size. Dimensions confirmed.
+        let mut tier1: Vec<usize> = Vec::new();
+        if let Some(name_idxs) = by_name.get(&target_name) {
+            for &idx in name_idxs {
+                if sizes[idx] == target_size && target_size > 0 {
+                    if let Some((w, h)) = get_dims(idx) {
+                        if w == target_w && h == target_h {
+                            tier1.push(idx);
+                        }
+                    }
+                }
+            }
+        }
+        if tier1.len() == 1 {
+            let idx = tier1[0];
+            let new_path = candidates[idx].to_string_lossy().to_string();
+            to_apply.push((media_id.clone(), new_path.clone(), sizes[idx], target_w, target_h));
+            results.push(RelinkResult::Exact { media_id: media_id.clone(), new_path });
+            continue;
+        }
+        if tier1.len() > 1 {
+            results.push(RelinkResult::Ambiguous {
+                media_id: media_id.clone(),
+                candidate_paths: tier1.iter().map(|&i| candidates[i].to_string_lossy().to_string()).collect(),
+            });
+            continue;
+        }
+
+        // Tier 2 (renamed): same size, same dimensions. Filename may differ.
+        let mut tier2: Vec<usize> = Vec::new();
+        if target_size > 0 {
+            if let Some(size_idxs) = by_size.get(&target_size) {
+                for &idx in size_idxs {
+                    if let Some((w, h)) = get_dims(idx) {
+                        if w == target_w && h == target_h {
+                            tier2.push(idx);
+                        }
+                    }
+                }
+            }
+        }
+        if tier2.len() == 1 {
+            let idx = tier2[0];
+            let new_path = candidates[idx].to_string_lossy().to_string();
+            let new_name = candidates[idx].file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            to_apply.push((media_id.clone(), new_path.clone(), sizes[idx], target_w, target_h));
+            results.push(RelinkResult::Renamed {
+                media_id: media_id.clone(),
+                new_path,
+                old_name: media.file_name.clone(),
+                new_name,
+            });
+            continue;
+        }
+        if tier2.len() > 1 {
+            results.push(RelinkResult::Ambiguous {
+                media_id: media_id.clone(),
+                candidate_paths: tier2.iter().map(|&i| candidates[i].to_string_lossy().to_string()).collect(),
+            });
+            continue;
+        }
+
+        // Tier 3 (resaved): same filename + dimensions, size differs (compression).
+        let mut tier3: Vec<usize> = Vec::new();
+        if let Some(name_idxs) = by_name.get(&target_name) {
+            for &idx in name_idxs {
+                if let Some((w, h)) = get_dims(idx) {
+                    if w == target_w && h == target_h {
+                        tier3.push(idx);
+                    }
+                }
+            }
+        }
+        if tier3.len() == 1 {
+            let idx = tier3[0];
+            let new_path = candidates[idx].to_string_lossy().to_string();
+            let size_delta = sizes[idx] as i64 - target_size as i64;
+            to_apply.push((media_id.clone(), new_path.clone(), sizes[idx], target_w, target_h));
+            results.push(RelinkResult::Resaved { media_id: media_id.clone(), new_path, size_delta });
+            continue;
+        }
+        if tier3.len() > 1 {
+            results.push(RelinkResult::Ambiguous {
+                media_id: media_id.clone(),
+                candidate_paths: tier3.iter().map(|&i| candidates[i].to_string_lossy().to_string()).collect(),
+            });
+            continue;
+        }
+
+        results.push(RelinkResult::NotFound { media_id: media_id.clone() });
+    }
+
+    // Phase 3: apply all confirmed relinks, then persist.
+    let mut thumb_jobs: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+    for (media_id, new_path, new_size, w, h) in &to_apply {
+        if let Some(m) = project.media_pool.iter_mut().find(|m| m.id == *media_id) {
+            // Delete old thumb (will regenerate from new source)
+            if let Some(ref t) = m.thumbnail_path {
+                let _ = fs::remove_file(t);
+            }
+            m.file_path = new_path.clone();
+            m.file_size = *new_size;
+            m.width = *w;
+            m.height = *h;
+            m.thumbnail_path = None;
+            let thumb_filename = format!("{}.jpg", media_id);
+            let thumb_path = thumbnails_dir.join(&thumb_filename);
+            thumb_jobs.push((media_id.clone(), PathBuf::from(new_path), thumb_path));
+        }
+    }
+    project.updated_at = Utc::now();
+
+    let json = serde_json::to_string_pretty(&project)
+        .map_err(|e| format!("Failed to serialize project: {}", e))?;
+    fs::write(&project_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
+
+    // Regenerate thumbnails in the background; emit one event when all done.
+    if !thumb_jobs.is_empty() {
+        let project_path_clone = project_path.clone();
+        let thumbnails_dir_clone = thumbnails_dir.clone();
+        let app_handle = app.clone();
+        std::thread::spawn(move || {
+            fs::create_dir_all(&thumbnails_dir_clone).ok();
+            for (media_id, src, thumb) in &thumb_jobs {
+                if generate_thumbnail(src, thumb).is_ok() {
+                    if let Ok(contents) = fs::read_to_string(&project_path_clone) {
+                        if let Ok(mut p) = serde_json::from_str::<Project>(&contents) {
+                            if let Some(m) = p.media_pool.iter_mut().find(|m| m.id == *media_id) {
+                                m.thumbnail_path = Some(thumb.to_string_lossy().to_string());
+                            }
+                            if let Ok(j) = serde_json::to_string_pretty(&p) {
+                                let _ = fs::write(&project_path_clone, j);
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = app_handle.emit("thumbnails-ready", ());
+        });
+    }
+
+    Ok(BulkRelinkResponse { project, results, scanned_count })
 }
 
 /// Embed an image asset for a canvas element
