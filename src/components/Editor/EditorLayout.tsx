@@ -18,6 +18,8 @@ import { DragPreview } from './DragPreview';
 import { ExportModal } from './ExportModal';
 import { ExportProgressToast } from './ExportProgressToast';
 import { PreviewModal } from './PreviewModal';
+import { TemplatePickerModal } from './TemplatePickerModal';
+import type { Template } from '../../types';
 import { exportSlides, showInFolder, type ExportOptions } from '../../services/tauri';
 import { useEditorShortcuts } from '../../hooks/useEditorShortcuts';
 
@@ -41,6 +43,16 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   const slidesOpen = usePanelStore((s) => s.panels.slides.isOpen);
   const mediaPoolDocked = usePanelStore((s) => s.mediaPoolDocked);
   const layersDocked = usePanelStore((s) => s.layersDocked);
+
+  // Template picker — modal lives here (not in SlidesPanel) so the
+  // Cmd+Shift+T shortcut works even when the slides panel is collapsed.
+  const isTemplatePickerOpen = usePanelStore((s) => s.templatePickerOpen);
+  const setTemplatePickerOpen = usePanelStore((s) => s.setTemplatePickerOpen);
+  const addSlideWithTemplate = useSlideStore((s) => s.addSlideWithTemplate);
+  const handleSelectTemplate = useCallback((template: Template) => {
+    addSlideWithTemplate(template);
+    setTemplatePickerOpen(false);
+  }, [addSlideWithTemplate, setTemplatePickerOpen]);
 
   // Export & Preview functionality
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -304,6 +316,14 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
       )}
 
       <ExportProgressToast progress={exportProgress} onDismiss={dismissExportProgress} />
+
+      {/* Template picker (global — Cmd+Shift+T or "Add with template" buttons) */}
+      <TemplatePickerModal
+        isOpen={isTemplatePickerOpen}
+        onClose={() => setTemplatePickerOpen(false)}
+        onSelect={handleSelectTemplate}
+        aspectRatio={project.aspectRatio}
+      />
     </div>
   );
 }

@@ -668,52 +668,46 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   // Zoom logic is handled by useCanvasZoom hook
 
-  // Scroll to current slide when it changes (only if not fully visible)
+  // Scroll to bring the current slide into view ONLY when the slide
+  // selection changes. Previously this effect also depended on zoomLevel /
+  // canvasSize.width, so every zoom click would "re-anchor" the viewport
+  // on the current slide (snapping to slide 1 by default and stealing the
+  // user's pan position). Zoom focal-point preservation lives in the zoom
+  // hook itself.
   useEffect(() => {
     if (!scrollContainerRef.current || canvasSize.width <= 0) return;
 
     const container = scrollContainerRef.current;
     const slideScreenWidth = canvasSize.width * zoomLevel;
     const totalContentWidth = numSlides * slideScreenWidth + 48; // 48 = left + right padding
-    const viewPadding = 24; // Padding to show part of adjacent slides
+    const viewPadding = 24;
 
-    // If content fits in viewport, all slides are visible - no need to scroll
     if (totalContentWidth <= container.clientWidth) return;
 
-    // Calculate slide position within content (relative to content left edge)
     const slideLeftInContent = 24 + currentSlideIndex * slideScreenWidth;
     const slideRightInContent = slideLeftInContent + slideScreenWidth;
-
-    // Get visible range
     const visibleLeft = container.scrollLeft;
     const visibleRight = container.scrollLeft + container.clientWidth;
-
-    // Check visibility with padding
     const isOffLeft = slideLeftInContent < visibleLeft + viewPadding;
     const isOffRight = slideRightInContent > visibleRight - viewPadding;
 
-    // Only scroll if slide is not fully visible (with padding)
     if (isOffLeft && !isOffRight) {
-      // Slide is off to the left - align left edge with padding
-      container.scrollTo({
-        left: Math.max(0, slideLeftInContent - viewPadding),
-        behavior: 'smooth',
-      });
+      container.scrollTo({ left: Math.max(0, slideLeftInContent - viewPadding), behavior: 'smooth' });
     } else if (isOffRight && !isOffLeft) {
-      // Slide is off to the right - align right edge with padding
       container.scrollTo({
         left: Math.max(0, slideRightInContent - container.clientWidth + viewPadding),
         behavior: 'smooth',
       });
     } else if (isOffLeft && isOffRight) {
-      // Slide is larger than viewport or completely off-screen - center it
       const slideCenterInContent = slideLeftInContent + slideScreenWidth / 2;
       container.scrollTo({
         left: Math.max(0, slideCenterInContent - container.clientWidth / 2),
         behavior: 'smooth',
       });
     }
-  }, [currentSlideIndex, canvasSize.width, zoomLevel, numSlides]);
+    // Intentionally NOT depending on zoomLevel or canvasSize.width — see comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSlideIndex, numSlides]);
 
   // File drop and media drop are handled by hooks (useCanvasFileDrop, useCanvasMediaDrop)
 
