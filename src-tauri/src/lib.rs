@@ -3,10 +3,11 @@ mod models;
 
 use tauri::Manager;
 use commands::{
-    check_media_exists, create_project, delete_element_asset, delete_media, delete_project,
-    delete_template, embed_element_asset, export_slides, get_all_projects, get_preferences, get_project,
-    get_templates, import_media_files, relink_media, rename_project, reorder_templates,
-    save_preferences, save_project_thumbnail, save_template, show_in_folder, update_project,
+    bulk_relink_media, check_media_exists, create_project, delete_element_asset, delete_media,
+    delete_project, delete_template, embed_element_asset, export_slides, get_all_projects,
+    get_preferences, get_project, get_templates, import_media_files, relink_media, rename_project,
+    reorder_templates, save_preferences, save_project_thumbnail, save_template, show_in_folder,
+    update_project,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -49,6 +50,7 @@ pub fn run() {
             show_in_folder,
             check_media_exists,
             relink_media,
+            bulk_relink_media,
             embed_element_asset,
             delete_element_asset,
             get_templates,

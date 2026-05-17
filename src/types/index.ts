@@ -11,6 +11,10 @@ export interface MediaItem {
   thumbnailPath: string | null;
   width: number;
   height: number;
+  // Exact byte size of the source file. Used as a strong signal during
+  // relink matching (filename + size + dimensions = high confidence).
+  // Zero for legacy entries imported before this field existed.
+  fileSize: number;
 }
 
 export interface Element {

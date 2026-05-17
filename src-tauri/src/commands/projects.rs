@@ -36,11 +36,28 @@ pub fn get_project(app: AppHandle, id: String) -> Result<Project, String> {
     let mut project: Project =
         serde_json::from_str(&contents).map_err(|e| format!("Failed to parse project: {}", e))?;
 
+    // Backfill file_size for media imported before this field existed. One
+    // stat() per entry — only fills entries with file_size == 0 to avoid
+    // repeated work and to skip already-broken links (which stat as missing).
+    let mut backfilled = false;
+    for media in project.media_pool.iter_mut() {
+        if media.file_size == 0 {
+            if let Ok(meta) = fs::metadata(&media.file_path) {
+                media.file_size = meta.len();
+                backfilled = true;
+            }
+        }
+    }
+
     // Update accessed_at timestamp
     project.accessed_at = Utc::now();
     let json = serde_json::to_string_pretty(&project)
         .map_err(|e| format!("Failed to serialize project: {}", e))?;
     fs::write(&project_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
+
+    // Silence unused warning when no backfill occurred — write happens
+    // regardless because accessed_at changed.
+    let _ = backfilled;
 
     Ok(project)
 }

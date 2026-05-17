@@ -7,7 +7,7 @@ import { useProjectStore } from '../../../stores/projectStore';
 import { useMediaStore } from '../../../stores/mediaStore';
 import { ConfirmDialog } from '../../common/ConfirmDialog';
 import { MediaPreviewModal } from '../MediaPreviewModal';
-import { showInFolder, checkMediaExists, relinkMedia } from '../../../services/tauri';
+import { showInFolder, checkMediaExists, relinkMedia, bulkRelinkMedia, type RelinkResult } from '../../../services/tauri';
 import type { MediaItem } from '../../../types';
 import { updateDragPreviewPosition } from '../DragPreview';
 import { preloadImage } from '../../../utils/imageCache';
@@ -110,9 +110,14 @@ interface ContextMenuProps {
   x: number;
   y: number;
   isMissing: boolean;
+  // Count of currently-selected missing items including this one. When > 1
+  // the menu shows a "Relink N selected..." entry that opens the folder
+  // picker for bulk relink instead of the single-file picker.
+  selectedMissingCount: number;
   onClose: () => void;
   onShowInFinder: () => void;
   onRelink: () => void;
+  onRelinkSelected: () => void;
   onPreview: () => void;
   onDelete: () => void;
 }
@@ -121,9 +126,11 @@ function MediaContextMenu({
   x,
   y,
   isMissing,
+  selectedMissingCount,
   onClose,
   onShowInFinder,
   onRelink,
+  onRelinkSelected,
   onPreview,
   onDelete,
 }: ContextMenuProps) {
@@ -161,7 +168,15 @@ function MediaContextMenu({
           Show in Finder
         </button>
       )}
-      {isMissing && (
+      {isMissing && selectedMissingCount > 1 && (
+        <button
+          onClick={onRelinkSelected}
+          className="w-full px-3 py-1.5 text-left text-sm text-theme-text hover:bg-theme-bg-tertiary transition-colors"
+        >
+          {`Relink ${selectedMissingCount} selected…`}
+        </button>
+      )}
+      {isMissing && selectedMissingCount <= 1 && (
         <button
           onClick={onRelink}
           className="w-full px-3 py-1.5 text-left text-sm text-theme-text hover:bg-theme-bg-tertiary transition-colors"
@@ -176,6 +191,105 @@ function MediaContextMenu({
       >
         Delete
       </button>
+    </div>
+  );
+}
+
+// Right-click on empty grid background.
+interface EmptyAreaContextMenuProps {
+  x: number;
+  y: number;
+  missingCount: number;
+  onClose: () => void;
+  onRelinkAll: () => void;
+}
+
+function EmptyAreaContextMenu({
+  x,
+  y,
+  missingCount,
+  onClose,
+  onRelinkAll,
+}: EmptyAreaContextMenuProps) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
+    };
+    window.addEventListener('mousedown', handleClickOutside);
+    return () => window.removeEventListener('mousedown', handleClickOutside);
+  }, [onClose]);
+
+  // Nothing relevant to offer when no items are missing.
+  if (missingCount === 0) return null;
+
+  return (
+    <div
+      ref={menuRef}
+      className="fixed bg-theme-bg-secondary border border-theme-border rounded-lg shadow-xl py-1 min-w-[200px] z-[150]"
+      style={{ left: x, top: y }}
+    >
+      <button
+        onClick={onRelinkAll}
+        className="w-full px-3 py-1.5 text-left text-sm text-theme-text hover:bg-theme-bg-tertiary transition-colors"
+      >
+        {`Relink ${missingCount} missing item${missingCount === 1 ? '' : 's'}…`}
+      </button>
+    </div>
+  );
+}
+
+// Toast shown after a bulk relink completes. Counts each tier separately and
+// lists not-found / ambiguous filenames so the user can manually resolve them.
+interface RelinkSummaryToastProps {
+  summary: {
+    results: RelinkResult[];
+    scannedCount: number;
+    requestedCount: number;
+  };
+  onDismiss: () => void;
+}
+
+function RelinkSummaryToast({ summary, onDismiss }: RelinkSummaryToastProps) {
+  const { results, scannedCount, requestedCount } = summary;
+  const exact = results.filter((r) => r.status === 'exact').length;
+  const renamed = results.filter((r) => r.status === 'renamed').length;
+  const resaved = results.filter((r) => r.status === 'resaved').length;
+  const ambiguous = results.filter((r) => r.status === 'ambiguous').length;
+  const notFound = results.filter((r) => r.status === 'notFound').length;
+  const linked = exact + renamed + resaved;
+
+  // Auto-dismiss when everything resolved cleanly. Stay open if anything
+  // needs the user's attention (ambiguous / not found).
+  useEffect(() => {
+    if (ambiguous === 0 && notFound === 0) {
+      const t = setTimeout(onDismiss, 3500);
+      return () => clearTimeout(t);
+    }
+  }, [ambiguous, notFound, onDismiss]);
+
+  return (
+    <div className="fixed bottom-6 right-6 z-[200] w-80 bg-theme-bg-secondary border border-theme-border rounded-lg shadow-2xl p-3 select-none">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-sm font-medium text-theme-text">
+          {`Relinked ${linked} of ${requestedCount}`}
+        </span>
+        <button
+          onClick={onDismiss}
+          className="text-theme-text-muted hover:text-theme-text ml-2 leading-none"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      <div className="text-xs text-theme-text-muted space-y-0.5">
+        {exact > 0 && <div>{`${exact} exact match${exact === 1 ? '' : 'es'}`}</div>}
+        {renamed > 0 && <div>{`${renamed} renamed (matched by size + dimensions)`}</div>}
+        {resaved > 0 && <div>{`${resaved} re-saved (matched by name + dimensions)`}</div>}
+        {ambiguous > 0 && <div className="text-amber-400">{`${ambiguous} ambiguous — multiple candidates`}</div>}
+        {notFound > 0 && <div className="text-red-400">{`${notFound} not found`}</div>}
+        <div className="mt-1 opacity-70">{`Scanned ${scannedCount} file${scannedCount === 1 ? '' : 's'}`}</div>
+      </div>
     </div>
   );
 }
@@ -208,6 +322,45 @@ export function MediaPoolPanel() {
   // Track which media files are missing
   const [missingMediaIds, setMissingMediaIds] = useState<Set<string>>(new Set());
 
+  // Per-media thumbnail cache-bust version. Thumbnails regenerate at the
+  // SAME path on disk after relink ({media_id}.jpg), so the browser would
+  // serve the cached old image until session restart. Bumping this version
+  // appends ?v=N to the URL — forces a fresh fetch once the backend has
+  // written the new bytes (after `thumbnails-ready` fires).
+  const [thumbnailVersions, setThumbnailVersions] = useState<Map<string, number>>(new Map());
+  const bumpThumbnailVersions = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    setThumbnailVersions((prev) => {
+      const next = new Map(prev);
+      for (const id of ids) next.set(id, (next.get(id) ?? 0) + 1);
+      return next;
+    });
+  }, []);
+
+  // Empty-area context menu (right-click in the grid background, not on a tile)
+  const [emptyContextMenu, setEmptyContextMenu] = useState<{
+    isOpen: boolean;
+    x: number;
+    y: number;
+  }>({ isOpen: false, x: 0, y: 0 });
+
+  // Summary toast shown after a bulk relink finishes. `null` = hidden.
+  const [relinkSummary, setRelinkSummary] = useState<{
+    results: RelinkResult[];
+    scannedCount: number;
+    requestedCount: number;
+  } | null>(null);
+
+  // Single-file relink mismatch confirm dialog. When the user explicitly
+  // picks one file for one missing media item and signals don't agree, we
+  // ask them to confirm rather than silently relinking.
+  const [singleRelinkConfirm, setSingleRelinkConfirm] = useState<{
+    isOpen: boolean;
+    media: MediaItem | null;
+    selectedPath: string;
+    reason: string;
+  }>({ isOpen: false, media: null, selectedPath: '', reason: '' });
+
   // Zoom level for thumbnails (0.5 = 50%, 1 = 100%, 2 = 200%)
   const [zoomLevel, setZoomLevel] = useState(1);
 
@@ -218,17 +371,18 @@ export function MediaPoolPanel() {
   const thumbnailSize = Math.round(BASE_THUMBNAIL_SIZE * zoomLevel);
   const gap = 8; // Gap between thumbnails in pixels
 
-  // Track previously checked media IDs to avoid redundant IPC calls
-  const checkedMediaIdsRef = useRef<Set<string>>(new Set());
+  // Track the filePath each media id was last existence-checked at. Keying
+  // on (id → filePath) — not just id — means a relink (filePath change)
+  // invalidates the prior result and forces a fresh check. This is the
+  // single source of truth for missing-state recovery and works whether the
+  // relink came from this panel, the single-tile path, or any future caller.
+  const checkedPathsRef = useRef<Map<string, string>>(new Map());
 
-  // Check for missing media - only check NEW items when mediaPool changes
   useEffect(() => {
     const checkMissingMedia = async () => {
       const currentIds = new Set(mediaPool.map((m) => m.id));
-      // Find items we haven't checked yet
-      const unchecked = mediaPool.filter((m) => !checkedMediaIdsRef.current.has(m.id));
 
-      // Remove stale entries from missingMediaIds for items no longer in pool
+      // Drop ids no longer in the pool from missingMediaIds.
       setMissingMediaIds((prev) => {
         const next = new Set(prev);
         for (const id of prev) {
@@ -236,15 +390,32 @@ export function MediaPoolPanel() {
         }
         return next.size !== prev.size ? next : prev;
       });
+      // Same cleanup for the path-tracking ref.
+      for (const id of Array.from(checkedPathsRef.current.keys())) {
+        if (!currentIds.has(id)) checkedPathsRef.current.delete(id);
+      }
 
-      if (unchecked.length === 0) return;
+      // Items needing a (re)check: never checked, or filePath changed since
+      // last check (e.g. just relinked).
+      const toCheck = mediaPool.filter((m) => {
+        const prevPath = checkedPathsRef.current.get(m.id);
+        return prevPath !== m.filePath;
+      });
+      if (toCheck.length === 0) return;
 
-      for (const media of unchecked) {
+      for (const media of toCheck) {
         const exists = await checkMediaExists(media.filePath);
-        checkedMediaIdsRef.current.add(media.id);
-        if (!exists) {
-          setMissingMediaIds((prev) => new Set(prev).add(media.id));
-        }
+        checkedPathsRef.current.set(media.id, media.filePath);
+        setMissingMediaIds((prev) => {
+          const has = prev.has(media.id);
+          if (!exists && !has) return new Set(prev).add(media.id);
+          if (exists && has) {
+            const next = new Set(prev);
+            next.delete(media.id);
+            return next;
+          }
+          return prev;
+        });
       }
     };
     checkMissingMedia();
@@ -413,6 +584,19 @@ export function MediaPoolPanel() {
     });
   }, []);
 
+  // Right-click on empty grid background → "Relink all missing" entry point.
+  const handleEmptyAreaContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      // Only intercept when the target IS the wrapper itself (not bubbling
+      // from a tile). Tile context menus stopPropagation effectively via
+      // their own handler.
+      if (e.target !== e.currentTarget) return;
+      e.preventDefault();
+      setEmptyContextMenu({ isOpen: true, x: e.clientX, y: e.clientY });
+    },
+    []
+  );
+
   const handleShowInFinder = useCallback(async () => {
     if (!contextMenu.media) return;
 
@@ -433,36 +617,133 @@ export function MediaPoolPanel() {
     setContextMenu({ ...contextMenu, isOpen: false });
   }, [contextMenu]);
 
+  // Apply a single-media relink with optional dimension/size verification.
+  // Used by both the direct path (signals agree) and the post-confirm-dialog
+  // path (signals disagree but user overrode).
+  const applySingleRelink = useCallback(async (mediaId: string, newPath: string) => {
+    if (!project) return;
+    try {
+      const updatedProject = await relinkMedia(project.id, mediaId, newPath);
+      setProject(updatedProject);
+      setMissingMediaIds((prev) => {
+        const next = new Set(prev);
+        next.delete(mediaId);
+        return next;
+      });
+      bumpThumbnailVersions([mediaId]);
+    } catch (error) {
+      console.error('Failed to relink media:', error);
+    }
+  }, [project, setProject, bumpThumbnailVersions]);
+
+  // Run bulk relink against a set of media ids and scan paths. Updates the
+  // project store, clears resolved missing flags, surfaces a summary toast.
+  // Always runs with maxDepth=3 (chosen with user; deep enough for typical
+  // nested Lightroom-style folders without scanning huge trees).
+  const runBulkRelink = useCallback(
+    async (mediaIds: string[], scanPaths: string[]) => {
+      if (!project || mediaIds.length === 0 || scanPaths.length === 0) return;
+      try {
+        const response = await bulkRelinkMedia(project.id, mediaIds, scanPaths, 3);
+        setProject(response.project);
+        // Clear missing flag for everything that got relinked.
+        const resolvedIds = new Set(
+          response.results
+            .filter(
+              (r) => r.status === 'exact' || r.status === 'renamed' || r.status === 'resaved'
+            )
+            .map((r) => r.mediaId)
+        );
+        if (resolvedIds.size > 0) {
+          setMissingMediaIds((prev) => {
+            const next = new Set(prev);
+            for (const id of resolvedIds) next.delete(id);
+            return next;
+          });
+          bumpThumbnailVersions(Array.from(resolvedIds));
+        }
+        setRelinkSummary({
+          results: response.results,
+          scannedCount: response.scannedCount,
+          requestedCount: mediaIds.length,
+        });
+      } catch (error) {
+        console.error('Bulk relink failed:', error);
+      }
+    },
+    [project, setProject, bumpThumbnailVersions]
+  );
+
+  // Open the directory/file picker for a bulk relink of every currently-missing
+  // item, OR a caller-provided subset (e.g. multi-selected missing tiles).
+  const startBulkRelink = useCallback(
+    async (mediaIds?: string[]) => {
+      const ids =
+        mediaIds && mediaIds.length > 0 ? mediaIds : Array.from(missingMediaIds);
+      if (ids.length === 0) return;
+
+      try {
+        const selected = await open({
+          multiple: true,
+          directory: true,
+          title: `Choose folder(s) to search for ${ids.length} missing item${ids.length === 1 ? '' : 's'}`,
+        });
+        if (!selected) return;
+        const paths = Array.isArray(selected) ? selected : [selected];
+        await runBulkRelink(ids, paths);
+      } catch (error) {
+        console.error('Failed to open folder dialog:', error);
+      }
+    },
+    [missingMediaIds, runBulkRelink]
+  );
+
   const handleRelink = useCallback(async () => {
     if (!contextMenu.media || !project) return;
+    const media = contextMenu.media;
+    setContextMenu({ ...contextMenu, isOpen: false });
 
     try {
       const selected = await open({
         multiple: false,
         directory: false,
         filters: [
-          {
-            name: 'Images',
-            extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'],
-          },
+          { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] },
         ],
       });
+      if (!selected || typeof selected !== 'string') return;
 
-      if (selected && typeof selected === 'string') {
-        const updatedProject = await relinkMedia(project.id, contextMenu.media.id, selected);
-        setProject(updatedProject);
-        // Remove from missing set
-        setMissingMediaIds((prev) => {
-          const next = new Set(prev);
-          next.delete(contextMenu.media!.id);
-          return next;
+      const chosenName = selected.split(/[\\/]/).pop() || '';
+      const nameMatch = chosenName.toLowerCase() === media.fileName.toLowerCase();
+
+      // Without reading the picked file we can't compare size/dimensions
+      // here. Filename mismatch is the only cheap signal — surface a confirm
+      // dialog mirroring the Lightroom UX. The backend will refresh dims
+      // and size after the relink applies.
+      if (!nameMatch) {
+        setSingleRelinkConfirm({
+          isOpen: true,
+          media,
+          selectedPath: selected,
+          reason: `Filename differs: "${media.fileName}" → "${chosenName}"`,
         });
+        return;
       }
+
+      await applySingleRelink(media.id, selected);
     } catch (error) {
       console.error('Failed to relink media:', error);
     }
-    setContextMenu({ ...contextMenu, isOpen: false });
-  }, [contextMenu, project, setProject]);
+  }, [contextMenu, project, applySingleRelink]);
+
+  // "Relink N selected…" — folder picker, bulk relink only the selected
+  // items that are currently flagged missing.
+  const handleRelinkSelected = useCallback(async () => {
+    setContextMenu((prev) => ({ ...prev, isOpen: false }));
+    const ids = selectedMediaIds.filter((id) => missingMediaIds.has(id));
+    if (ids.length === 0) return;
+    await startBulkRelink(ids);
+  }, [selectedMediaIds, missingMediaIds, startBulkRelink]);
 
   const handleContextMenuPreview = useCallback(async () => {
     if (!contextMenu.media) {
@@ -507,9 +788,15 @@ export function MediaPoolPanel() {
       if (isMissing) return null;
       // Use thumbnail if available for better performance
       const path = media.thumbnailPath || media.filePath;
-      return convertFileSrc(path);
+      const url = convertFileSrc(path);
+      // Append a cache-bust query when the media has been relinked in this
+      // session — the thumbnail file at `path` has changed on disk but the
+      // URL is identical, so without ?v=N the browser would serve the old
+      // cached bytes.
+      const v = thumbnailVersions.get(media.id);
+      return v ? `${url}?v=${v}` : url;
     },
-    []
+    [thumbnailVersions]
   );
 
   return (
@@ -610,15 +897,19 @@ export function MediaPoolPanel() {
           </div>
 
           {/* Media grid */}
-          <div className="flex-1 overflow-y-auto overflow-x-hidden">
+          <div
+            className="flex-1 overflow-y-auto overflow-x-hidden"
+            onContextMenu={handleEmptyAreaContextMenu}
+          >
             {/* Extra padding to prevent ring clipping */}
-            <div className="p-1">
+            <div className="p-1" onContextMenu={handleEmptyAreaContextMenu}>
               <div
                 className="grid justify-start"
                 style={{
                   gridTemplateColumns: `repeat(auto-fill, ${thumbnailSize}px)`,
                   gap: `${gap}px`,
                 }}
+                onContextMenu={handleEmptyAreaContextMenu}
               >
                 {mediaPool.map((media) => (
                   <div
@@ -645,13 +936,24 @@ export function MediaPoolPanel() {
         </>
       )}
 
-      {/* Import button */}
-      <button
-        onClick={handleImport}
-        className="mt-3 w-full py-2 border border-dashed border-theme-border rounded text-sm text-theme-text-secondary hover:border-blue-500 hover:text-blue-500 transition-colors"
-      >
-        + Import Media
-      </button>
+      {/* Import + Relink-all-missing buttons */}
+      <div className="mt-3 flex gap-2">
+        <button
+          onClick={handleImport}
+          className="flex-1 py-2 border border-dashed border-theme-border rounded text-sm text-theme-text-secondary hover:border-blue-500 hover:text-blue-500 transition-colors"
+        >
+          + Import Media
+        </button>
+        {missingMediaIds.size > 0 && (
+          <button
+            onClick={() => void startBulkRelink()}
+            className="px-3 py-2 border border-dashed border-amber-500/60 text-amber-500 rounded text-sm hover:bg-amber-500/10 transition-colors whitespace-nowrap"
+            title={`Relink ${missingMediaIds.size} missing item${missingMediaIds.size === 1 ? '' : 's'}`}
+          >
+            {`⚠ Relink ${missingMediaIds.size}`}
+          </button>
+        )}
+      </div>
 
       {/* Selected media info */}
       {selectedMediaIds.length > 0 && (
@@ -709,11 +1011,53 @@ export function MediaPoolPanel() {
           x={contextMenu.x}
           y={contextMenu.y}
           isMissing={missingMediaIds.has(contextMenu.media.id)}
+          selectedMissingCount={
+            selectedMediaIds.includes(contextMenu.media.id)
+              ? selectedMediaIds.filter((id) => missingMediaIds.has(id)).length
+              : 1
+          }
           onClose={() => setContextMenu({ ...contextMenu, isOpen: false })}
           onShowInFinder={handleShowInFinder}
           onRelink={handleRelink}
+          onRelinkSelected={handleRelinkSelected}
           onPreview={handleContextMenuPreview}
           onDelete={handleContextMenuDelete}
+        />
+      )}
+
+      {/* Empty-area context menu (right-click on the grid background) */}
+      {emptyContextMenu.isOpen && (
+        <EmptyAreaContextMenu
+          x={emptyContextMenu.x}
+          y={emptyContextMenu.y}
+          missingCount={missingMediaIds.size}
+          onClose={() => setEmptyContextMenu({ ...emptyContextMenu, isOpen: false })}
+          onRelinkAll={() => {
+            setEmptyContextMenu({ ...emptyContextMenu, isOpen: false });
+            void startBulkRelink();
+          }}
+        />
+      )}
+
+      {/* Single-file relink mismatch confirm */}
+      <ConfirmDialog
+        isOpen={singleRelinkConfirm.isOpen}
+        onClose={() => setSingleRelinkConfirm({ ...singleRelinkConfirm, isOpen: false })}
+        onConfirm={async () => {
+          const { media, selectedPath } = singleRelinkConfirm;
+          setSingleRelinkConfirm({ isOpen: false, media: null, selectedPath: '', reason: '' });
+          if (media) await applySingleRelink(media.id, selectedPath);
+        }}
+        title="File doesn't appear to match"
+        message={`${singleRelinkConfirm.reason}\n\nRelink anyway?`}
+        confirmLabel="Relink"
+      />
+
+      {/* Bulk relink summary toast */}
+      {relinkSummary && (
+        <RelinkSummaryToast
+          summary={relinkSummary}
+          onDismiss={() => setRelinkSummary(null)}
         />
       )}
     </div>

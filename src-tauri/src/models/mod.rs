@@ -19,6 +19,12 @@ pub struct MediaItem {
     pub thumbnail_path: Option<String>,
     pub width: u32,
     pub height: u32,
+    // Exact byte size from fs::metadata. Used for matching during relink
+    // (filename + size + dimensions = high-confidence match). Zero for
+    // legacy entries imported before this field existed — backfilled
+    // lazily when the project loads.
+    #[serde(default)]
+    pub file_size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
