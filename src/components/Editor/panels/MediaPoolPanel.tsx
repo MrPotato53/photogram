@@ -54,17 +54,21 @@ const MediaItemComponent = memo(function MediaItemComponent({
       className={clsx(
         'aspect-square rounded overflow-hidden cursor-grab relative select-none',
         showNativeAspectRatio ? 'bg-theme-bg-tertiary/50' : 'bg-theme-bg-tertiary',
-        isSelected
-          ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-theme-bg-secondary'
-          : 'hover:ring-2 hover:ring-theme-border',
-        isDragging && 'opacity-50 cursor-grabbing',
-        isMissing && 'ring-2 ring-red-500/50'
+        // Selection ring is keyed to missing state so the blue/red layers
+        // don't clobber each other (both set the same Tailwind ring vars).
+        // Missing + selected → bright amber with offset: distinct from both
+        // "just missing" (dim red) and "selected linked" (blue).
+        isSelected && isMissing && 'ring-2 ring-amber-400 ring-offset-2 ring-offset-theme-bg-secondary',
+        isSelected && !isMissing && 'ring-2 ring-blue-500 ring-offset-2 ring-offset-theme-bg-secondary',
+        !isSelected && isMissing && 'ring-2 ring-red-500/50',
+        !isSelected && !isMissing && 'hover:ring-2 hover:ring-theme-border',
+        isDragging && 'opacity-50 cursor-grabbing'
       )}
       title={isMissing ? `${media.fileName} (Missing)` : media.fileName}
     >
       {isMissing ? (
-        <div className="w-full h-full flex flex-col items-center justify-center text-red-400">
-          <svg className="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <div className="w-full h-full flex flex-col items-center justify-center text-red-400 px-1 gap-0.5">
+          <svg className="w-6 h-6 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -72,7 +76,16 @@ const MediaItemComponent = memo(function MediaItemComponent({
               d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
             />
           </svg>
-          <span className="text-[10px] text-center px-1 truncate w-full">Missing</span>
+          {/* End-anchored filename: shows the most distinguishing trailing
+              characters when the tile is too narrow for the full name
+              (e.g. "…IMG_0421.jpg"). direction:rtl flips truncation to the
+              left side while keeping ltr text order via the bdi wrapper. */}
+          <span
+            className="text-[10px] leading-tight text-center w-full overflow-hidden whitespace-nowrap"
+            style={{ direction: 'rtl', textOverflow: 'ellipsis' }}
+          >
+            <bdi>{media.fileName}</bdi>
+          </span>
         </div>
       ) : (
         <div className={clsx(

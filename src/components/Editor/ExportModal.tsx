@@ -4,6 +4,7 @@ import { Modal, Button } from '../common';
 import type { ExportOptions } from '../../services/tauri';
 import type { AspectRatio } from '../../types';
 import { getDesignSize } from '../../utils/designConstants';
+import { usePreferencesStore } from '../../stores/preferencesStore';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -24,16 +25,21 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   onExport,
   renderSlideThumbnail,
 }) => {
-  // Calculate design size and Instagram optimal multiplier
+  // Calculate design size; Instagram targets are always 1080-wide finals so
+  // multipliers scale relative to that base, not the design's native width.
   const designSize = useMemo(() => getDesignSize(aspectRatio), [aspectRatio]);
-  const instagramMultiplier = useMemo(() => 1080 / designSize.width, [designSize.width]);
+  const instagramBaseMultiplier = useMemo(() => 1080 / designSize.width, [designSize.width]);
+
+  const preferences = usePreferencesStore((s) => s.preferences);
+  const setDefaultExportResolution = usePreferencesStore((s) => s.setDefaultExportResolution);
+  const userDefaultKey = preferences.defaultExportResolution || 'instagram2x';
 
   const [selectedSlides, setSelectedSlides] = useState<Set<number>>(
     new Set(Array.from({ length: numSlides }, (_, i) => i))
   );
   const [format, setFormat] = useState<'png' | 'jpeg'>('png');
   const [quality, setQuality] = useState(90); // 0-100
-  const [resolution, setResolution] = useState(instagramMultiplier); // Default to Instagram optimal
+  const [resolutionKey, setResolutionKey] = useState<string>(userDefaultKey);
   const [outputFolder, setOutputFolder] = useState<string | null>(null);
 
   // Generate ALL thumbnails synchronously once when the modal opens, then
@@ -52,56 +58,59 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     setThumbnails(all);
   }, [isOpen, numSlides, renderSlideThumbnail]);
 
-  // Calculate output dimensions for a given multiplier
-  const getOutputDimensions = useCallback((multiplier: number) => {
-    const width = Math.round(designSize.width * multiplier);
-    const height = Math.round(designSize.height * multiplier);
-    return { width, height };
-  }, [designSize]);
+  // Resolution presets. Each carries a stable `key` (persistable as user
+  // default) and a `multiplier` evaluated against the design's pixel width.
+  // Instagram presets target a *fixed* final width (1080/2160/3240) so the
+  // multiplier varies per aspect ratio. "Native" matches design dimensions.
+  // 4x dropped per quality analysis (negligible gain past 3x, 16x file size).
+  const resolutionOptions = useMemo(() => {
+    const fmtDims = (mult: number) =>
+      `${Math.round(designSize.width * mult)} × ${Math.round(designSize.height * mult)}`;
+    return [
+      {
+        key: 'instagram1x',
+        label: 'Instagram (1080)',
+        description: fmtDims(instagramBaseMultiplier),
+        multiplier: instagramBaseMultiplier,
+        note: 'Single compression pass — softer detail',
+      },
+      {
+        key: 'instagram2x',
+        label: 'Instagram (2160)',
+        description: fmtDims(instagramBaseMultiplier * 2),
+        multiplier: instagramBaseMultiplier * 2,
+        note: 'Recommended — sharpest after Instagram resize',
+      },
+      {
+        key: 'instagram3x',
+        label: 'Instagram (3240) — high detail',
+        description: fmtDims(instagramBaseMultiplier * 3),
+        multiplier: instagramBaseMultiplier * 3,
+        note: 'For fine textures (hair, small text). 9× the file size of 1x.',
+      },
+      {
+        key: 'native1x',
+        label: 'Native size',
+        description: fmtDims(1),
+        multiplier: 1,
+        note: 'Exact design dimensions — for non-Instagram use',
+      },
+    ];
+  }, [designSize, instagramBaseMultiplier]);
 
-  // Resolution options with labels
-  const resolutionOptions = useMemo(() => [
-    {
-      value: instagramMultiplier,
-      label: 'Instagram',
-      description: (() => {
-        const dims = getOutputDimensions(instagramMultiplier);
-        return `${dims.width} × ${dims.height}`;
-      })(),
-    },
-    {
-      value: 1,
-      label: '1x',
-      description: (() => {
-        const dims = getOutputDimensions(1);
-        return `${dims.width} × ${dims.height}`;
-      })(),
-    },
-    {
-      value: 2,
-      label: '2x',
-      description: (() => {
-        const dims = getOutputDimensions(2);
-        return `${dims.width} × ${dims.height}`;
-      })(),
-    },
-    {
-      value: 3,
-      label: '3x',
-      description: (() => {
-        const dims = getOutputDimensions(3);
-        return `${dims.width} × ${dims.height}`;
-      })(),
-    },
-    {
-      value: 4,
-      label: '4x',
-      description: (() => {
-        const dims = getOutputDimensions(4);
-        return `${dims.width} × ${dims.height}`;
-      })(),
-    },
-  ], [instagramMultiplier, getOutputDimensions]);
+  // Resolve current selection (always exists because state defaults to a
+  // valid key; if a stored preference key was removed, fall back to default).
+  const selectedOption =
+    resolutionOptions.find((o) => o.key === resolutionKey) ?? resolutionOptions[1];
+  const resolution = selectedOption.multiplier;
+
+  // If a preset key from a prior version has been retired (e.g. legacy "4x"),
+  // snap the selection back to a real option so the radio reflects state.
+  useEffect(() => {
+    if (!resolutionOptions.some((o) => o.key === resolutionKey)) {
+      setResolutionKey(resolutionOptions[1].key);
+    }
+  }, [resolutionOptions, resolutionKey]);
 
   const toggleSlide = useCallback((index: number) => {
     setSelectedSlides((prev) => {
@@ -310,28 +319,54 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
         {/* Resolution Multiplier */}
         <div>
-          <label className="text-sm font-medium text-theme-text mb-2 block">
-            Resolution:
-          </label>
-          <div className="flex flex-col gap-2">
-            {resolutionOptions.map((option) => (
-              <label
-                key={option.value}
-                className="flex items-center gap-2 cursor-pointer"
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-sm font-medium text-theme-text">
+              Resolution:
+            </label>
+            {/* Save-as-default chip: appears only when the current selection
+                doesn't match the persisted preference. One click promotes it. */}
+            {resolutionKey !== userDefaultKey && (
+              <button
+                type="button"
+                onClick={() => void setDefaultExportResolution(resolutionKey)}
+                className="text-xs px-2 py-0.5 rounded border border-blue-500/50 text-blue-400 hover:bg-blue-500/10 transition-colors"
+                title="Remember this choice for future exports"
               >
-                <input
-                  type="radio"
-                  name="resolution"
-                  value={option.value}
-                  checked={Math.abs(resolution - option.value) < 0.001}
-                  onChange={() => setResolution(option.value)}
-                  className="w-4 h-4 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
-                />
-                <span className="text-sm text-theme-text">
-                  {option.label} <span className="text-theme-text-muted">({option.description})</span>
-                </span>
-              </label>
-            ))}
+                Use as default
+              </button>
+            )}
+          </div>
+          <div className="flex flex-col gap-2">
+            {resolutionOptions.map((option) => {
+              const isSelected = resolutionKey === option.key;
+              const isUserDefault = option.key === userDefaultKey;
+              return (
+                <label key={option.key} className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="resolution"
+                    value={option.key}
+                    checked={isSelected}
+                    onChange={() => setResolutionKey(option.key)}
+                    className="w-4 h-4 mt-0.5 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+                  />
+                  <div className="flex-1">
+                    <div className="text-sm text-theme-text">
+                      {option.label}{' '}
+                      <span className="text-theme-text-muted">({option.description})</span>
+                      {isUserDefault && (
+                        <span className="ml-1 text-[10px] uppercase tracking-wide text-blue-400">
+                          default
+                        </span>
+                      )}
+                    </div>
+                    {option.note && (
+                      <div className="text-xs text-theme-text-muted mt-0.5">{option.note}</div>
+                    )}
+                  </div>
+                </label>
+              );
+            })}
           </div>
         </div>
 

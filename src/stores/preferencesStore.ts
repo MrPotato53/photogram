@@ -8,11 +8,13 @@ interface PreferencesState {
   loadPreferences: () => Promise<void>;
   setTheme: (theme: Preferences['theme']) => Promise<void>;
   setSortBy: (sortBy: Preferences['sortBy']) => Promise<void>;
+  setDefaultExportResolution: (key: string) => Promise<void>;
 }
 
 const defaultPreferences: Preferences = {
   theme: 'dark',
   sortBy: 'accessedAt',
+  defaultExportResolution: 'instagram2x',
 };
 
 export const usePreferencesStore = create<PreferencesState>((set, get) => ({
@@ -22,8 +24,14 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   loadPreferences: async () => {
     try {
       const prefs = await getPreferences();
-      set({ preferences: prefs, isLoading: false });
-      applyTheme(prefs.theme);
+      // Fill defaults for any field missing from older on-disk configs.
+      const merged: Preferences = {
+        ...defaultPreferences,
+        ...prefs,
+        defaultExportResolution: prefs.defaultExportResolution || defaultPreferences.defaultExportResolution,
+      };
+      set({ preferences: merged, isLoading: false });
+      applyTheme(merged.theme);
     } catch (error) {
       console.error('Failed to load preferences:', error);
       set({ isLoading: false });
@@ -44,6 +52,16 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
 
   setSortBy: async (sortBy) => {
     const newPrefs = { ...get().preferences, sortBy };
+    set({ preferences: newPrefs });
+    try {
+      await savePreferences(newPrefs);
+    } catch (error) {
+      console.error('Failed to save preferences:', error);
+    }
+  },
+
+  setDefaultExportResolution: async (key) => {
+    const newPrefs = { ...get().preferences, defaultExportResolution: key };
     set({ preferences: newPrefs });
     try {
       await savePreferences(newPrefs);
