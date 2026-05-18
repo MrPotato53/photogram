@@ -108,6 +108,10 @@ export interface Preferences {
   // the app default ("instagram2x"). Not typed as a union so new presets
   // can be added without breaking older user configs on disk.
   defaultExportResolution: string;
+  // User-customized keyboard shortcut overrides. action-id → normalized
+  // binding (e.g. "mod+shift+t"). Empty string = explicitly cleared.
+  // Missing keys fall back to the registry default at lookup time.
+  keyboardShortcuts: Record<string, string>;
 }
 
 export type SortOption = {

@@ -5,9 +5,10 @@ import clsx from 'clsx';
 interface PreferencesModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onOpenShortcuts: () => void;
 }
 
-export function PreferencesModal({ isOpen, onClose }: PreferencesModalProps) {
+export function PreferencesModal({ isOpen, onClose, onOpenShortcuts }: PreferencesModalProps) {
   const { preferences, setTheme } = usePreferencesStore();
 
   return (
@@ -65,6 +66,36 @@ export function PreferencesModal({ isOpen, onClose }: PreferencesModalProps) {
               Dark
             </button>
           </div>
+        </div>
+
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-theme-text-secondary">Input</label>
+          <button
+            onClick={() => {
+              onClose();
+              onOpenShortcuts();
+            }}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-md border border-theme-border bg-theme-bg-tertiary text-sm text-theme-text hover:border-theme-border-hover transition-colors"
+          >
+            <span className="flex items-center gap-2">
+              <svg className="w-4 h-4 text-theme-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M3 8a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z"
+                />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"
+                />
+              </svg>
+              Keyboard Shortcuts…
+            </span>
+            <span className="text-theme-text-muted text-xs">customize</span>
+          </button>
         </div>
 
         <div className="flex justify-end">

@@ -215,6 +215,12 @@ pub struct Preferences {
     // (not enum) so adding new presets later doesn't break older configs.
     #[serde(default)]
     pub default_export_resolution: String,
+    // User-customized keyboard shortcuts. Map of action-id → normalized
+    // binding string (e.g. "mod+shift+t"). Only contains overrides — actions
+    // not present here use the registry default. Empty value means the
+    // action was explicitly cleared by the user (no binding fires it).
+    #[serde(default)]
+    pub keyboard_shortcuts: std::collections::HashMap<String, String>,
 }
 
 impl Preferences {
@@ -223,6 +229,7 @@ impl Preferences {
             theme: "dark".to_string(),
             sort_by: "accessedAt".to_string(),
             default_export_resolution: "instagram2x".to_string(),
+            keyboard_shortcuts: std::collections::HashMap::new(),
         }
     }
 }
