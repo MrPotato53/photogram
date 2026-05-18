@@ -1,8 +1,10 @@
 use crate::models::{AspectRatio, Project, ProjectSummary};
 use chrono::Utc;
 use std::fs;
-use tauri::{command, AppHandle, Manager};
+use std::path::PathBuf;
+use tauri::{command, AppHandle, Emitter, Manager};
 use super::utils::paths::{get_projects_dir, get_thumbnails_dir, get_assets_dir};
+use super::utils::image_processing::{generate_thumbnail, get_image_dimensions, THUMBNAIL_MAX_SIDE};
 
 #[command]
 pub fn get_all_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
@@ -49,6 +51,31 @@ pub fn get_project(app: AppHandle, id: String) -> Result<Project, String> {
         }
     }
 
+    // Detect thumbnails generated at the old smaller resolution. Reading
+    // dimensions is cheap (the image crate does a header-only decode). Any
+    // thumbnail whose largest side is meaningfully smaller than the current
+    // THUMBNAIL_MAX_SIDE gets queued for background regeneration so the
+    // upgraded media-pool zoom range (up to 500%) isn't blurry. The
+    // tolerance avoids re-queueing thumbnails generated from narrow source
+    // images (where the largest side can legitimately be < the target).
+    let mut regen_jobs: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+    for media in project.media_pool.iter() {
+        let Some(ref thumb_path_str) = media.thumbnail_path else { continue };
+        let thumb_pb = PathBuf::from(thumb_path_str);
+        if !thumb_pb.exists() { continue }
+        let Some((tw, th)) = get_image_dimensions(&thumb_pb) else { continue };
+        // Source might itself be small. Take the smaller of THUMBNAIL_MAX_SIDE
+        // and source-largest-side as the required floor.
+        let source_pb = PathBuf::from(&media.file_path);
+        let source_largest = get_image_dimensions(&source_pb)
+            .map(|(w, h)| w.max(h))
+            .unwrap_or(THUMBNAIL_MAX_SIDE);
+        let required = THUMBNAIL_MAX_SIDE.min(source_largest);
+        if tw.max(th) + 64 < required {
+            regen_jobs.push((media.id.clone(), source_pb, thumb_pb));
+        }
+    }
+
     // Update accessed_at timestamp
     project.accessed_at = Utc::now();
     let json = serde_json::to_string_pretty(&project)
@@ -58,6 +85,22 @@ pub fn get_project(app: AppHandle, id: String) -> Result<Project, String> {
     // Silence unused warning when no backfill occurred — write happens
     // regardless because accessed_at changed.
     let _ = backfilled;
+
+    // Run regeneration in the background. The frontend's existing
+    // `thumbnails-ready` listener re-fetches the project once the batch
+    // finishes, which (combined with the cache-bust versioning the media
+    // pool applies on file path changes) swaps the higher-res bytes in.
+    if !regen_jobs.is_empty() {
+        let app_handle = app.clone();
+        std::thread::spawn(move || {
+            for (_media_id, source_path, thumb_path) in &regen_jobs {
+                if source_path.exists() {
+                    let _ = generate_thumbnail(source_path, thumb_path);
+                }
+            }
+            let _ = app_handle.emit("thumbnails-ready", ());
+        });
+    }
 
     Ok(project)
 }

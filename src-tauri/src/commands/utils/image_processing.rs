@@ -3,7 +3,14 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 
-/// Generate a thumbnail for the media pool (256x256, JPEG quality 85)
+/// Maximum thumbnail side length. Sized to support the media pool's 500%
+/// zoom on 2x-DPR displays (80 base × 5 zoom × 2 DPR = 800 raster pixels,
+/// rounded up with headroom). Bumping this requires regenerating older
+/// thumbnails — see backfill in `get_project`.
+pub const THUMBNAIL_MAX_SIDE: u32 = 1024;
+
+/// Generate a thumbnail for the media pool. Resizes the largest side to
+/// THUMBNAIL_MAX_SIDE preserving aspect ratio. JPEG quality 85.
 pub fn generate_thumbnail(source_path: &PathBuf, thumb_path: &PathBuf) -> Result<(), String> {
     use image::imageops::FilterType;
 
@@ -15,9 +22,8 @@ pub fn generate_thumbnail(source_path: &PathBuf, thumb_path: &PathBuf) -> Result
     let orientation = get_exif_orientation(source_path).unwrap_or(1);
     let img = apply_exif_orientation(img, orientation);
 
-    // Resize to thumbnail (256x256 max, maintaining aspect ratio)
-    // Use Lanczos3 for better quality at larger thumbnail sizes
-    let thumb = img.resize(256, 256, FilterType::Lanczos3);
+    // Resize so the larger side equals THUMBNAIL_MAX_SIDE, preserving aspect.
+    let thumb = img.resize(THUMBNAIL_MAX_SIDE, THUMBNAIL_MAX_SIDE, FilterType::Lanczos3);
 
     // Save as JPEG with quality 85
     thumb.save(thumb_path)

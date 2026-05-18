@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback, memo } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import clsx from 'clsx';
 import { useProjectStore } from '../../../stores/projectStore';
@@ -14,7 +15,7 @@ import { preloadImage } from '../../../utils/imageCache';
 
 // Zoom settings
 const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 2;
+const MAX_ZOOM = 5;
 const ZOOM_STEP = 0.25;
 const BASE_THUMBNAIL_SIZE = 80; // Base size in pixels at 100% zoom
 
@@ -336,10 +337,14 @@ export function MediaPoolPanel() {
   const [missingMediaIds, setMissingMediaIds] = useState<Set<string>>(new Set());
 
   // Per-media thumbnail cache-bust version. Thumbnails regenerate at the
-  // SAME path on disk after relink ({media_id}.jpg), so the browser would
-  // serve the cached old image until session restart. Bumping this version
-  // appends ?v=N to the URL — forces a fresh fetch once the backend has
-  // written the new bytes (after `thumbnails-ready` fires).
+  // SAME path on disk (e.g. {media_id}.jpg) after relink or backend-side
+  // resolution bumps, so the browser would otherwise serve the cached old
+  // bytes until session restart. Bumping the version appends ?v=N to the
+  // URL — forces a fresh fetch.
+  //
+  // The thumbnails-ready listener below bumps versions for every media id
+  // so old low-res thumbnails get refreshed once the backend regenerates
+  // them. Per-id targeted bumps still come from the relink handlers.
   const [thumbnailVersions, setThumbnailVersions] = useState<Map<string, number>>(new Map());
   const bumpThumbnailVersions = useCallback((ids: string[]) => {
     if (ids.length === 0) return;
@@ -433,6 +438,20 @@ export function MediaPoolPanel() {
     };
     checkMissingMedia();
   }, [mediaPool]);
+
+  // Bump every cache-bust version when the backend signals thumbnails were
+  // regenerated. Covers backend-initiated regens (initial bulk-import, the
+  // higher-resolution thumbnail backfill in get_project) where the file
+  // path is unchanged but the bytes on disk are new.
+  useEffect(() => {
+    const unlistenPromise = listen('thumbnails-ready', () => {
+      const ids = mediaPool.map((m) => m.id);
+      bumpThumbnailVersions(ids);
+    });
+    return () => {
+      void unlistenPromise.then((fn) => fn());
+    };
+  }, [mediaPool, bumpThumbnailVersions]);
 
   // Listen for Tauri drag-drop events from file explorer
   useEffect(() => {

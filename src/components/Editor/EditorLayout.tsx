@@ -19,9 +19,11 @@ import { ExportModal } from './ExportModal';
 import { ExportProgressToast } from './ExportProgressToast';
 import { PreviewModal } from './PreviewModal';
 import { TemplatePickerModal } from './TemplatePickerModal';
+import { KeyboardShortcutsModal } from '../KeyboardShortcutsModal';
 import type { Template } from '../../types';
 import { exportSlides, showInFolder, type ExportOptions } from '../../services/tauri';
 import { useEditorShortcuts } from '../../hooks/useEditorShortcuts';
+import { useShortcutsStore } from '../../stores/shortcutsStore';
 
 interface EditorLayoutProps {
   projectId: string;
@@ -100,9 +102,13 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
     };
   }, [draggingMediaId]);
 
+  const isShortcutsModalOpen = useShortcutsStore((s) => s.modalOpen);
+  const setIsShortcutsModalOpen = useShortcutsStore((s) => s.setModalOpen);
+
   useEditorShortcuts({
     onPreview: useCallback(() => setIsPreviewModalOpen(true), []),
     onExport: useCallback(() => setIsExportModalOpen(true), []),
+    onOpenShortcuts: useCallback(() => setIsShortcutsModalOpen(true), [setIsShortcutsModalOpen]),
   });
 
   // Export handler — runs after modal closes. Yields to the event loop between
@@ -323,6 +329,12 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
         onClose={() => setTemplatePickerOpen(false)}
         onSelect={handleSelectTemplate}
         aspectRatio={project.aspectRatio}
+      />
+
+      {/* Keyboard shortcuts (Cmd+/ or menu) */}
+      <KeyboardShortcutsModal
+        isOpen={isShortcutsModalOpen}
+        onClose={() => setIsShortcutsModalOpen(false)}
       />
     </div>
   );

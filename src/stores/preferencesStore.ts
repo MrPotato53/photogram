@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { Preferences } from '../types';
 import { getPreferences, savePreferences } from '../services/tauri';
+import { useShortcutsStore } from './shortcutsStore';
 
 interface PreferencesState {
   preferences: Preferences;
@@ -9,12 +10,15 @@ interface PreferencesState {
   setTheme: (theme: Preferences['theme']) => Promise<void>;
   setSortBy: (sortBy: Preferences['sortBy']) => Promise<void>;
   setDefaultExportResolution: (key: string) => Promise<void>;
+  /** Replace the keyboard shortcut overrides + persist. */
+  setKeyboardShortcuts: (overrides: Record<string, string>) => Promise<void>;
 }
 
 const defaultPreferences: Preferences = {
   theme: 'dark',
   sortBy: 'accessedAt',
   defaultExportResolution: 'instagram2x',
+  keyboardShortcuts: {},
 };
 
 export const usePreferencesStore = create<PreferencesState>((set, get) => ({
@@ -29,9 +33,12 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         ...defaultPreferences,
         ...prefs,
         defaultExportResolution: prefs.defaultExportResolution || defaultPreferences.defaultExportResolution,
+        keyboardShortcuts: prefs.keyboardShortcuts || {},
       };
       set({ preferences: merged, isLoading: false });
       applyTheme(merged.theme);
+      // Push the persisted overrides into the live shortcut matcher.
+      useShortcutsStore.getState().setOverrides(merged.keyboardShortcuts);
     } catch (error) {
       console.error('Failed to load preferences:', error);
       set({ isLoading: false });
@@ -63,6 +70,17 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   setDefaultExportResolution: async (key) => {
     const newPrefs = { ...get().preferences, defaultExportResolution: key };
     set({ preferences: newPrefs });
+    try {
+      await savePreferences(newPrefs);
+    } catch (error) {
+      console.error('Failed to save preferences:', error);
+    }
+  },
+
+  setKeyboardShortcuts: async (overrides) => {
+    const newPrefs = { ...get().preferences, keyboardShortcuts: overrides };
+    set({ preferences: newPrefs });
+    useShortcutsStore.getState().setOverrides(overrides);
     try {
       await savePreferences(newPrefs);
     } catch (error) {

@@ -7,6 +7,9 @@ interface UseCanvasKeyboardOptions {
   elements: Element[];
   cropModeElementId: string | null;
   onSelectElement: (id: string | null) => void;
+  // Like onSelectElement but also bumps focusRequestId so the canvas
+  // switches slides and scrolls the element into view. Used by Tab cycle.
+  onFocusElement: (id: string) => void;
   onUpdateElement: (id: string, updates: Partial<Element>) => void;
   onRemoveElement: (id: string) => void;
   onEnterCropMode: (id: string) => void;
@@ -36,6 +39,7 @@ export function useCanvasKeyboard({
   elements,
   cropModeElementId,
   onSelectElement,
+  onFocusElement,
   onUpdateElement,
   onRemoveElement,
   onEnterCropMode,
@@ -148,7 +152,9 @@ export function useCanvasKeyboard({
       }
 
       // Tab / Shift+Tab — cycle selection left-to-right through elements,
-      // using x (then y as tiebreak). Wraps at either end.
+      // using x (then y as tiebreak). Wraps at either end. Uses focusElement
+      // so the canvas switches slides and scrolls the new selection into
+      // view (matches the behavior of clicking an element).
       if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         if (elements.length === 0) return;
         e.preventDefault();
@@ -160,7 +166,7 @@ export function useCanvasKeyboard({
         const nextIdx = currentIdx === -1
           ? (step === 1 ? 0 : ordered.length - 1)
           : (currentIdx + step + ordered.length) % ordered.length;
-        onSelectElement(ordered[nextIdx].id);
+        onFocusElement(ordered[nextIdx].id);
         return;
       }
 

@@ -50,6 +50,11 @@ const MAX_SLIDES = 20;
 // every extra pixel of Stage grows the GPU composite cost on every redraw.
 const STAGE_OVERFLOW = 60;
 
+// Extra paddingTop above STAGE_OVERFLOW. Reserved exclusively for the slide
+// number tags ({CanvasSlideIndicators} renders at -20 from stageContainer
+// top, so anything less than ~24 here would clip them at default zoom).
+const SLIDE_INDICATOR_GUTTER = 30;
+
 export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideThumbnail, onRenderSlideForPreview }: CanvasAreaProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -75,6 +80,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // Element store
   const selectedElementId = useElementStore((s) => s.selectedElementId);
   const selectElement = useElementStore((s) => s.selectElement);
+  const focusElement = useElementStore((s) => s.focusElement);
   const focusRequestId = useElementStore((s) => s.focusRequestId);
   const updateElement = useElementStore((s) => s.updateElement);
   const updateElementLocal = useElementStore((s) => s.updateElementLocal);
@@ -426,10 +432,12 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
       const targetRatio = aspectRatio.width / aspectRatio.height;
 
-      // Canvas fills the viewport vertically at default zoom. The Stage's
-      // handle-rendering buffer is absorbed by scrollContainer's padding
-      // (which lives outside the viewport via negative inset — see render).
-      const height = Math.max(200, containerHeight);
+      // Canvas fills the viewport vertically at default zoom, minus the
+      // SLIDE_INDICATOR_GUTTER reserved at the top for the slide number
+      // tags. The Stage's handle-rendering buffer is absorbed by
+      // scrollContainer's padding (which lives outside the viewport via
+      // negative inset — see render).
+      const height = Math.max(200, containerHeight - SLIDE_INDICATOR_GUTTER);
       const width = height * targetRatio;
 
       // Only update if values actually changed — avoids expensive re-render
@@ -569,6 +577,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     elements,
     cropModeElementId,
     onSelectElement: selectElement,
+    onFocusElement: focusElement,
     onUpdateElement: updateElement,
     onRemoveElement: removeElement,
     onEnterCropMode: enterCropMode,
@@ -1763,7 +1772,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
           bottom: -stageOverflow,
           left: 0,
           right: 0,
-          paddingTop: stageOverflow,
+          // Extra top gutter is asymmetric on purpose: it reserves room
+          // for the slide number indicators which render above the canvas.
+          paddingTop: stageOverflow + SLIDE_INDICATOR_GUTTER,
           paddingBottom: stageOverflow,
         }}
       >

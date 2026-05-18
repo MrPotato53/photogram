@@ -335,8 +335,8 @@ function SnapSettingsPopover({
                     <span className="text-xs text-theme-text-muted">Rows:</span>
                     <NumberInput
                       value={snapSettings.grid.horizontal}
-                      onChange={(val) => updateSnapSettings({ grid: { horizontal: Math.max(2, Math.min(12, val)) } })}
-                      min={2}
+                      onChange={(val) => updateSnapSettings({ grid: { horizontal: Math.max(1, Math.min(12, val)) } })}
+                      min={1}
                       max={12}
                       className="w-14"
                     />
@@ -345,8 +345,8 @@ function SnapSettingsPopover({
                     <span className="text-xs text-theme-text-muted">Cols:</span>
                     <NumberInput
                       value={snapSettings.grid.vertical}
-                      onChange={(val) => updateSnapSettings({ grid: { vertical: Math.max(2, Math.min(12, val)) } })}
-                      min={2}
+                      onChange={(val) => updateSnapSettings({ grid: { vertical: Math.max(1, Math.min(12, val)) } })}
+                      min={1}
                       max={12}
                       className="w-14"
                     />

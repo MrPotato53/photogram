@@ -7,7 +7,9 @@ import { NewProjectCard } from './NewProjectCard';
 import { NewProjectModal } from './NewProjectModal';
 import { RenameModal } from './RenameModal';
 import { PreferencesModal } from './PreferencesModal';
+import { KeyboardShortcutsModal } from '../KeyboardShortcutsModal';
 import { ConfirmDialog, Select } from '../common';
+import { useShortcutsStore } from '../../stores/shortcutsStore';
 import type { AspectRatio } from '../../types';
 
 const SORT_OPTIONS = [
@@ -24,6 +26,24 @@ export function HomePage() {
 
   const [isNewModalOpen, setIsNewModalOpen] = useState(false);
   const [isPreferencesOpen, setIsPreferencesOpen] = useState(false);
+  const isShortcutsOpen = useShortcutsStore((s) => s.modalOpen);
+  const setIsShortcutsOpen = useShortcutsStore((s) => s.setModalOpen);
+
+  // Global Cmd+/ — open the shortcuts modal from anywhere on the home page.
+  // The editor wires this same action through useEditorShortcuts; this
+  // listener is for the home screen where that hook isn't mounted.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      const id = useShortcutsStore.getState().matchEvent(e);
+      if (id === 'openShortcuts') {
+        e.preventDefault();
+        setIsShortcutsOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [setIsShortcutsOpen]);
   const [renameState, setRenameState] = useState<{
     isOpen: boolean;
     id: string;
@@ -183,6 +203,12 @@ export function HomePage() {
       <PreferencesModal
         isOpen={isPreferencesOpen}
         onClose={() => setIsPreferencesOpen(false)}
+        onOpenShortcuts={() => setIsShortcutsOpen(true)}
+      />
+
+      <KeyboardShortcutsModal
+        isOpen={isShortcutsOpen}
+        onClose={() => setIsShortcutsOpen(false)}
       />
 
       <ConfirmDialog
