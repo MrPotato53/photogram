@@ -8,6 +8,7 @@ import { useCropRect } from '../../hooks/crop/useCropRect';
 import { useCropSnapping } from '../../hooks/crop/useCropSnapping';
 import { useCropEdgeHandles } from '../../hooks/crop/useCropEdgeHandles';
 import { findTransformSnap } from '../../utils/snapping';
+import { coverScaleForRotation } from '../../utils/contentRotation';
 import { CropOverlayDarkOverlay } from './CropOverlayDarkOverlay';
 import { CropOverlayHandles } from './CropOverlayHandles';
 import { CropOverlayGrid } from './CropOverlayGrid';
@@ -44,6 +45,12 @@ interface CropOverlayProps {
   numSlides: number;
   // Reset key - when changed, resets crop rect to full bounds
   resetKey?: number;
+  // Live content rotation (degrees) from the crop toolbar's Straighten
+  // slider. Preview-only during crop mode; committed on Apply.
+  contentRotation: number;
+  // Setter for the Straighten value — invoked by crop-local undo/redo to
+  // restore rotation from history entries.
+  onContentRotationChange: (deg: number) => void;
 }
 
 export function CropOverlay({
@@ -63,6 +70,8 @@ export function CropOverlay({
   slideWidth,
   numSlides,
   resetKey,
+  contentRotation,
+  onContentRotationChange,
 }: CropOverlayProps) {
   // Store the existing crop values
   const existingCropX = element.cropX ?? 0;
@@ -112,6 +121,7 @@ export function CropOverlay({
     elementCropY: existingCropY,
     elementCropWidth: existingCropW,
     elementCropHeight: existingCropH,
+    contentRotation,
   });
 
   // Snapping hook
@@ -485,7 +495,8 @@ export function CropOverlay({
     elementCropY: existingCropY,
     elementCropWidth: existingCropW,
     elementCropHeight: existingCropH,
-  }), [cropRect, element.x, element.y, existingCropX, existingCropY, existingCropW, existingCropH]);
+    contentRotation,
+  }), [cropRect, element.x, element.y, existingCropX, existingCropY, existingCropW, existingCropH, contentRotation]);
 
   // Handle corner drag end - clear guides and commit history snapshot
   const handleCornerDragEnd = () => {
@@ -574,6 +585,11 @@ export function CropOverlay({
   // Restore element position on undo/redo signal. useCropRect already
   // handles the rect side of the restore; this effect applies the element
   // position portion so undo reverts shift+pan moves too.
+  // (Declared here, used by both the restore effect and the rotation
+  // watcher below it.)
+  const rotationRestoreInProgressRef = useRef(false);
+  const contentRotationLiveRef = useRef(contentRotation);
+  contentRotationLiveRef.current = contentRotation;
   const restoreVersion = useCropStore((s) => s.restoreVersion);
   const restoreDidMountRef = useRef(false);
   useEffect(() => {
@@ -595,7 +611,46 @@ export function CropOverlay({
       cropWidth: target.elementCropWidth,
       cropHeight: target.elementCropHeight,
     });
-  }, [restoreVersion, onElementDrag, onElementScale]);
+    // Restore Straighten. Mark as history-driven so the rotation-change
+    // watcher below doesn't push this restore as a NEW history entry
+    // (which would truncate the redo stack).
+    if ((target.contentRotation ?? 0) !== contentRotationLiveRef.current) {
+      rotationRestoreInProgressRef.current = true;
+      onContentRotationChange(target.contentRotation ?? 0);
+    }
+  }, [restoreVersion, onElementDrag, onElementScale, onContentRotationChange]);
+
+  // Push a (debounced) history entry when the Straighten slider changes.
+  // Debounce groups a continuous slider drag into one undo step, matching
+  // how the option+scroll scale path batches its entries.
+  const rotationHistoryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const makeEntryRef = useRef(makeCropHistoryEntry);
+  makeEntryRef.current = makeCropHistoryEntry;
+  const rotationMountedRef = useRef(false);
+  useEffect(() => {
+    if (!rotationMountedRef.current) {
+      // Initial mount: the seed value comes from the element, already
+      // captured by initCropHistory — don't double-push.
+      rotationMountedRef.current = true;
+      return;
+    }
+    if (rotationRestoreInProgressRef.current) {
+      // Undo/redo applied this change; not a user edit.
+      rotationRestoreInProgressRef.current = false;
+      return;
+    }
+    if (rotationHistoryTimerRef.current) clearTimeout(rotationHistoryTimerRef.current);
+    rotationHistoryTimerRef.current = setTimeout(() => {
+      rotationHistoryTimerRef.current = null;
+      useCropStore.getState().pushCropHistory(makeEntryRef.current());
+    }, 400);
+    return () => {
+      if (rotationHistoryTimerRef.current) {
+        clearTimeout(rotationHistoryTimerRef.current);
+        rotationHistoryTimerRef.current = null;
+      }
+    };
+  }, [contentRotation]);
 
   // Listen for Enter/Escape keys
   useEffect(() => {
@@ -720,6 +775,7 @@ export function CropOverlay({
           elementCropY: newCropYNorm,
           elementCropWidth: newCropWidth,
           elementCropHeight: newCropHeight,
+          contentRotation: contentRotationLiveRef.current,
         });
       }, 150);
     };
@@ -760,8 +816,64 @@ export function CropOverlay({
   // Render dark overlay - always positioned at current full bounds
   const overlayCropRect = getCropRectForOverlay();
 
+  // ── Content-rotation live preview ────────────────────────────────────
+  // Imperatively transforms the crop-mode full-image node (rendered by
+  // CanvasElementRenderer) so it rotates around the live crop-rect center
+  // with the same cover scale the final render will use. What's inside the
+  // crop rect during editing is therefore exactly the final composition.
+  // Runs after every render (no deps array) so it always re-applies AFTER
+  // react-konva has re-applied JSX props — otherwise a re-render would
+  // stomp the imperative attrs. When rotation is 0 and was never applied,
+  // this is a no-op, leaving every existing crop interaction untouched.
+  const rotationPreviewRef = useRef<Konva.Group>(null);
+  const previewAppliedRef = useRef(false);
+  useEffect(() => {
+    const stage = rotationPreviewRef.current?.getStage();
+    if (!stage) return;
+    const node = stage.findOne(`#${element.id}`) as Konva.Image | undefined;
+    if (!node) return;
+    const flipSX = element.flipX ? -1 : 1;
+    const flipSY = element.flipY ? -1 : 1;
+
+    if (!contentRotation) {
+      if (previewAppliedRef.current) {
+        // Restore the crop-mode base attrs (mirror of the JSX props in
+        // CanvasElementRenderer's isBeingCropped branch).
+        node.offsetX(element.flipX ? fullBounds.width : 0);
+        node.offsetY(element.flipY ? fullBounds.height : 0);
+        node.x(fullBoundsX);
+        node.y(fullBoundsY);
+        node.rotation(element.rotation);
+        node.scaleX(flipSX);
+        node.scaleY(flipSY);
+        node.getLayer()?.batchDraw();
+        previewAppliedRef.current = false;
+      }
+      return;
+    }
+
+    const rect = overlayCropRect;
+    const s = coverScaleForRotation(rect.width, rect.height, contentRotation);
+    // Pivot = crop-rect center, in design coords and in node-local coords.
+    // Local coords must account for flip (local axis runs mirrored).
+    const centerLocalX = rect.x + rect.width / 2;
+    const centerLocalY = rect.y + rect.height / 2;
+    node.offsetX(element.flipX ? fullBounds.width - centerLocalX : centerLocalX);
+    node.offsetY(element.flipY ? fullBounds.height - centerLocalY : centerLocalY);
+    node.x(fullBoundsX + centerLocalX);
+    node.y(fullBoundsY + centerLocalY);
+    node.rotation(element.rotation + contentRotation);
+    node.scaleX(s * flipSX);
+    node.scaleY(s * flipSY);
+    node.getLayer()?.batchDraw();
+    previewAppliedRef.current = true;
+  });
+
   return (
     <>
+      {/* Stage-handle anchor for the rotation preview effect (always mounted) */}
+      <Group ref={rotationPreviewRef} listening={false} />
+
       {/* Dark overlay */}
       <CropOverlayDarkOverlay
         fullBoundsX={fullBoundsX}

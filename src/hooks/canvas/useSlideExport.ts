@@ -99,12 +99,15 @@ export function useSlideExport({ stageRef, project, scale }: UseSlideExportProps
         for (const node of hiddenNodes) {
           node.show();
         }
-        // Re-cache images at display pixelRatio so drag perf isn't degraded
-        // after export. Matches CanvasElementRenderer's cache pixelRatio.
+        // Re-cache images so drag perf isn't degraded after export. Use the
+        // ratio CanvasElementRenderer recorded on the node (which includes
+        // the content-rotation cover factor for rotated images) — falling
+        // back to plain display pixelRatio.
         if (wereCached.length > 0) {
           for (const node of wereCached) {
             try {
-              node.cache({ pixelRatio: displayPixelRatio });
+              const ratio = (node.getAttr('cachePixelRatio') as number | undefined) ?? displayPixelRatio;
+              node.cache({ pixelRatio: ratio });
             } catch {
               // cache() throws on zero-size nodes; safe to skip
             }

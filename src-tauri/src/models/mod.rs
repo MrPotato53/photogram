@@ -55,6 +55,9 @@ pub struct Element {
     pub flip_y: Option<bool>,
     // Last used crop aspect ratio (to remember for next crop)
     pub last_crop_ratio: Option<f64>,
+    // Rotation of the image content inside its (upright) frame, degrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_rotation: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +89,8 @@ pub struct TemplateElement {
     pub crop_height: Option<f64>,
     pub flip_x: Option<bool>,
     pub flip_y: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_rotation: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +226,11 @@ pub struct Preferences {
     // action was explicitly cleared by the user (no binding fires it).
     #[serde(default)]
     pub keyboard_shortcuts: std::collections::HashMap<String, String>,
+    // User-saved custom aspect-ratio presets. Shown in the New Project
+    // modal's dropdown alongside the built-ins. Persisted as full
+    // AspectRatio structs (name + dimensions).
+    #[serde(default)]
+    pub custom_aspect_ratios: Vec<AspectRatio>,
 }
 
 impl Preferences {
@@ -230,6 +240,7 @@ impl Preferences {
             sort_by: "accessedAt".to_string(),
             default_export_resolution: "instagram2x".to_string(),
             keyboard_shortcuts: std::collections::HashMap::new(),
+            custom_aspect_ratios: Vec::new(),
         }
     }
 }

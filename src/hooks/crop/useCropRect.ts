@@ -25,6 +25,9 @@ interface UseCropRectOptions {
   elementCropY: number;
   elementCropWidth: number;
   elementCropHeight: number;
+  // Live Straighten value — captured into history entries so undo/redo
+  // restores rotation alongside the rect.
+  contentRotation: number;
 }
 
 /**
@@ -44,6 +47,7 @@ export function useCropRect({
   elementCropY,
   elementCropWidth,
   elementCropHeight,
+  contentRotation,
 }: UseCropRectOptions) {
   // Track previous aspect ratio to detect swaps
   const prevAspectRatio = useRef<number | null>(null);
@@ -66,6 +70,8 @@ export function useCropRect({
   elementPosRef.current = { x: elementX, y: elementY };
   const elementCropRef = useRef({ cropX: elementCropX, cropY: elementCropY, cropWidth: elementCropWidth, cropHeight: elementCropHeight });
   elementCropRef.current = { cropX: elementCropX, cropY: elementCropY, cropWidth: elementCropWidth, cropHeight: elementCropHeight };
+  const contentRotationRef = useRef(contentRotation);
+  contentRotationRef.current = contentRotation;
 
   // Reset crop rect to full bounds when resetKey changes
   const prevResetKeyRef = useRef(resetKey);
@@ -86,6 +92,7 @@ export function useCropRect({
         elementCropY: elementCropRef.current.cropY,
         elementCropWidth: elementCropRef.current.cropWidth,
         elementCropHeight: elementCropRef.current.cropHeight,
+        contentRotation: contentRotationRef.current,
       });
     }
     prevResetKeyRef.current = resetKey;
@@ -168,6 +175,7 @@ export function useCropRect({
         elementCropY: elementCropRef.current.cropY,
         elementCropWidth: elementCropRef.current.cropWidth,
         elementCropHeight: elementCropRef.current.cropHeight,
+        contentRotation: contentRotationRef.current,
       });
     }
     prevAspectRatio.current = aspectRatio;
@@ -185,6 +193,7 @@ export function useCropRect({
         elementCropY: elementCropRef.current.cropY,
         elementCropWidth: elementCropRef.current.cropWidth,
         elementCropHeight: elementCropRef.current.cropHeight,
+        contentRotation: contentRotationRef.current,
       });
     }, 0);
     return () => clearTimeout(t);

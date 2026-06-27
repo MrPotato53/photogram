@@ -2,6 +2,7 @@ import { memo, useCallback, useLayoutEffect, useRef } from 'react';
 import { Image as KonvaImage, Group, Rect } from 'react-konva';
 import type Konva from 'konva';
 import type { Element } from '../../types';
+import { coverScaleForRotation } from '../../utils/contentRotation';
 
 interface CanvasElementRendererProps {
   element: Element;
@@ -54,6 +55,9 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
     [element.id, onElementClick]
   );
   const strokeRef = useRef<Konva.Rect>(null);
+  // Visual group for the content-rotation branch; synced imperatively from
+  // the interaction proxy during drag/transform (same pattern as strokeRef).
+  const clipGroupRef = useRef<Konva.Group>(null);
   const handleDragMove = useCallback(
     (e: Konva.KonvaEventObject<DragEvent>) => {
       // Stroke is a sibling node (so selection doesn't invalidate the image
@@ -107,7 +111,21 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
       return;
     }
     try {
-      node.cache({ pixelRatio: Math.min(window.devicePixelRatio || 1, 2) });
+      // Content rotation cover-scales the image up; multiply the cache
+      // resolution by that factor so the upscaled draw still lands at
+      // native display density (otherwise we'd be magnifying a
+      // display-res rasterization → visible blur). Capped at 4 to bound
+      // memory for extreme aspect ratios at high angles. The ratio is
+      // recorded on the node so the export path can re-cache at the same
+      // density after a high-res export clears caches.
+      const cover = coverScaleForRotation(
+        element.width,
+        element.height,
+        element.contentRotation ?? 0
+      );
+      const ratio = Math.min(Math.min(window.devicePixelRatio || 1, 2) * cover, 4);
+      node.setAttr('cachePixelRatio', ratio);
+      node.cache({ pixelRatio: ratio });
       node.getLayer()?.batchDraw();
     } catch {
       // cache() throws on zero-size nodes; safe to skip
@@ -121,6 +139,9 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
     element.cropY,
     element.cropWidth,
     element.cropHeight,
+    // Toggling content rotation 0 ↔ non-zero remounts the image node into a
+    // different tree shape; including it here re-caches the fresh node.
+    element.contentRotation,
   ]);
 
   const isDraggable = !element.locked && !cropModeElementId;
@@ -260,7 +281,13 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
     return (
       <KonvaImage
         ref={imageRef}
-        key={element.id}
+        // Distinct key from the normal-mode node: crop enter/exit must
+        // REMOUNT the image. The CropOverlay rotation preview mutates node
+        // attrs imperatively; if React reused the node on exit, the prop
+        // diff would see unchanged JSX values (e.g. rotation) and never
+        // reset the imperative residue — leaving a cancelled straighten
+        // visually applied.
+        key={`${element.id}-cropmode`}
         id={element.id}
         image={loadedImage}
         x={fullX}
@@ -287,6 +314,107 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
     width: existingCropW * loadedImage.naturalWidth,
     height: existingCropH * loadedImage.naturalHeight,
   } : undefined;
+
+  const contentRotation = element.contentRotation ?? 0;
+
+  // ── Content-rotation branch ──────────────────────────────────────────
+  // Image rotated INSIDE an upright frame. Structure:
+  //   1. clipped Group (visual only, listening=false) — frame-shaped clip
+  //      containing the image rotated/cover-scaled around the frame center
+  //   2. invisible proxy Rect carrying the element id + all interaction
+  //      (drag, click, Transformer attachment). Its geometry == frame, so
+  //      the Transformer box is correct (a clipped Group's getClientRect
+  //      would report the oversized rotated content instead).
+  // The proxy imperatively syncs the Group during drag/transform, same
+  // pattern as the selection-stroke sync above. The zero-rotation path
+  // below is byte-identical to the pre-feature renderer.
+  if (contentRotation !== 0) {
+    const cover = coverScaleForRotation(element.width, element.height, contentRotation);
+    const syncGroup = (node: Konva.Node) => {
+      const g = clipGroupRef.current;
+      if (!g) return;
+      g.x(node.x());
+      g.y(node.y());
+      g.rotation(node.rotation());
+      g.scaleX(node.scaleX());
+      g.scaleY(node.scaleY());
+    };
+    return (
+      <>
+        <Group
+          ref={clipGroupRef}
+          key={`${element.id}-clip`}
+          x={element.x}
+          y={element.y}
+          rotation={element.rotation}
+          clipFunc={(ctx) => {
+            ctx.rect(0, 0, element.width, element.height);
+          }}
+          listening={false}
+        >
+          <KonvaImage
+            ref={imageRef}
+            image={loadedImage}
+            x={element.width / 2}
+            y={element.height / 2}
+            width={element.width}
+            height={element.height}
+            offsetX={element.width / 2}
+            offsetY={element.height / 2}
+            rotation={contentRotation}
+            scaleX={cover * flipScaleX}
+            scaleY={cover * flipScaleY}
+            crop={cropConfig}
+            listening={false}
+            perfectDrawEnabled={false}
+          />
+        </Group>
+        {/* Interaction proxy — invisible, frame-shaped. Carries the element
+            id so Transformer/selection lookups attach here. */}
+        <Rect
+          key={element.id}
+          id={element.id}
+          x={element.x}
+          y={element.y}
+          width={element.width}
+          height={element.height}
+          rotation={element.rotation}
+          fill="#000"
+          opacity={0}
+          draggable={isDraggable}
+          onClick={handleClick}
+          onTap={handleTap}
+          onDragStart={onDragStart}
+          onDragMove={(e) => {
+            // Parent handler may snap-adjust the node position; sync the
+            // visual group AFTER so it lands on the snapped coordinates.
+            handleDragMove(e);
+            syncGroup(e.target);
+          }}
+          onDragEnd={handleDragEnd}
+          onTransform={(e) => syncGroup(e.target)}
+          onTransformEnd={handleTransformEnd}
+          perfectDrawEnabled={false}
+          hitFunc={rectHitFunc}
+        />
+        {isSelected && (
+          <Rect
+            ref={strokeRef}
+            x={element.x}
+            y={element.y}
+            width={element.width}
+            height={element.height}
+            rotation={element.rotation}
+            stroke="#3b82f6"
+            strokeWidth={2 / zoomLevel}
+            strokeScaleEnabled={false}
+            listening={false}
+            perfectDrawEnabled={false}
+          />
+        )}
+      </>
+    );
+  }
 
   return (
     <>

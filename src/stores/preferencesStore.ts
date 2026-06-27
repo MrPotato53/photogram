@@ -12,6 +12,8 @@ interface PreferencesState {
   setDefaultExportResolution: (key: string) => Promise<void>;
   /** Replace the keyboard shortcut overrides + persist. */
   setKeyboardShortcuts: (overrides: Record<string, string>) => Promise<void>;
+  /** Replace the user's custom aspect-ratio presets + persist. */
+  setCustomAspectRatios: (ratios: Preferences['customAspectRatios']) => Promise<void>;
 }
 
 const defaultPreferences: Preferences = {
@@ -19,6 +21,7 @@ const defaultPreferences: Preferences = {
   sortBy: 'accessedAt',
   defaultExportResolution: 'instagram2x',
   keyboardShortcuts: {},
+  customAspectRatios: [],
 };
 
 export const usePreferencesStore = create<PreferencesState>((set, get) => ({
@@ -34,6 +37,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         ...prefs,
         defaultExportResolution: prefs.defaultExportResolution || defaultPreferences.defaultExportResolution,
         keyboardShortcuts: prefs.keyboardShortcuts || {},
+        customAspectRatios: prefs.customAspectRatios || [],
       };
       set({ preferences: merged, isLoading: false });
       applyTheme(merged.theme);
@@ -81,6 +85,16 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     const newPrefs = { ...get().preferences, keyboardShortcuts: overrides };
     set({ preferences: newPrefs });
     useShortcutsStore.getState().setOverrides(overrides);
+    try {
+      await savePreferences(newPrefs);
+    } catch (error) {
+      console.error('Failed to save preferences:', error);
+    }
+  },
+
+  setCustomAspectRatios: async (ratios) => {
+    const newPrefs = { ...get().preferences, customAspectRatios: ratios };
+    set({ preferences: newPrefs });
     try {
       await savePreferences(newPrefs);
     } catch (error) {

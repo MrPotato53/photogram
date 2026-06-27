@@ -42,6 +42,12 @@ export interface Element {
   flipY?: boolean;
   // Last used crop aspect ratio (to remember for next crop)
   lastCropRatio?: number | null;
+  // Rotation of the image content INSIDE its frame, in degrees (±45).
+  // The frame itself stays upright (frame orientation = `rotation`).
+  // Content is auto-scaled up so the rotated image always covers the
+  // frame — no blank corners. 0/undefined = no content rotation, which
+  // renders through the exact same fast path as before this field existed.
+  contentRotation?: number;
 }
 
 // Alignment guide for snapping
@@ -112,6 +118,9 @@ export interface Preferences {
   // binding (e.g. "mod+shift+t"). Empty string = explicitly cleared.
   // Missing keys fall back to the registry default at lookup time.
   keyboardShortcuts: Record<string, string>;
+  // User-saved aspect-ratio presets. Appear in the New Project dropdown
+  // after the built-ins.
+  customAspectRatios: AspectRatio[];
 }
 
 export type SortOption = {

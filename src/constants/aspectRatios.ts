@@ -1,11 +1,17 @@
 import type { AspectRatio } from '../types';
 
+// Ordered square → tall → wide. Names follow social/print conventions:
+// 4:5 is "Portrait", 5:4 is "Landscape" (also the classic 8×10 print ratio),
+// 9:16 is "Story" (Instagram/Reels/TikTok term for vertical full-screen),
+// 16:9 is "Video" (widescreen). The old 1.91:1 landscape was removed as
+// unused; existing projects that reference it still load fine since the
+// AspectRatio is stored per-project, not looked up from this list.
 export const ASPECT_RATIOS: AspectRatio[] = [
-  { width: 4, height: 5, name: 'Portrait (4:5)' },
   { width: 1, height: 1, name: 'Square (1:1)' },
-  { width: 5, height: 4, name: 'Photo (5:4)' },
+  { width: 4, height: 5, name: 'Portrait (4:5)' },
+  { width: 5, height: 4, name: 'Landscape (5:4)' },
+  { width: 9, height: 16, name: 'Story (9:16)' },
   { width: 16, height: 9, name: 'Video (16:9)' },
-  { width: 191, height: 100, name: 'Landscape (1.91:1)' },
 ];
 
 export const getResolution = (aspectRatio: AspectRatio): { width: number; height: number } => {

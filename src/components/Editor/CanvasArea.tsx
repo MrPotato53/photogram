@@ -409,6 +409,10 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   // Crop aspect ratio state
   const [cropAspectRatio, setCropAspectRatio] = useState<number | null>(null);
+  // Straighten slider state (content rotation inside the frame). Lives here
+  // (not on the element) during crop mode — the CropOverlay preview is
+  // imperative, so Cancel needs no element restore. Committed on Apply.
+  const [cropContentRotation, setCropContentRotation] = useState(0);
   const [customRatioWidth, setCustomRatioWidth] = useState<string>('16');
   const [customRatioHeight, setCustomRatioHeight] = useState<string>('9');
   const [showCustomRatio, setShowCustomRatio] = useState(false);
@@ -544,7 +548,10 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       transformer.nodes([]);
       transformer.getLayer()?.batchDraw();
     }
-  }, [selectedElementId, cropModeElementId, loadedImages.get(selectedElementId ?? '')]);
+    // The selected element reference is a dep because toggling contentRotation
+    // 0 ↔ non-zero changes the renderer's node tree shape (plain image ↔
+    // clipped group + proxy), remounting the node the transformer points at.
+  }, [selectedElementId, cropModeElementId, loadedImages.get(selectedElementId ?? ''), elements.find((el) => el.id === selectedElementId)]);
 
   // Track shift key
   useEffect(() => {
@@ -1370,8 +1377,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     const existingCropY = element.cropY ?? 0;
     const existingCropW = element.cropWidth ?? 1;
     const existingCropH = element.cropHeight ?? 1;
+    const hasContentRotation = (element.contentRotation ?? 0) !== 0;
 
-    if (existingCropX === 0 && existingCropY === 0 && existingCropW === 1 && existingCropH === 1) {
+    if (existingCropX === 0 && existingCropY === 0 && existingCropW === 1 && existingCropH === 1 && !hasContentRotation) {
       setContextMenu({ ...contextMenu, isOpen: false });
       return;
     }
@@ -1390,6 +1398,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       y: fullY,
       width: fullWidth,
       height: fullHeight,
+      contentRotation: 0,
     });
     setContextMenu({ ...contextMenu, isOpen: false });
   };
@@ -1644,6 +1653,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         width: crop.newWidth,
         height: crop.newHeight,
         lastCropRatio: cropAspectRatio,
+        contentRotation: cropContentRotation,
       });
     }
     // Clear original state ref since crop was confirmed (not cancelled)
@@ -1690,10 +1700,13 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         setCropAspectRatio(null);
         setShowCustomRatio(false);
       }
+      // Seed the Straighten slider from the element's saved content rotation
+      setCropContentRotation(element?.contentRotation ?? 0);
     } else if (!cropModeElementId && prevCropModeElementIdRef.current) {
       // Exiting crop mode - reset ratio
       setCropAspectRatio(null);
       setShowCustomRatio(false);
+      setCropContentRotation(0);
     }
     prevCropModeElementIdRef.current = cropModeElementId;
   }, [cropModeElementId, elements]);
@@ -1948,6 +1961,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
                       slideWidth={designSize.width}
                       numSlides={numSlides}
                       resetKey={cropResetKey}
+                      contentRotation={cropContentRotation}
+                      onContentRotationChange={setCropContentRotation}
                     />
                   </>
                 )}
@@ -2024,6 +2039,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         customRatioWidth={customRatioWidth}
         customRatioHeight={customRatioHeight}
         croppingFullBounds={croppingFullBounds}
+        contentRotation={cropContentRotation}
+        onContentRotationChange={setCropContentRotation}
         onRatioChange={setCropAspectRatio}
         onCustomRatioToggle={() => {
           if (!showCustomRatio) {
@@ -2057,6 +2074,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
           setCropResetKey((k) => k + 1);
           setCropAspectRatio(null);
           setShowCustomRatio(false);
+          setCropContentRotation(0);
         }}
         onCancel={handleCropCancel}
         onApply={() => {

@@ -21,6 +21,8 @@ export interface CropHistoryEntry {
   elementCropY: number;
   elementCropWidth: number;
   elementCropHeight: number;
+  // Straighten (content rotation) value, degrees
+  contentRotation: number;
 }
 
 interface CropStoreState {
@@ -57,7 +59,8 @@ const entriesEqual = (a: CropHistoryEntry | undefined, b: CropHistoryEntry) =>
   a.elementCropX === b.elementCropX &&
   a.elementCropY === b.elementCropY &&
   a.elementCropWidth === b.elementCropWidth &&
-  a.elementCropHeight === b.elementCropHeight;
+  a.elementCropHeight === b.elementCropHeight &&
+  a.contentRotation === b.contentRotation;
 
 const cloneEntry = (e: CropHistoryEntry): CropHistoryEntry => ({
   cropRect: { ...e.cropRect },
@@ -67,6 +70,7 @@ const cloneEntry = (e: CropHistoryEntry): CropHistoryEntry => ({
   elementCropY: e.elementCropY,
   elementCropWidth: e.elementCropWidth,
   elementCropHeight: e.elementCropHeight,
+  contentRotation: e.contentRotation,
 });
 
 export const useCropStore = create<CropStoreState>((set, get) => ({
