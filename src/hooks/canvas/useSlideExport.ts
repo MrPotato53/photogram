@@ -61,21 +61,26 @@ export function useSlideExport({ stageRef, project, scale }: UseSlideExportProps
       //        = slideWidth * pixelRatio  ← correct regardless of zoom or viewport size
       const effectivePixelRatio = pixelRatio / layerScale;
 
-      // Clear KonvaImage node caches ONLY when the export resolution exceeds
-      // the cached resolution — otherwise the cache is already at least as
-      // detailed as the output and re-rasterizing is pure waste (esp. for
-      // thumbnails at 0.25x which never need this). CanvasElementRenderer
-      // caches at min(devicePixelRatio, 2) Konva pixels per stage pixel.
+      // Clear a KonvaImage node's cache ONLY when the export resolution exceeds
+      // THAT node's cached resolution — otherwise its cache is already at least
+      // as detailed as the output and re-rasterizing is pure waste (esp. for
+      // thumbnails at 0.25x which never need this). The cache density is the
+      // user's canvas-resolution preference (times a content-rotation cover
+      // factor), recorded per-node as `cachePixelRatio` by CanvasElementRenderer.
+      // Comparing per-node is required because that density can now be below the
+      // display ratio (e.g. 1080p canvas on a HiDPI screen) — a stage-wide
+      // displayPixelRatio baseline would skip refresh and export a blurry cache.
+      // Nodes in "Full" mode aren't cached at all, so they always draw from
+      // source at the export resolution.
       const displayPixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-      const needsCacheRefresh = effectivePixelRatio > displayPixelRatio + 0.01;
       const wereCached: Konva.Image[] = [];
-      if (needsCacheRefresh) {
-        const imageNodes = stage.find('Image') as Konva.Image[];
-        for (const node of imageNodes) {
-          if (node.isCached()) {
-            wereCached.push(node);
-            node.clearCache();
-          }
+      const imageNodes = stage.find('Image') as Konva.Image[];
+      for (const node of imageNodes) {
+        if (!node.isCached()) continue;
+        const nodeRatio = (node.getAttr('cachePixelRatio') as number | undefined) ?? displayPixelRatio;
+        if (effectivePixelRatio > nodeRatio + 0.01) {
+          wereCached.push(node);
+          node.clearCache();
         }
       }
 

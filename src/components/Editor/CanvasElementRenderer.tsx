@@ -16,6 +16,12 @@ interface CanvasElementRendererProps {
   onDragEnd: (elementId: string, e: Konva.KonvaEventObject<any>) => void;
   onTransformEnd: (elementId: string, e: Konva.KonvaEventObject<Event>) => void;
   cropModeElementId: string | null;
+  /**
+   * Base Konva cache pixelRatio derived from the user's canvas-resolution
+   * preference (resolutionHeight / DESIGN_HEIGHT). `null` = "full" resolution:
+   * skip caching and draw the source bitmap directly (no rasterization).
+   */
+  cachePixelRatio: number | null;
 }
 
 /**
@@ -43,6 +49,7 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
   onDragEnd,
   onTransformEnd,
   cropModeElementId,
+  cachePixelRatio,
 }: CanvasElementRendererProps) {
   // Stable callbacks to avoid re-creating inline functions
   const handleClick = useCallback(
@@ -110,20 +117,29 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
       node.getLayer()?.batchDraw();
       return;
     }
+    // "Full" resolution (cachePixelRatio == null): skip rasterization entirely
+    // and draw the source bitmap directly. Drop any stale cache so the switch
+    // takes effect immediately (and so previously-cached nodes re-render sharp).
+    if (cachePixelRatio == null) {
+      node.clearCache();
+      node.getLayer()?.batchDraw();
+      return;
+    }
     try {
       // Content rotation cover-scales the image up; multiply the cache
-      // resolution by that factor so the upscaled draw still lands at
-      // native display density (otherwise we'd be magnifying a
-      // display-res rasterization → visible blur). Capped at 4 to bound
-      // memory for extreme aspect ratios at high angles. The ratio is
-      // recorded on the node so the export path can re-cache at the same
-      // density after a high-res export clears caches.
+      // resolution by that factor so the upscaled draw still lands at the
+      // chosen canvas density (otherwise we'd be magnifying a lower-res
+      // rasterization → visible blur). Cover is capped at 2 to bound memory
+      // for extreme aspect ratios at high angles. The base ratio comes from
+      // the user's canvas-resolution preference. The final ratio is recorded
+      // on the node so the export path can re-cache at the same density after
+      // a high-res export clears caches.
       const cover = coverScaleForRotation(
         element.width,
         element.height,
         element.contentRotation ?? 0
       );
-      const ratio = Math.min(Math.min(window.devicePixelRatio || 1, 2) * cover, 4);
+      const ratio = cachePixelRatio * Math.min(cover, 2);
       node.setAttr('cachePixelRatio', ratio);
       node.cache({ pixelRatio: ratio });
       node.getLayer()?.batchDraw();
@@ -133,6 +149,7 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
   }, [
     loadedImage,
     isBeingCropped,
+    cachePixelRatio,
     element.width,
     element.height,
     element.cropX,

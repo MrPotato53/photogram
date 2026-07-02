@@ -12,6 +12,8 @@ import { useTemplatesStore } from '../../stores/templatesStore';
 import { useClipboardStore } from '../../stores/clipboardStore';
 import { useHistoryStore } from '../../stores/historyStore';
 import { usePanelStore } from '../../stores/panelStore';
+import { usePreferencesStore } from '../../stores/preferencesStore';
+import { canvasResolutionToPixelRatio } from '../../constants/canvasResolutions';
 import { saveProjectThumbnail, updateProject } from '../../services/tauri';
 import { calculateSnapLines, findSnap, findTransformSnap } from '../../utils/snapping';
 import { CropOverlay } from './CropOverlay';
@@ -124,6 +126,16 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // rendered by SlidesPanel. Only the setter is needed here for the
   // "Add slide from template" button below.
   const setIsTemplatePickerOpen = usePanelStore((s) => s.setTemplatePickerOpen);
+
+  // Canvas working resolution — controls the pixelRatio photos are rasterized
+  // at on-canvas (Konva cache). Independent of design coords + export. Changing
+  // it re-renders every CanvasElementRenderer, whose cache effect re-rasterizes
+  // at the new density. null = "full" (no rasterization).
+  const canvasResolutionKey = usePreferencesStore((s) => s.preferences.canvasResolution);
+  const cachePixelRatio = useMemo(
+    () => canvasResolutionToPixelRatio(canvasResolutionKey),
+    [canvasResolutionKey]
+  );
 
   const slides = project?.slides || [];
   const elements = project?.elements || [];
@@ -1868,6 +1880,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
                           onDragEnd={handleDragEnd}
                           onTransformEnd={handleTransformEnd}
                           cropModeElementId={cropModeElementId}
+                          cachePixelRatio={cachePixelRatio}
                         />
                       );
                     })}

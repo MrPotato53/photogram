@@ -231,6 +231,11 @@ pub struct Preferences {
     // AspectRatio structs (name + dimensions).
     #[serde(default)]
     pub custom_aspect_ratios: Vec<AspectRatio>,
+    // On-canvas working resolution preset key (e.g. "1080" / "2160" / "full").
+    // Controls only the resolution photos are rasterized at on the editing
+    // canvas, not the design coordinates or export. Empty falls back to "1080".
+    #[serde(default)]
+    pub canvas_resolution: String,
 }
 
 impl Preferences {
@@ -241,6 +246,7 @@ impl Preferences {
             default_export_resolution: "instagram2x".to_string(),
             keyboard_shortcuts: std::collections::HashMap::new(),
             custom_aspect_ratios: Vec::new(),
+            canvas_resolution: "1080".to_string(),
         }
     }
 }

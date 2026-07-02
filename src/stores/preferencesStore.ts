@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { Preferences } from '../types';
 import { getPreferences, savePreferences } from '../services/tauri';
 import { useShortcutsStore } from './shortcutsStore';
+import { DEFAULT_CANVAS_RESOLUTION } from '../constants/canvasResolutions';
 
 interface PreferencesState {
   preferences: Preferences;
@@ -10,6 +11,8 @@ interface PreferencesState {
   setTheme: (theme: Preferences['theme']) => Promise<void>;
   setSortBy: (sortBy: Preferences['sortBy']) => Promise<void>;
   setDefaultExportResolution: (key: string) => Promise<void>;
+  /** Set the on-canvas working resolution (CANVAS_RESOLUTIONS key) + persist. */
+  setCanvasResolution: (key: string) => Promise<void>;
   /** Replace the keyboard shortcut overrides + persist. */
   setKeyboardShortcuts: (overrides: Record<string, string>) => Promise<void>;
   /** Replace the user's custom aspect-ratio presets + persist. */
@@ -22,6 +25,7 @@ const defaultPreferences: Preferences = {
   defaultExportResolution: 'instagram2x',
   keyboardShortcuts: {},
   customAspectRatios: [],
+  canvasResolution: DEFAULT_CANVAS_RESOLUTION,
 };
 
 export const usePreferencesStore = create<PreferencesState>((set, get) => ({
@@ -38,6 +42,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         defaultExportResolution: prefs.defaultExportResolution || defaultPreferences.defaultExportResolution,
         keyboardShortcuts: prefs.keyboardShortcuts || {},
         customAspectRatios: prefs.customAspectRatios || [],
+        canvasResolution: prefs.canvasResolution || defaultPreferences.canvasResolution,
       };
       set({ preferences: merged, isLoading: false });
       applyTheme(merged.theme);
@@ -73,6 +78,16 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
 
   setDefaultExportResolution: async (key) => {
     const newPrefs = { ...get().preferences, defaultExportResolution: key };
+    set({ preferences: newPrefs });
+    try {
+      await savePreferences(newPrefs);
+    } catch (error) {
+      console.error('Failed to save preferences:', error);
+    }
+  },
+
+  setCanvasResolution: async (key) => {
+    const newPrefs = { ...get().preferences, canvasResolution: key };
     set({ preferences: newPrefs });
     try {
       await savePreferences(newPrefs);

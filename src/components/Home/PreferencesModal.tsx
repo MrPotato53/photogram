@@ -1,5 +1,6 @@
 import { Modal, Button } from '../common';
 import { usePreferencesStore } from '../../stores/preferencesStore';
+import { CANVAS_RESOLUTIONS } from '../../constants/canvasResolutions';
 import clsx from 'clsx';
 
 interface PreferencesModalProps {
@@ -9,7 +10,7 @@ interface PreferencesModalProps {
 }
 
 export function PreferencesModal({ isOpen, onClose, onOpenShortcuts }: PreferencesModalProps) {
-  const { preferences, setTheme } = usePreferencesStore();
+  const { preferences, setTheme, setCanvasResolution } = usePreferencesStore();
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Preferences" size="sm">
@@ -66,6 +67,25 @@ export function PreferencesModal({ isOpen, onClose, onOpenShortcuts }: Preferenc
               Dark
             </button>
           </div>
+        </div>
+
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-theme-text-secondary">Canvas resolution</label>
+          <select
+            value={preferences.canvasResolution}
+            onChange={(e) => setCanvasResolution(e.target.value)}
+            className="w-full px-3 py-2 rounded-md border border-theme-border bg-theme-bg-tertiary text-sm text-theme-text hover:border-theme-border-hover focus:border-blue-500 focus:outline-none transition-colors"
+          >
+            {CANVAS_RESOLUTIONS.map((opt) => (
+              <option key={opt.key} value={opt.key}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-theme-text-muted">
+            Resolution photos are rendered at on the canvas. Higher is sharper when zoomed in
+            but uses more memory; "Full" draws photos un-rasterized. Does not affect export quality.
+          </p>
         </div>
 
         <div className="space-y-2">

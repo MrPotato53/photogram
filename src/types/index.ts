@@ -121,6 +121,11 @@ export interface Preferences {
   // User-saved aspect-ratio presets. Appear in the New Project dropdown
   // after the built-ins.
   customAspectRatios: AspectRatio[];
+  // Stable preset key for the on-canvas working resolution (key from
+  // CANVAS_RESOLUTIONS, e.g. "1080" / "2160" / "full"). Controls only the
+  // resolution photos are rasterized at on the editing canvas — NOT the design
+  // coordinate system or export. Empty/unknown falls back to "1080".
+  canvasResolution: string;
 }
 
 export type SortOption = {
