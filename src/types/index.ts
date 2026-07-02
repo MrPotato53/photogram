@@ -126,6 +126,10 @@ export interface Preferences {
   // resolution photos are rasterized at on the editing canvas — NOT the design
   // coordinate system or export. Empty/unknown falls back to "1080".
   canvasResolution: string;
+  // Global memory of each snap guide's last visibility while its snap was
+  // enabled. Re-enabling a snap (or the master snap toggle) restores its guide
+  // to the remembered state. Persists across projects and sessions.
+  snapGuideVisibility: Record<'canvas' | 'margin' | 'grid', boolean>;
 }
 
 export type SortOption = {

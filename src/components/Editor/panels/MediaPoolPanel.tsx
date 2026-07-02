@@ -6,6 +6,7 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import clsx from 'clsx';
 import { useProjectStore } from '../../../stores/projectStore';
 import { useMediaStore } from '../../../stores/mediaStore';
+import { usePanelStore } from '../../../stores/panelStore';
 import { ConfirmDialog } from '../../common/ConfirmDialog';
 import { MediaPreviewModal } from '../MediaPreviewModal';
 import { showInFolder, checkMediaExists, relinkMedia, bulkRelinkMedia, type RelinkResult } from '../../../services/tauri';
@@ -379,8 +380,10 @@ export function MediaPoolPanel() {
     reason: string;
   }>({ isOpen: false, media: null, selectedPath: '', reason: '' });
 
-  // Zoom level for thumbnails (0.5 = 50%, 1 = 100%, 2 = 200%)
-  const [zoomLevel, setZoomLevel] = useState(1);
+  // Zoom level for thumbnails (0.5 = 50%, 1 = 100%, 2 = 200%). Lives in the
+  // panel store so it survives the remount when the panel pops out / docks.
+  const zoomLevel = usePanelStore((s) => s.mediaPoolZoom);
+  const setZoomLevel = usePanelStore((s) => s.setMediaPoolZoom);
 
   // Native aspect ratio display toggle
   const [showNativeAspectRatio, setShowNativeAspectRatio] = useState(false);
@@ -873,7 +876,7 @@ export function MediaPoolPanel() {
             {/* Zoom controls */}
             <div className="flex items-center gap-1">
               <button
-                onClick={() => setZoomLevel((z) => Math.max(MIN_ZOOM, z - ZOOM_STEP))}
+                onClick={() => setZoomLevel(Math.max(MIN_ZOOM, zoomLevel - ZOOM_STEP))}
                 disabled={zoomLevel <= MIN_ZOOM}
                 className="p-1 rounded hover:bg-theme-bg-tertiary disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                 title="Zoom out"
@@ -886,7 +889,7 @@ export function MediaPoolPanel() {
                 {Math.round(zoomLevel * 100)}%
               </span>
               <button
-                onClick={() => setZoomLevel((z) => Math.min(MAX_ZOOM, z + ZOOM_STEP))}
+                onClick={() => setZoomLevel(Math.min(MAX_ZOOM, zoomLevel + ZOOM_STEP))}
                 disabled={zoomLevel >= MAX_ZOOM}
                 className="p-1 rounded hover:bg-theme-bg-tertiary disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                 title="Zoom in"

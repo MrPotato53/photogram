@@ -10,8 +10,10 @@ interface DockedMediaPanelProps {
 }
 
 export function DockedMediaPanel({ children }: DockedMediaPanelProps) {
-  const panelWidth = usePanelStore((s) => s.panels.mediaPool.width);
+  const panelWidth = usePanelStore((s) => s.panels.mediaPool.dockedWidth);
   const setPanelSize = usePanelStore((s) => s.setPanelSize);
+  const setDockedWidth = usePanelStore((s) => s.setDockedWidth);
+  const resetDockedSize = usePanelStore((s) => s.resetDockedSize);
   const closePanel = usePanelStore((s) => s.closePanel);
   const setMediaPoolDocked = usePanelStore((s) => s.setMediaPoolDocked);
 
@@ -19,8 +21,19 @@ export function DockedMediaPanel({ children }: DockedMediaPanelProps) {
   const [localWidth, setLocalWidth] = useState<number | null>(null);
   const [isResizing, setIsResizing] = useState(false);
   const resizeStartRef = useRef({ x: 0, width: 0 });
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const displayWidth = localWidth ?? panelWidth;
+
+  // Pop out to floating at roughly the attached size (measure the current
+  // docked box so the floating panel opens matching what the user just saw).
+  const handlePopOut = useCallback(() => {
+    const el = rootRef.current;
+    if (el) {
+      setPanelSize('mediaPool', { width: el.offsetWidth, height: el.offsetHeight });
+    }
+    setMediaPoolDocked(false);
+  }, [setPanelSize, setMediaPoolDocked]);
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -45,7 +58,7 @@ export function DockedMediaPanel({ children }: DockedMediaPanelProps) {
       document.body.style.cursor = '';
       setIsResizing(false);
       if (localWidth !== null) {
-        setPanelSize('mediaPool', { width: localWidth });
+        setDockedWidth('mediaPool', localWidth);
         setLocalWidth(null);
       }
     };
@@ -56,24 +69,28 @@ export function DockedMediaPanel({ children }: DockedMediaPanelProps) {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isResizing, localWidth, setPanelSize]);
+  }, [isResizing, localWidth, setDockedWidth]);
 
   return (
     <div
+      ref={rootRef}
       className={clsx(
         'relative flex-shrink-0 flex flex-col bg-theme-bg-secondary border-r border-theme-border',
         isResizing && 'select-none'
       )}
       style={{ width: displayWidth }}
     >
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 bg-theme-bg-tertiary border-b border-theme-border">
+      {/* Header — double-click to reset to the default docked width */}
+      <div
+        className="flex items-center justify-between px-3 py-2 bg-theme-bg-tertiary border-b border-theme-border"
+        onDoubleClick={() => resetDockedSize('mediaPool')}
+      >
         <span className="text-sm font-medium text-theme-text">Media Pool</span>
         <div className="flex items-center gap-1 panel-controls">
           {/* Pop out to floating */}
           <button
             className="p-0.5 text-theme-text-muted hover:text-theme-text hover:bg-theme-bg rounded transition-colors"
-            onClick={() => setMediaPoolDocked(false)}
+            onClick={handlePopOut}
             title="Pop out to floating panel"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

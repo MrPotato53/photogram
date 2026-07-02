@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import { useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react';
 import { Stage, Layer, Group, Transformer, Rect } from 'react-konva';
 import type Konva from 'konva';
 import type { AspectRatio, Element } from '../../types';
@@ -473,25 +473,15 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     return () => resizeObserver.disconnect();
   }, [aspectRatio]);
 
-  // Snapshot generator function (memoized via ref to avoid stale closures)
+  // Project thumbnail generator. Renders the FIRST slide only (most
+  // recognizable) via the clean single-slide export path (UI hidden, one
+  // slide) at ~480px tall — instead of a low-res whole-canvas capture.
   const generateSnapshot = useCallback(() => {
-    if (!stageRef.current) return null;
-    try {
-      const stage = stageRef.current;
-      console.time('generateSnapshot');
-      // Use a fixed low resolution for fast thumbnail generation
-      const result = stage.toDataURL({
-        pixelRatio: 0.5, // Low res for speed
-        mimeType: 'image/jpeg',
-        quality: 0.7,
-      });
-      console.timeEnd('generateSnapshot');
-      return result;
-    } catch (error) {
-      console.error('Failed to generate snapshot:', error);
-      return null;
-    }
-  }, []);
+    // targetWidth chosen so the slide renders ~480px tall regardless of aspect
+    // ratio (height = DESIGN_HEIGHT * targetWidth / slideWidth = 480).
+    const targetWidth = designSize.width * (480 / DESIGN_HEIGHT);
+    return renderSlideForPreview(0, targetWidth);
+  }, [renderSlideForPreview, designSize.width]);
 
   // Debounced background thumbnail save on content changes
   const thumbnailTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1696,9 +1686,15 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   }, [cropModeElementId, croppingElement]);
 
   // Set initial crop ratio when entering crop mode (from element's saved ratio)
-  // Also reset to null when exiting crop mode
+  // Also reset to null when exiting crop mode.
+  // useLayoutEffect (not useEffect) so the Straighten value is seeded from the
+  // element's saved contentRotation BEFORE the browser paints the first
+  // crop-mode frame. As a post-paint effect it left cropContentRotation at 0
+  // for one frame, so the crop-mode image (whose rotation is applied
+  // imperatively from this value by CropOverlay's preview layout-effect) flashed
+  // unrotated before snapping back to the saved rotation.
   const prevCropModeElementIdRef = useRef<string | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (cropModeElementId && cropModeElementId !== prevCropModeElementIdRef.current) {
       // Entering crop mode for a new element
       const element = elementMap.get(cropModeElementId);

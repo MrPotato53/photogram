@@ -4,7 +4,7 @@ import type { Template, AspectRatio } from '../../types';
 import { useTemplatesStore } from '../../stores/templatesStore';
 import { DESIGN_HEIGHT } from '../../utils/designConstants';
 
-const PREVIEW_HEIGHT = 80;
+const PREVIEW_HEIGHT = 200;
 const DRAG_THRESHOLD = 5;
 
 interface TemplateCardProps {
@@ -307,7 +307,7 @@ export function TemplatesManagementModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div
         ref={modalRef}
-        className="bg-gray-800 rounded-xl shadow-2xl border border-gray-700 w-[600px] max-h-[80vh] flex flex-col"
+        className="bg-gray-800 rounded-xl shadow-2xl border border-gray-700 w-[1000px] max-w-[92vw] max-h-[85vh] flex flex-col"
       >
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">

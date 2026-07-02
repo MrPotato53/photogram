@@ -236,6 +236,22 @@ pub struct Preferences {
     // canvas, not the design coordinates or export. Empty falls back to "1080".
     #[serde(default)]
     pub canvas_resolution: String,
+    // Global memory of each snap guide's last visibility while enabled. Lets
+    // re-enabling a snap restore its guide to the remembered state. Persists
+    // across projects and sessions.
+    #[serde(default)]
+    pub snap_guide_visibility: SnapGuideVisibility,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapGuideVisibility {
+    #[serde(default)]
+    pub canvas: bool,
+    #[serde(default)]
+    pub margin: bool,
+    #[serde(default)]
+    pub grid: bool,
 }
 
 impl Preferences {
@@ -247,6 +263,7 @@ impl Preferences {
             keyboard_shortcuts: std::collections::HashMap::new(),
             custom_aspect_ratios: Vec::new(),
             canvas_resolution: "1080".to_string(),
+            snap_guide_visibility: SnapGuideVisibility::default(),
         }
     }
 }

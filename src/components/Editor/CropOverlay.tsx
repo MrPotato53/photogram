@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { Group, Rect } from 'react-konva';
 import type Konva from 'konva';
 import type { Element } from '../../types';
@@ -827,7 +827,12 @@ export function CropOverlay({
   // this is a no-op, leaving every existing crop interaction untouched.
   const rotationPreviewRef = useRef<Konva.Group>(null);
   const previewAppliedRef = useRef(false);
-  useEffect(() => {
+  // useLayoutEffect (not useEffect) so the rotation is re-applied synchronously
+  // before the browser paints. Otherwise, on entering crop mode for a
+  // content-rotated photo, the freshly-mounted crop-mode image node paints once
+  // at its base (unrotated) attrs before this effect reapplies the rotation —
+  // a one-frame flash back to the original orientation.
+  useLayoutEffect(() => {
     const stage = rotationPreviewRef.current?.getStage();
     if (!stage) return;
     const node = stage.findOne(`#${element.id}`) as Konva.Image | undefined;

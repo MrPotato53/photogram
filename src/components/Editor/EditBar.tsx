@@ -4,7 +4,7 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useElementStore } from '../../stores/elementStore';
 import { usePanelStore } from '../../stores/panelStore';
 import { useCropStore } from '../../stores/cropStore';
-import { useSnapStore, type SnapSettings, type SnapSettingsUpdate } from '../../stores/snapStore';
+import { useSnapStore, type SnapSettings, type SnapSettingsUpdate, type GuideType } from '../../stores/snapStore';
 import { DESIGN_HEIGHT, getSlideWidth } from '../../utils/designConstants';
 
 // Reusable number input with visible spinner arrows
@@ -157,19 +157,27 @@ function IconButton({ icon, label, onClick, disabled = false, active = false }: 
 interface SnapSettingsPopoverProps {
   isOpen: boolean;
   onClose: () => void;
+  // The dropdown trigger button — excluded from the click-outside handler so
+  // clicking it while open doesn't both close (via outside) AND re-toggle open.
+  triggerRef: React.RefObject<HTMLElement>;
   snapEnabled: boolean;
   setSnapEnabled: (enabled: boolean) => void;
   snapSettings: SnapSettings;
   updateSnapSettings: (updates: SnapSettingsUpdate) => void;
+  setSnapTypeEnabled: (type: GuideType, enabled: boolean) => void;
+  setSnapTypeShow: (type: GuideType, show: boolean) => void;
 }
 
 function SnapSettingsPopover({
   isOpen,
   onClose,
+  triggerRef,
   snapEnabled,
   setSnapEnabled,
   snapSettings,
   updateSnapSettings,
+  setSnapTypeEnabled,
+  setSnapTypeShow,
 }: SnapSettingsPopoverProps) {
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -177,7 +185,10 @@ function SnapSettingsPopover({
     if (!isOpen) return;
 
     const handleClickOutside = (e: MouseEvent) => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      // Ignore clicks on the trigger button — its own onClick handles toggling.
+      if (triggerRef.current?.contains(target)) return;
+      if (popoverRef.current && !popoverRef.current.contains(target)) {
         onClose();
       }
     };
@@ -190,7 +201,7 @@ function SnapSettingsPopover({
       clearTimeout(timer);
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, triggerRef]);
 
   if (!isOpen) return null;
 
@@ -219,9 +230,10 @@ function SnapSettingsPopover({
             <span className="text-sm text-theme-text-secondary">Canvas center</span>
             <div className="flex items-center gap-1.5">
               <button
-                onClick={() => updateSnapSettings({ canvas: { show: !snapSettings.canvas.show } })}
+                onClick={() => setSnapTypeShow('canvas', !snapSettings.canvas.show)}
+                disabled={!snapEnabled || !snapSettings.canvas.enabled}
                 className={clsx(
-                  'p-1 rounded transition-colors',
+                  'p-1 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
                   snapSettings.canvas.show
                     ? 'text-blue-400 bg-blue-500/20'
                     : 'text-gray-500 hover:text-gray-400'
@@ -236,7 +248,7 @@ function SnapSettingsPopover({
               <input
                 type="checkbox"
                 checked={snapSettings.canvas.enabled}
-                onChange={(e) => updateSnapSettings({ canvas: { enabled: e.target.checked } })}
+                onChange={(e) => setSnapTypeEnabled('canvas', e.target.checked)}
                 disabled={!snapEnabled}
                 className="w-4 h-4 rounded bg-theme-bg border-theme-border text-blue-500 focus:ring-blue-500 focus:ring-offset-0 disabled:opacity-50"
               />
@@ -261,9 +273,10 @@ function SnapSettingsPopover({
               <span className="text-sm text-theme-text-secondary">Margin guides</span>
               <div className="flex items-center gap-1.5">
                 <button
-                  onClick={() => updateSnapSettings({ margin: { show: !snapSettings.margin.show } })}
+                  onClick={() => setSnapTypeShow('margin', !snapSettings.margin.show)}
+                  disabled={!snapEnabled || !snapSettings.margin.enabled}
                   className={clsx(
-                    'p-1 rounded transition-colors',
+                    'p-1 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
                     snapSettings.margin.show
                       ? 'text-blue-400 bg-blue-500/20'
                       : 'text-gray-500 hover:text-gray-400'
@@ -278,7 +291,7 @@ function SnapSettingsPopover({
                 <input
                   type="checkbox"
                   checked={snapSettings.margin.enabled}
-                  onChange={(e) => updateSnapSettings({ margin: { enabled: e.target.checked } })}
+                  onChange={(e) => setSnapTypeEnabled('margin', e.target.checked)}
                   disabled={!snapEnabled}
                   className="w-4 h-4 rounded bg-theme-bg border-theme-border text-blue-500 focus:ring-blue-500 focus:ring-offset-0 disabled:opacity-50"
                 />
@@ -305,9 +318,10 @@ function SnapSettingsPopover({
               <span className="text-sm text-theme-text-secondary">Grid guides</span>
               <div className="flex items-center gap-1.5">
                 <button
-                  onClick={() => updateSnapSettings({ grid: { show: !snapSettings.grid.show } })}
+                  onClick={() => setSnapTypeShow('grid', !snapSettings.grid.show)}
+                  disabled={!snapEnabled || !snapSettings.grid.enabled}
                   className={clsx(
-                    'p-1 rounded transition-colors',
+                    'p-1 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
                     snapSettings.grid.show
                       ? 'text-blue-400 bg-blue-500/20'
                       : 'text-gray-500 hover:text-gray-400'
@@ -322,7 +336,7 @@ function SnapSettingsPopover({
                 <input
                   type="checkbox"
                   checked={snapSettings.grid.enabled}
-                  onChange={(e) => updateSnapSettings({ grid: { enabled: e.target.checked } })}
+                  onChange={(e) => setSnapTypeEnabled('grid', e.target.checked)}
                   disabled={!snapEnabled}
                   className="w-4 h-4 rounded bg-theme-bg border-theme-border text-blue-500 focus:ring-blue-500 focus:ring-offset-0 disabled:opacity-50"
                 />
@@ -384,8 +398,11 @@ export function EditBar() {
   const setSnapEnabled = useSnapStore((s) => s.setSnapEnabled);
   const snapSettings = useSnapStore((s) => s.snapSettings);
   const updateSnapSettings = useSnapStore((s) => s.updateSnapSettings);
+  const setSnapTypeEnabled = useSnapStore((s) => s.setSnapTypeEnabled);
+  const setSnapTypeShow = useSnapStore((s) => s.setSnapTypeShow);
 
   const [snapPopoverOpen, setSnapPopoverOpen] = useState(false);
+  const snapTriggerRef = useRef<HTMLButtonElement>(null);
 
   // Get selected element from project's global elements
   const elements = project?.elements || [];
@@ -769,6 +786,7 @@ export function EditBar() {
               <span>Snap</span>
             </button>
             <button
+              ref={snapTriggerRef}
               onClick={() => setSnapPopoverOpen(!snapPopoverOpen)}
               className={clsx(
                 'flex items-center px-1 py-1 rounded-r text-xs transition-colors border-l',
@@ -787,10 +805,13 @@ export function EditBar() {
           <SnapSettingsPopover
             isOpen={snapPopoverOpen}
             onClose={() => setSnapPopoverOpen(false)}
+            triggerRef={snapTriggerRef}
             snapEnabled={snapEnabled}
             setSnapEnabled={setSnapEnabled}
             snapSettings={snapSettings}
             updateSnapSettings={updateSnapSettings}
+            setSnapTypeEnabled={setSnapTypeEnabled}
+            setSnapTypeShow={setSnapTypeShow}
           />
         </div>
         </div>

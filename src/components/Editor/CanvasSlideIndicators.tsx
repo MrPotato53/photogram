@@ -22,7 +22,10 @@ export function CanvasSlideIndicators({
       {slides.map((_, index) => (
         <div
           key={index}
-          className="absolute -top-5 group"
+          // z-30 lifts the tag above the Konva Stage, whose transparent
+          // overflow buffer (top: -STAGE_OVERFLOW) is a later DOM sibling and
+          // would otherwise intercept hover/click over these -top-5 tags.
+          className="absolute -top-5 z-30 group"
           style={{
             left: 24 + (index * canvasSize.width + canvasSize.width / 2) * zoomLevel,
             transform: 'translateX(-50%)',

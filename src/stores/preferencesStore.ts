@@ -13,6 +13,11 @@ interface PreferencesState {
   setDefaultExportResolution: (key: string) => Promise<void>;
   /** Set the on-canvas working resolution (CANVAS_RESOLUTIONS key) + persist. */
   setCanvasResolution: (key: string) => Promise<void>;
+  /** Remember a snap guide's visibility globally (persisted) + persist. */
+  setSnapGuideVisibility: (
+    key: keyof Preferences['snapGuideVisibility'],
+    value: boolean
+  ) => Promise<void>;
   /** Replace the keyboard shortcut overrides + persist. */
   setKeyboardShortcuts: (overrides: Record<string, string>) => Promise<void>;
   /** Replace the user's custom aspect-ratio presets + persist. */
@@ -26,6 +31,7 @@ const defaultPreferences: Preferences = {
   keyboardShortcuts: {},
   customAspectRatios: [],
   canvasResolution: DEFAULT_CANVAS_RESOLUTION,
+  snapGuideVisibility: { canvas: false, margin: false, grid: false },
 };
 
 export const usePreferencesStore = create<PreferencesState>((set, get) => ({
@@ -43,6 +49,10 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         keyboardShortcuts: prefs.keyboardShortcuts || {},
         customAspectRatios: prefs.customAspectRatios || [],
         canvasResolution: prefs.canvasResolution || defaultPreferences.canvasResolution,
+        snapGuideVisibility: {
+          ...defaultPreferences.snapGuideVisibility,
+          ...(prefs.snapGuideVisibility || {}),
+        },
       };
       set({ preferences: merged, isLoading: false });
       applyTheme(merged.theme);
@@ -88,6 +98,20 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
 
   setCanvasResolution: async (key) => {
     const newPrefs = { ...get().preferences, canvasResolution: key };
+    set({ preferences: newPrefs });
+    try {
+      await savePreferences(newPrefs);
+    } catch (error) {
+      console.error('Failed to save preferences:', error);
+    }
+  },
+
+  setSnapGuideVisibility: async (key, value) => {
+    const prefs = get().preferences;
+    const newPrefs = {
+      ...prefs,
+      snapGuideVisibility: { ...prefs.snapGuideVisibility, [key]: value },
+    };
     set({ preferences: newPrefs });
     try {
       await savePreferences(newPrefs);
