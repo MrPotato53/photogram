@@ -104,14 +104,11 @@ function generateLabel(context: HistoryOperationContext): string {
  * Only includes JSON-serializable data, NO image instances
  */
 function createSnapshot(project: Project): HistorySnapshot {
-  console.time('createSnapshot');
-  const result = {
+  return {
     elements: JSON.parse(JSON.stringify(project.elements)),
     slides: JSON.parse(JSON.stringify(project.slides)),
     mediaPool: JSON.parse(JSON.stringify(project.mediaPool)),
   };
-  console.timeEnd('createSnapshot');
-  return result;
 }
 
 /**

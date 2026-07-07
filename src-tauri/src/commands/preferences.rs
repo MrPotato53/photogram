@@ -1,5 +1,6 @@
 use crate::models::Preferences;
 use std::fs;
+use super::utils::fs_atomic::write_atomic;
 use tauri::{command, AppHandle};
 use super::utils::paths::get_preferences_path;
 
@@ -24,7 +25,7 @@ pub fn save_preferences(app: AppHandle, preferences: Preferences) -> Result<(), 
     let json = serde_json::to_string_pretty(&preferences)
         .map_err(|e| format!("Failed to serialize preferences: {}", e))?;
 
-    fs::write(&prefs_path, json).map_err(|e| format!("Failed to save preferences: {}", e))?;
+    write_atomic(&prefs_path, &json)?;
 
     Ok(())
 }

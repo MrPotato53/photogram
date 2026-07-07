@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use tauri::{command, AppHandle, Emitter};
 use uuid::Uuid;
 use super::utils::paths::{get_projects_dir, get_thumbnails_dir, get_assets_dir};
+use super::utils::fs_atomic::write_atomic;
 use super::utils::image_processing::{
     collect_image_files, is_image_file, get_image_dimensions, generate_thumbnail,
 };
@@ -98,7 +99,7 @@ pub fn import_media_files(
                 project.updated_at = Utc::now();
 
                 if let Ok(json) = serde_json::to_string_pretty(&project) {
-                    let _ = fs::write(&project_path, json);
+                    let _ = write_atomic(&project_path, &json);
                 }
             }
         }
@@ -133,7 +134,7 @@ pub fn import_media_files(
                     }
 
                     if let Ok(json) = serde_json::to_string_pretty(&project) {
-                        let _ = fs::write(&project_path_clone, json);
+                        let _ = write_atomic(&project_path_clone, &json);
                     }
 
                     // Emit event to notify frontend that thumbnails are ready
@@ -177,7 +178,7 @@ pub fn delete_media(
 
     let json = serde_json::to_string_pretty(&project)
         .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
+    write_atomic(&project_path, &json)?;
 
     Ok(project)
 }
@@ -242,7 +243,7 @@ pub fn relink_media(
 
     let json = serde_json::to_string_pretty(&project)
         .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
+    write_atomic(&project_path, &json)?;
 
     // Generate new thumbnail in background
     let thumb_filename = format!("{}.jpg", media_id);
@@ -263,7 +264,7 @@ pub fn relink_media(
                     }
 
                     if let Ok(json) = serde_json::to_string_pretty(&project) {
-                        let _ = fs::write(&project_path_clone, json);
+                        let _ = write_atomic(&project_path_clone, &json);
                     }
 
                     // Notify frontend
@@ -506,7 +507,7 @@ pub fn bulk_relink_media(
 
     let json = serde_json::to_string_pretty(&project)
         .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
+    write_atomic(&project_path, &json)?;
 
     // Regenerate thumbnails in the background; emit one event when all done.
     if !thumb_jobs.is_empty() {
@@ -523,7 +524,7 @@ pub fn bulk_relink_media(
                                 m.thumbnail_path = Some(thumb.to_string_lossy().to_string());
                             }
                             if let Ok(j) = serde_json::to_string_pretty(&p) {
-                                let _ = fs::write(&project_path_clone, j);
+                                let _ = write_atomic(&project_path_clone, &j);
                             }
                         }
                     }

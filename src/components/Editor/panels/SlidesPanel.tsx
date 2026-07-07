@@ -4,6 +4,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import type { Element } from '../../../types';
 import { useProjectStore } from '../../../stores/projectStore';
 import { useSlideStore } from '../../../stores/slideStore';
+import { useElementStore } from '../../../stores/elementStore';
 import { usePanelStore } from '../../../stores/panelStore';
 import { useTemplatesStore } from '../../../stores/templatesStore';
 import { ContextMenu, ContextMenuItem } from '../../common/ContextMenu';
@@ -435,6 +436,10 @@ export function SlidesPanel() {
       if ((e.key === 'Delete' || e.key === 'Backspace') && slides.length > 1) {
         // Don't delete if user is typing in an input
         if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+        // If a canvas element is selected (e.g. via Tab cycling, which
+        // doesn't click the canvas and so doesn't clear this panel's
+        // focus), the element delete wins — never delete both at once.
+        if (useElementStore.getState().selectedElementId) return;
 
         e.preventDefault();
         removeSlide(currentSlideIndex);
@@ -480,8 +485,13 @@ export function SlidesPanel() {
     // Only handle left mouse button
     if (e.button !== 0) return;
 
-    // Set focus to this panel
+    // Set focus to this panel. Clear canvas element selection so Delete is
+    // unambiguous — otherwise the canvas keydown handler (element delete)
+    // and this panel's keydown handler (slide delete) both fire on one
+    // press, racing two concurrent project updates (last write wins) and
+    // pushing two history entries that undo replays in confusing ways.
     setHasFocus(true);
+    useElementStore.getState().selectElement(null);
 
     // Hide context menu
     setContextMenuSlideIndex(null);
@@ -496,8 +506,10 @@ export function SlidesPanel() {
 
   const handleContextMenu = useCallback((e: React.MouseEvent, index: number) => {
     e.preventDefault();
-    // Set focus, select the slide and show context menu
+    // Set focus, select the slide and show context menu (clear element
+    // selection for the same Delete-ambiguity reason as handleMouseDown)
     setHasFocus(true);
+    useElementStore.getState().selectElement(null);
     setCurrentSlide(index);
     setContextMenuSlideIndex(index);
     setContextMenu({

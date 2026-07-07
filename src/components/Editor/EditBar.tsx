@@ -468,7 +468,8 @@ export function EditBar() {
   };
 
   const handleCrop = () => {
-    if (!selectedElement) return;
+    // Photos only — placeholders have no image to crop
+    if (!selectedElement || selectedElement.type !== 'photo') return;
     enterCropMode(selectedElement.id);
   };
 
@@ -684,7 +685,7 @@ export function EditBar() {
             }
             label="Crop"
             onClick={handleCrop}
-            disabled={!isElementSelected}
+            disabled={!isElementSelected || selectedElement?.type !== 'photo'}
             active={isCropping}
           />
           <IconButton

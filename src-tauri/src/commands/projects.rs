@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::{command, AppHandle, Emitter, Manager};
 use super::utils::paths::{get_projects_dir, get_thumbnails_dir, get_assets_dir};
+use super::utils::fs_atomic::write_atomic;
 use super::utils::image_processing::{generate_thumbnail, get_image_dimensions, THUMBNAIL_MAX_SIDE};
 
 #[command]
@@ -80,7 +81,7 @@ pub fn get_project(app: AppHandle, id: String) -> Result<Project, String> {
     project.accessed_at = Utc::now();
     let json = serde_json::to_string_pretty(&project)
         .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
+    write_atomic(&project_path, &json)?;
 
     // Silence unused warning when no backfill occurred — write happens
     // regardless because accessed_at changed.
@@ -117,7 +118,7 @@ pub fn create_project(
 
     let json = serde_json::to_string_pretty(&project)
         .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
+    write_atomic(&project_path, &json)?;
 
     Ok(project)
 }
@@ -132,7 +133,7 @@ pub fn update_project(app: AppHandle, project: Project) -> Result<Project, Strin
 
     let json = serde_json::to_string_pretty(&updated_project)
         .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_path, json).map_err(|e| format!("Failed to save project: {}", e))?;
+    write_atomic(&project_path, &json)?;
 
     Ok(updated_project)
 }
@@ -222,7 +223,7 @@ pub fn save_project_thumbnail(
         if let Ok(mut project) = serde_json::from_str::<Project>(&contents) {
             project.thumbnail = Some(thumb_path_str.clone());
             if let Ok(json) = serde_json::to_string_pretty(&project) {
-                let _ = fs::write(&project_path, json);
+                let _ = write_atomic(&project_path, &json);
             }
         }
     }

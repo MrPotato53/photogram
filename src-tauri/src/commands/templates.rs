@@ -1,5 +1,6 @@
 use crate::models::Template;
 use std::fs;
+use super::utils::fs_atomic::write_atomic;
 use tauri::{command, AppHandle};
 use super::utils::paths::get_templates_path;
 
@@ -39,7 +40,7 @@ pub fn save_template(app: AppHandle, template: Template) -> Result<Vec<Template>
     let json = serde_json::to_string_pretty(&templates)
         .map_err(|e| format!("Failed to serialize templates: {}", e))?;
 
-    fs::write(&templates_path, json)
+    write_atomic(&templates_path, &json)
         .map_err(|e| format!("Failed to save templates: {}", e))?;
 
     Ok(templates)
@@ -64,7 +65,7 @@ pub fn delete_template(app: AppHandle, template_id: String) -> Result<Vec<Templa
     let json = serde_json::to_string_pretty(&templates)
         .map_err(|e| format!("Failed to serialize templates: {}", e))?;
 
-    fs::write(&templates_path, json)
+    write_atomic(&templates_path, &json)
         .map_err(|e| format!("Failed to save templates: {}", e))?;
 
     Ok(templates)
@@ -102,7 +103,7 @@ pub fn reorder_templates(app: AppHandle, template_ids: Vec<String>) -> Result<Ve
     let json = serde_json::to_string_pretty(&reordered)
         .map_err(|e| format!("Failed to serialize templates: {}", e))?;
 
-    fs::write(&templates_path, json)
+    write_atomic(&templates_path, &json)
         .map_err(|e| format!("Failed to save templates: {}", e))?;
 
     Ok(reordered)

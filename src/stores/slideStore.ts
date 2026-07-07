@@ -1,11 +1,20 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import type { Slide, Template, Element } from '../types';
-import { updateProject } from '../services/tauri';
+import { updateProject, embedElementAsset } from '../services/tauri';
 import { getSlideWidth } from '../utils/designConstants';
 import { getSlideIndex } from '../utils/slideUtils';
 import { useProjectStore } from './projectStore';
+import { useHistoryStore } from './historyStore';
 import type { AspectRatio } from '../types';
+
+// Home slide = leftmost slide an element occupies. Elements can sit at
+// slightly negative x (drag clamp allows up to -width+50), which would
+// give index -1 and silently exempt them from slide remove/reorder/shift
+// logic — clamp to slide 0 instead.
+function getHomeSlideIndex(elementX: number, slideWidth: number): number {
+  return Math.max(0, getSlideIndex(elementX, slideWidth));
+}
 
 interface SlideState {
   currentSlideIndex: number;
@@ -127,25 +136,26 @@ export const useSlideStore = create<SlideState>((set, get) => ({
 
     // Find elements "homed" on this slide and remove them
     // An element's home slide is the leftmost slide it occupies
-    const updatedElements = project.elements.filter((element) => {
-      const homeSlideIndex = getSlideIndex(element.x, slideWidth);
-      return homeSlideIndex !== slideIndex;
-    });
+    const removedElements = project.elements.filter(
+      (element) => getHomeSlideIndex(element.x, slideWidth) === slideIndex
+    );
+    const updatedElements = project.elements.filter(
+      (element) => getHomeSlideIndex(element.x, slideWidth) !== slideIndex
+    );
 
     // Adjust x coordinates for elements on slides after the deleted one
     const adjustedElements = updatedElements.map((element) => {
-      const homeSlideIndex = getSlideIndex(element.x, slideWidth);
+      const homeSlideIndex = getHomeSlideIndex(element.x, slideWidth);
       if (homeSlideIndex > slideIndex) {
         return { ...element, x: element.x - slideWidth };
       }
       return element;
     });
 
-    const updatedSlides = project.slides.filter((_, index) => index !== slideIndex);
-    // Update order values
-    updatedSlides.forEach((slide, index) => {
-      slide.order = index;
-    });
+    // New objects for order updates — never mutate current store state
+    const updatedSlides = project.slides
+      .filter((_, index) => index !== slideIndex)
+      .map((slide, index) => ({ ...slide, order: index }));
 
     const updatedProject = { ...project, slides: updatedSlides, elements: adjustedElements };
 
@@ -165,6 +175,23 @@ export const useSlideStore = create<SlideState>((set, get) => ({
         slideIndex,
       });
       set({ currentSlideIndex: newCurrentIndex });
+
+      // Track embedded assets of removed elements so their files are
+      // cleaned up when the deletion falls off the history stack (same
+      // pattern as elementStore.removeElement — without this, slide
+      // deletion orphans asset files on disk forever).
+      const historyStore = useHistoryStore.getState();
+      const currentEntry = historyStore.entries[historyStore.currentIndex];
+      for (const element of removedElements) {
+        if (element.assetPath) {
+          historyStore.trackDeletedAsset({
+            assetPath: element.assetPath,
+            mediaId: element.mediaId || '',
+            deletedAt: Date.now(),
+            historyEntryId: currentEntry?.id || '',
+          });
+        }
+      }
     } catch (error) {
       console.error('Failed to remove slide:', error);
     }
@@ -181,20 +208,17 @@ export const useSlideStore = create<SlideState>((set, get) => ({
     const aspectRatio: AspectRatio = project.aspectRatio;
     const slideWidth = getSlideWidth(aspectRatio);
 
-    // Reorder slides array
-    const newSlides = [...project.slides];
-    const [movedSlide] = newSlides.splice(fromIndex, 1);
-    newSlides.splice(toIndex, 0, movedSlide);
-
-    // Update order values
-    newSlides.forEach((slide, index) => {
-      slide.order = index;
-    });
+    // Reorder slides array — new objects for order updates, never mutate
+    // current store state
+    const reordered = [...project.slides];
+    const [movedSlide] = reordered.splice(fromIndex, 1);
+    reordered.splice(toIndex, 0, movedSlide);
+    const newSlides = reordered.map((slide, index) => ({ ...slide, order: index }));
 
     // Adjust element positions based on slide movement
     // Elements stay with their "home" slide (leftmost slide they occupy)
     const adjustedElements = project.elements.map((element) => {
-      const homeSlideIndex = getSlideIndex(element.x, slideWidth);
+      const homeSlideIndex = getHomeSlideIndex(element.x, slideWidth);
 
       if (homeSlideIndex === fromIndex) {
         // Element is homed on the moved slide - move it to new position
@@ -272,12 +296,38 @@ export const useSlideStore = create<SlideState>((set, get) => ({
       ? Math.max(...project.elements.map((el) => el.zIndex))
       : -1;
 
-    const duplicatedElements: Element[] = slideElements.map((element, index) => ({
-      ...element,
-      id: uuidv4(),
-      x: element.x + slideWidth, // Shift to next slide position
-      zIndex: maxZIndex + 1 + index,
-    }));
+    const duplicatedElements: Element[] = [];
+    for (let index = 0; index < slideElements.length; index++) {
+      const element = slideElements[index];
+      const newElement: Element = {
+        ...element,
+        id: uuidv4(),
+        x: element.x + slideWidth, // Shift to next slide position
+        zIndex: maxZIndex + 1 + index,
+      };
+
+      // Photo elements need their own embedded asset copy so the duplicate
+      // doesn't share a file with the original — asset cleanup on history
+      // prune would delete the shared file out from under the survivor.
+      // Same pattern as elementStore.duplicateSelectedElement.
+      if (newElement.type === 'photo' && newElement.mediaId) {
+        const media = project.mediaPool.find((m) => m.id === newElement.mediaId);
+        // Prefer the media pool original; fall back to the source element's
+        // embedded asset if the media was removed from the pool.
+        const sourcePath = media?.filePath || element.assetPath;
+        try {
+          if (!sourcePath) throw new Error('No source file for asset embed');
+          newElement.assetPath = await embedElementAsset(project.id, newElement.id, sourcePath);
+        } catch (error) {
+          console.error('Failed to embed asset for slide duplicate:', error);
+          // Drop the aliased path rather than share a file with the
+          // original; the element falls back to the media pool reference.
+          newElement.assetPath = undefined;
+        }
+      }
+
+      duplicatedElements.push(newElement);
+    }
 
     // Shift existing slides after the insertion point
     const updatedSlides = [
@@ -291,7 +341,7 @@ export const useSlideStore = create<SlideState>((set, get) => ({
 
     // Shift elements on slides after the new slide
     const updatedElements = project.elements.map((element) => {
-      const homeSlideIndex = getSlideIndex(element.x, slideWidth);
+      const homeSlideIndex = getHomeSlideIndex(element.x, slideWidth);
       if (homeSlideIndex >= newSlideIndex) {
         return { ...element, x: element.x + slideWidth };
       }

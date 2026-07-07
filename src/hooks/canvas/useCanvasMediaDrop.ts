@@ -2,7 +2,9 @@ import { useEffect, useRef, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import type { Element } from '../../types';
 import { getSlideIndex, getSlideIndexFromCenter } from '../../utils/slideUtils';
+import { embedElementAsset } from '../../services/tauri';
 import { useProjectStore } from '../../stores/projectStore';
+import { useHistoryStore } from '../../stores/historyStore';
 import { useSlideStore } from '../../stores/slideStore';
 import { useElementStore } from '../../stores/elementStore';
 import { useMediaStore } from '../../stores/mediaStore';
@@ -215,15 +217,46 @@ export function useCanvasMediaDrop({
           setDraggingMedia(null);
           clearMediaSelection();
 
-          updateElement(target.elementId, {
-            mediaId: media.id,
-            assetPath: undefined,
-            cropX,
-            cropY,
-            cropWidth,
-            cropHeight,
-            lastCropRatio: null,
-          });
+          const projectId = state.project.id;
+          const oldElement = state.elements.find((el) => el.id === target.elementId);
+          const oldAssetPath = oldElement?.assetPath;
+
+          void (async () => {
+            // Embed the new media as the element's own asset copy (same
+            // ownership model as addElement). Use a fresh id for the
+            // filename — reusing the element id would overwrite the
+            // element's existing asset file in place, breaking undo.
+            let assetPath: string | undefined;
+            try {
+              assetPath = await embedElementAsset(projectId, uuidv4(), media.filePath);
+            } catch (error) {
+              console.error('Failed to embed asset for replace:', error);
+            }
+
+            await updateElement(target.elementId, {
+              mediaId: media.id,
+              assetPath,
+              cropX,
+              cropY,
+              cropWidth,
+              cropHeight,
+              lastCropRatio: null,
+            });
+
+            // The replaced element's old embedded asset is no longer
+            // referenced by the live project — register it for cleanup
+            // when it falls off the history stack (mirrors removeElement).
+            if (oldAssetPath && oldAssetPath !== assetPath) {
+              const historyStore = useHistoryStore.getState();
+              const currentEntry = historyStore.entries[historyStore.currentIndex];
+              historyStore.trackDeletedAsset({
+                assetPath: oldAssetPath,
+                mediaId: oldElement?.mediaId || '',
+                deletedAt: Date.now(),
+                historyEntryId: currentEntry?.id || '',
+              });
+            }
+          })();
 
           const slideIndex = getSlideIndexFromCenter(target.x, target.width, state.designSize.width);
           if (slideIndex >= 0 && slideIndex < state.numSlides) {
@@ -315,14 +348,27 @@ export function useCanvasMediaDrop({
         setDraggingMedia(null);
         clearMediaSelection();
 
-        updateElement(placeholderFrame.id, {
-          type: 'photo',
-          mediaId: media.id,
-          cropX,
-          cropY,
-          cropWidth,
-          cropHeight,
-        });
+        const projectId = state.project.id;
+        void (async () => {
+          // Embed like addElement does so the element owns its own copy
+          // of the image instead of referencing the media pool file.
+          let assetPath: string | undefined;
+          try {
+            assetPath = await embedElementAsset(projectId, placeholderFrame.id, media.filePath);
+          } catch (error) {
+            console.error('Failed to embed asset for placeholder fill:', error);
+          }
+
+          await updateElement(placeholderFrame.id, {
+            type: 'photo',
+            mediaId: media.id,
+            assetPath,
+            cropX,
+            cropY,
+            cropWidth,
+            cropHeight,
+          });
+        })();
 
         const slideIndex = getSlideIndexFromCenter(placeholderFrame.x, placeholderFrame.width, state.designSize.width);
         if (slideIndex >= 0 && slideIndex < state.numSlides) {

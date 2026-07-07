@@ -201,12 +201,16 @@ export function useCanvasKeyboard({
         return;
       }
 
-      // Enter crop mode with 'c' key
+      // Enter crop mode with 'c' key (photos only — placeholders have no
+      // image to crop, and CropOverlay assumes one exists)
       if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey) {
         if (selectedElementId && !cropModeElementId) {
-          e.preventDefault();
-          onEnterCropMode(selectedElementId);
-          return;
+          const selected = elements.find((el) => el.id === selectedElementId);
+          if (selected?.type === 'photo') {
+            e.preventDefault();
+            onEnterCropMode(selectedElementId);
+            return;
+          }
         }
       }
 

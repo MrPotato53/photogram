@@ -202,7 +202,6 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     scrollContainerRef,
     canvasSize,
     zoomLevel,
-    isDragging: isDraggingRef.current,
   });
 
   // Track original element state when entering crop mode (for cancellation)
@@ -217,6 +216,10 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   // Reset key for crop overlay - increment to trigger reset to full bounds
   const [cropResetKey, setCropResetKey] = useState(0);
+
+  // Imperative crop-apply handle, assigned by CropOverlay while mounted.
+  // Lets the crop toolbar's Apply button run the exact Enter-key code path.
+  const cropApplyRef = useRef<(() => void) | null>(null);
 
   // File drag-drop hook
   const { isFileDragOver } = useCanvasFileDrop({
@@ -580,6 +583,46 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     };
   }, [cropModeElementId]);
 
+  // Clamp element to visible bounds (can span across entire canvas).
+  // Declared before the keyboard hook because nudges use it too.
+  const clampToVisibleBounds = useCallback(
+    (x: number, y: number, elementWidth: number, elementHeight: number) => {
+      const minVisible = 50;
+      const clampedX = Math.max(
+        -elementWidth + minVisible,
+        Math.min(x, totalDesignWidth - minVisible)
+      );
+      const clampedY = Math.max(
+        -elementHeight + minVisible,
+        Math.min(y, designSize.height - minVisible)
+      );
+      return { x: clampedX, y: clampedY };
+    },
+    [totalDesignWidth, designSize.height]
+  );
+
+  // Keyboard nudges go through the same visibility clamp as drags —
+  // without it, arrow keys can push an element fully off-canvas where
+  // only Tab-cycling or the layers panel can recover it.
+  const updateElementClamped = useCallback(
+    (elementId: string, updates: Partial<Element>) => {
+      if (updates.x !== undefined || updates.y !== undefined) {
+        const el = elementMap.get(elementId);
+        if (el) {
+          const clamped = clampToVisibleBounds(
+            updates.x ?? el.x,
+            updates.y ?? el.y,
+            el.width,
+            el.height
+          );
+          updates = { ...updates, x: clamped.x, y: clamped.y };
+        }
+      }
+      updateElement(elementId, updates);
+    },
+    [elementMap, clampToVisibleBounds, updateElement]
+  );
+
   // Keyboard handling hook
   useCanvasKeyboard({
     selectedElementId,
@@ -587,7 +630,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     cropModeElementId,
     onSelectElement: selectElement,
     onFocusElement: focusElement,
-    onUpdateElement: updateElement,
+    onUpdateElement: updateElementClamped,
     onRemoveElement: removeElement,
     onEnterCropMode: enterCropMode,
     onExitCropMode: exitCropMode,
@@ -661,15 +704,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         const clampedX = Math.max(slideLeft, Math.min(slideRight, designX));
         const clampedY = Math.max(0, Math.min(designSize.height, designY));
 
-        const newIds = await pasteElements({ centerX: clampedX, centerY: clampedY });
-
-        // Scroll to first pasted element if needed
-        if (newIds.length > 0) {
-          const firstElement = elementMap.get(newIds[0]);
-          if (firstElement) {
-            scrollToElement(firstElement);
-          }
-        }
+        // Paste target is the (clamped) viewport center, so the pasted
+        // elements land on screen by construction — no scroll needed.
+        await pasteElements({ centerX: clampedX, centerY: clampedY });
       }
     },
     onDuplicate: duplicateSelectedElement,
@@ -761,23 +798,6 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       }
     }
   }, [selectElement, elementMap, designSize.width, numSlides, setCurrentSlide]);
-
-  // Clamp element to visible bounds (can span across entire canvas)
-  const clampToVisibleBounds = useCallback(
-    (x: number, y: number, elementWidth: number, elementHeight: number) => {
-      const minVisible = 50;
-      const clampedX = Math.max(
-        -elementWidth + minVisible,
-        Math.min(x, totalDesignWidth - minVisible)
-      );
-      const clampedY = Math.max(
-        -elementHeight + minVisible,
-        Math.min(y, designSize.height - minVisible)
-      );
-      return { x: clampedX, y: clampedY };
-    },
-    [totalDesignWidth, designSize.height]
-  );
 
   // Auto-scroll logic is handled by useCanvasAutoScroll hook
 
@@ -967,6 +987,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
           // Apply both mutations (update target + remove source) as a single
           // atomic operation so undo/redo treats it as one step.
           if (project) {
+            const targetElement = project.elements.find(el => el.id === target.elementId);
             const updatedElements = project.elements
               .filter(el => el.id !== elementId) // remove the replacer
               .map(el => {
@@ -974,7 +995,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
                 return {
                   ...el,
                   mediaId: element.mediaId,
-                  assetPath: undefined,
+                  // The source element is removed in the same operation, so
+                  // the target takes ownership of its embedded asset file.
+                  assetPath: element.assetPath,
                   cropX,
                   cropY,
                   cropWidth,
@@ -993,6 +1016,21 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
             // Persist to backend
             updateProject(updatedProject).catch(err => console.error('Failed to persist replace:', err));
+
+            // The target's old embedded asset is no longer referenced by
+            // the live project — register it for cleanup when it falls off
+            // the history stack (mirrors removeElement).
+            const oldAssetPath = targetElement?.assetPath;
+            if (oldAssetPath && oldAssetPath !== element.assetPath) {
+              const historyStore = useHistoryStore.getState();
+              const currentEntry = historyStore.entries[historyStore.currentIndex];
+              historyStore.trackDeletedAsset({
+                assetPath: oldAssetPath,
+                mediaId: targetElement?.mediaId || '',
+                deletedAt: Date.now(),
+                historyEntryId: currentEntry?.id || '',
+              });
+            }
           }
 
           setActiveGuides([]);
@@ -1525,18 +1563,11 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     // Right-click paste - use cursor position for both element and canvas
     if (!contextMenu.designPosition) return;
 
-    const newIds = await pasteElements({
+    // Paste target is the cursor position, already on screen — no scroll needed.
+    await pasteElements({
       centerX: contextMenu.designPosition.x,
       centerY: contextMenu.designPosition.y,
     });
-
-    // Scroll to first pasted element if needed
-    if (newIds.length > 0 && scrollContainerRef.current) {
-      const firstElement = elementMap.get(newIds[0]);
-      if (firstElement) {
-        scrollToElement(firstElement);
-      }
-    }
 
     setContextMenu({ ...contextMenu, isOpen: false });
   };
@@ -1548,32 +1579,6 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     const slideIndex = contextMenu.slideIndex ?? currentSlideIndex;
     duplicateSlide(slideIndex);
     setContextMenu({ ...contextMenu, isOpen: false });
-  };
-
-  // Scroll to make an element visible
-  const scrollToElement = (element: Element) => {
-    if (!scrollContainerRef.current) return;
-
-    const container = scrollContainerRef.current;
-
-    // Calculate element center in screen coordinates
-    const elementCenterX = (element.x + element.width / 2) * scale * zoomLevel + 24;
-
-    // Get visible range
-    const visibleLeft = container.scrollLeft;
-    const visibleRight = container.scrollLeft + container.clientWidth;
-
-    // Check if element is visible
-    const elementLeft = element.x * scale * zoomLevel + 24;
-    const elementRight = (element.x + element.width) * scale * zoomLevel + 24;
-
-    if (elementLeft < visibleLeft || elementRight > visibleRight) {
-      // Scroll to center the element
-      container.scrollTo({
-        left: Math.max(0, elementCenterX - container.clientWidth / 2),
-        behavior: 'smooth',
-      });
-    }
   };
 
   // External focus request (e.g. layers panel double-click / drag start).
@@ -1759,6 +1764,11 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         width: croppingElement.width / (croppingElement.cropWidth ?? 1),
         height: croppingElement.height / (croppingElement.cropHeight ?? 1),
       }
+    : null;
+
+  // Element the context menu is open on (photo-only items are gated on it)
+  const contextMenuElement = contextMenu.elementId
+    ? elementMap.get(contextMenu.elementId) ?? null
     : null;
 
   const totalCanvasWidth = numSlides * canvasSize.width;
@@ -1972,6 +1982,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
                       resetKey={cropResetKey}
                       contentRotation={cropContentRotation}
                       onContentRotationChange={setCropContentRotation}
+                      applyRef={cropApplyRef}
                     />
                   </>
                 )}
@@ -2086,10 +2097,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
           setCropContentRotation(0);
         }}
         onCancel={handleCropCancel}
-        onApply={() => {
-          const event = new KeyboardEvent('keydown', { key: 'Enter' });
-          window.dispatchEvent(event);
-        }}
+        onApply={() => cropApplyRef.current?.()}
       />
 
       {/* Context menu - shows different items for elements vs empty canvas */}
@@ -2106,21 +2114,27 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
             <ContextMenuItem onClick={handleFlipVertical}>
               Flip Vertical
             </ContextMenuItem>
-            <ContextMenuItem onClick={handleCropFromMenu}>
-              Crop
-            </ContextMenuItem>
+            {contextMenuElement?.type === 'photo' && (
+              <ContextMenuItem onClick={handleCropFromMenu}>
+                Crop
+              </ContextMenuItem>
+            )}
             <ContextMenuItem onClick={handleCopyElement}>
               Copy
             </ContextMenuItem>
             <ContextMenuItem onClick={handlePasteAtCursor}>
               Paste
             </ContextMenuItem>
-            <ContextMenuItem onClick={handleResetCrop}>
-              Reset Crop
-            </ContextMenuItem>
-            <ContextMenuItem onClick={handleResetAspectRatio}>
-              Reset Aspect Ratio
-            </ContextMenuItem>
+            {contextMenuElement?.type === 'photo' && (
+              <>
+                <ContextMenuItem onClick={handleResetCrop}>
+                  Reset Crop
+                </ContextMenuItem>
+                <ContextMenuItem onClick={handleResetAspectRatio}>
+                  Reset Aspect Ratio
+                </ContextMenuItem>
+              </>
+            )}
             <ContextMenuItem onClick={handleCenterOnCanvas}>
               Center on Canvas
             </ContextMenuItem>

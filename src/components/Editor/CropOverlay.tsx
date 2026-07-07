@@ -51,6 +51,10 @@ interface CropOverlayProps {
   // Setter for the Straighten value — invoked by crop-local undo/redo to
   // restore rotation from history entries.
   onContentRotationChange: (deg: number) => void;
+  // Imperative apply handle: the overlay assigns its confirm function here
+  // so the crop toolbar's Apply button can trigger the same code path as
+  // the Enter key without dispatching synthetic keyboard events.
+  applyRef?: React.MutableRefObject<(() => void) | null>;
 }
 
 export function CropOverlay({
@@ -72,6 +76,7 @@ export function CropOverlay({
   resetKey,
   contentRotation,
   onContentRotationChange,
+  applyRef,
 }: CropOverlayProps) {
   // Store the existing crop values
   const existingCropX = element.cropX ?? 0;
@@ -667,6 +672,16 @@ export function CropOverlay({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [cropRect, onCancel, onCropConfirm, confirmCrop]);
+
+  // Expose the confirm path imperatively so the toolbar Apply button can
+  // invoke it directly (same code path as the Enter key above).
+  useEffect(() => {
+    if (!applyRef) return;
+    applyRef.current = () => confirmCrop(onCropConfirm);
+    return () => {
+      applyRef.current = null;
+    };
+  }, [applyRef, confirmCrop, onCropConfirm]);
 
   // Option/Alt + scroll wheel: scale the underlying image while keeping crop rect stationary
   // Use refs for values that change rapidly during scroll to avoid stale closures

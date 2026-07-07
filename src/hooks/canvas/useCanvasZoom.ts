@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 1.5;
@@ -22,6 +22,14 @@ export function useCanvasZoom({
   canvasSize,
 }: UseCanvasZoomOptions) {
   const [zoomLevel, setZoomLevel] = useState(1);
+  // Latest zoom target, updated synchronously per wheel event. Fast
+  // trackpad gestures fire several wheel events between React renders;
+  // accumulating on the closure's zoomLevel would compute every step from
+  // the same stale base and silently drop all but the last one.
+  const zoomTargetRef = useRef(zoomLevel);
+  useEffect(() => {
+    zoomTargetRef.current = zoomLevel;
+  }, [zoomLevel]);
 
   // Handle Cmd/Ctrl + scroll for zoom (relative to mouse position)
   useEffect(() => {
@@ -36,14 +44,20 @@ export function useCanvasZoom({
 
         // Canvas point under the mouse, in unzoomed canvas-pixel coordinates.
         // (stageContainer has paddingLeft: 24; canvas content starts there.)
+        // Uses the closure zoomLevel (the zoom the DOM is rendered at), not
+        // the accumulation target, so the anchor matches the visible layout.
         const stageRect = stage.getBoundingClientRect();
         const canvasX = (e.clientX - stageRect.left - 24) / zoomLevel;
         const canvasY = (e.clientY - stageRect.top) / zoomLevel;
 
-        // Normalize scroll delta and apply zoom
+        // Normalize scroll delta and apply zoom on the accumulation target
         const zoomDelta = -e.deltaY * 0.002;
-        const newZoomLevel = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomLevel + zoomDelta));
-        if (newZoomLevel === zoomLevel) return;
+        const newZoomLevel = Math.max(
+          MIN_ZOOM,
+          Math.min(MAX_ZOOM, zoomTargetRef.current + zoomDelta)
+        );
+        if (newZoomLevel === zoomTargetRef.current) return;
+        zoomTargetRef.current = newZoomLevel;
 
         setZoomLevel(newZoomLevel);
 
