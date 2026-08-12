@@ -89,6 +89,21 @@ const MediaItemComponent = memo(function MediaItemComponent({
             <bdi>{media.fileName}</bdi>
           </span>
         </div>
+      ) : !media.thumbnailPath ? (
+        // Thumbnail still generating (fast pass lands within ~a second).
+        // A lightweight pulse tile instead of <img src={original}> — the
+        // webview decoding N full-resolution photos both janked the UI and
+        // competed with the backend's thumbnailer for CPU.
+        <div className="w-full h-full flex items-center justify-center animate-pulse bg-theme-bg-tertiary">
+          <svg className="w-6 h-6 text-gray-500/60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={1.5}
+              d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+            />
+          </svg>
+        </div>
       ) : (
         <div className={clsx(
           'w-full h-full flex items-center justify-center',
@@ -442,15 +457,23 @@ export function MediaPoolPanel() {
     checkMissingMedia();
   }, [mediaPool]);
 
-  // Bump every cache-bust version when the backend signals thumbnails were
-  // regenerated. Covers backend-initiated regens (initial bulk-import, the
-  // higher-resolution thumbnail backfill in get_project) where the file
-  // path is unchanged but the bytes on disk are new.
+  // Bump cache-bust versions when the backend signals thumbnails were
+  // (re)generated. Covers backend-initiated regens (import fast/quality
+  // passes, the higher-resolution backfill in get_project, relink) where
+  // the file path is unchanged but the bytes on disk are new. The payload
+  // names the affected media so an incremental import event doesn't force
+  // every already-final tile to refetch; empty/missing payload falls back
+  // to bumping everything.
   useEffect(() => {
-    const unlistenPromise = listen('thumbnails-ready', () => {
-      const ids = mediaPool.map((m) => m.id);
-      bumpThumbnailVersions(ids);
-    });
+    const unlistenPromise = listen<{ mediaId: string; thumbnailPath: string }[]>(
+      'thumbnails-ready',
+      (event) => {
+        const ids = Array.isArray(event.payload) && event.payload.length > 0
+          ? event.payload.map((u) => u.mediaId)
+          : mediaPool.map((m) => m.id);
+        bumpThumbnailVersions(ids);
+      }
+    );
     return () => {
       void unlistenPromise.then((fn) => fn());
     };

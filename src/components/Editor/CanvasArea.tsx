@@ -15,7 +15,9 @@ import { usePanelStore } from '../../stores/panelStore';
 import { usePreferencesStore } from '../../stores/preferencesStore';
 import { canvasResolutionToPixelRatio } from '../../constants/canvasResolutions';
 import { saveProjectThumbnail, updateProject } from '../../services/tauri';
-import { calculateSnapLines, findSnap, findTransformSnap } from '../../utils/snapping';
+import { calculateSnapLines, findSnap, findTransformSnap, guidesEqual, type SnapLines } from '../../utils/snapping';
+import { getRotatedBounds } from '../../utils/coordinates';
+import { fitCropToRotation, adaptCropToFrame } from '../../utils/contentRotation';
 import { CropOverlay } from './CropOverlay';
 import { ContextMenu, ContextMenuItem } from '../common/ContextMenu';
 import { CanvasSlideIndicators } from './CanvasSlideIndicators';
@@ -27,6 +29,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { DESIGN_HEIGHT, getDesignSize } from '../../utils/designConstants';
 import { getSlideIndex, getSlideIndexFromCenter } from '../../utils/slideUtils';
 import { useCanvasZoom, useCanvasFileDrop, useCanvasImages, useCanvasMediaDrop, useCanvasFillMode } from '../../hooks/canvas';
+import { findPlaceholderAt, type ReplaceTarget } from '../../hooks/canvas/useCanvasFillMode';
 import { useCanvasKeyboard } from '../../hooks/canvas/useCanvasKeyboard';
 import { useCanvasAutoScroll } from '../../hooks/canvas/useCanvasAutoScroll';
 import { useSlideExport } from '../../hooks/canvas/useSlideExport';
@@ -141,6 +144,12 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   const elements = project?.elements || [];
   const numSlides = slides.length;
 
+  // Latest elements for high-frequency drag handlers — lets handleDragMove
+  // hit-test placeholder frames without adding `elements` to its deps
+  // (which would re-render every CanvasElementRenderer on each change).
+  const elementsRef = useRef(elements);
+  elementsRef.current = elements;
+
   // Element lookup map for O(1) access by ID (replaces repeated .find() calls)
   const elementMap = useMemo(() => {
     const map = new Map<string, Element>();
@@ -193,11 +202,12 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // Auto-scroll hook
   const isDraggingRef = useRef<boolean>(false); // Track if we're currently dragging
 
-  // Throttle refs for drag operations - reduce expensive calculations during drag
-  const lastSnapCalcRef = useRef<{ x: number; y: number; time: number }>({ x: 0, y: 0, time: 0 });
-  const lastSnapTargetRef = useRef<{ x: number; y: number; snappedX: boolean; snappedY: boolean }>({ x: 0, y: 0, snappedX: false, snappedY: false });
-  const SNAP_THROTTLE_MS = 32; // ~30fps for snap calculations
-  const SNAP_MIN_DISTANCE = 3; // Minimum pixels moved before recalculating snaps
+  // Snap lines for the active drag/transform. Computed once on drag or
+  // transform start (they depend only on other elements + slide geometry,
+  // which are frozen during the gesture) and reused by every move event —
+  // recomputing them per-move was the dominant per-frame drag cost.
+  const dragSnapLinesRef = useRef<SnapLines | null>(null);
+  const transformSnapLinesRef = useRef<SnapLines | null>(null);
   const { stopAutoScroll, updateScrollSpeed } = useCanvasAutoScroll({
     scrollContainerRef,
     canvasSize,
@@ -258,7 +268,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
   // Fill mode hook (F-key fill, shared between media drop and element drag)
   // Replace mode hook (R-key replace, shared between media drop and element drag)
-  const { fillKeyRef, replaceKeyRef, fillLinesRef, getFillBoundsExcluding, getReplacementTarget } = useCanvasFillMode({
+  // Swap mode (S-key swap, canvas element drags only)
+  const { fillKeyRef, replaceKeyRef, swapKeyRef, getSwapTarget, fillLinesRef, getFillBoundsExcluding, getReplacementTarget } = useCanvasFillMode({
     elements,
     totalDesignWidth,
     designSize,
@@ -269,6 +280,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   const [fillPreview, setFillPreviewState] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   // Replace preview state (R-key replace mode — highlights the target element)
   const [replacePreview, setReplacePreviewState] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  // Swap preview: the other photo whose image will trade places with the
+  // dragged one (S held during a canvas element drag).
+  const [swapPreview, setSwapPreviewState] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const { fillPreviewListenerRef, replacePreviewListenerRef } = useCanvasMediaDrop({
     stageContainerRef,
     numSlides,
@@ -547,8 +561,14 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       const selectedNode = stage.findOne(`#${selectedElementId}`);
       if (selectedNode) {
         transformer.nodes([selectedNode]);
-        transformer.getLayer()?.batchDraw();
+      } else {
+        // Selected element no longer has a node (deleted, or consumed by
+        // a fill/replace transfer). Without this, the transformer keeps
+        // drawing its box around the destroyed node until the user
+        // clicks elsewhere.
+        transformer.nodes([]);
       }
+      transformer.getLayer()?.batchDraw();
     } else {
       transformer.nodes([]);
       transformer.getLayer()?.batchDraw();
@@ -586,15 +606,21 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   // Clamp element to visible bounds (can span across entire canvas).
   // Declared before the keyboard hook because nudges use it too.
   const clampToVisibleBounds = useCallback(
-    (x: number, y: number, elementWidth: number, elementHeight: number) => {
+    (x: number, y: number, elementWidth: number, elementHeight: number, rotation = 0) => {
       const minVisible = 50;
+      // Clamp the element's VISIBLE box, not the naive [x, x+w]×[y, y+h]
+      // rect: elements rotate about their top-left anchor, so at 90° the
+      // footprint sits entirely to the LEFT of the anchor and a naive clamp
+      // stops the drag up to a full dimension early. At 0° the offsets are
+      // (0, 0, w, h) and this reduces exactly to the original clamp.
+      const b = getRotatedBounds(0, 0, elementWidth, elementHeight, rotation);
       const clampedX = Math.max(
-        -elementWidth + minVisible,
-        Math.min(x, totalDesignWidth - minVisible)
+        minVisible - (b.x + b.width),
+        Math.min(x, totalDesignWidth - minVisible - b.x)
       );
       const clampedY = Math.max(
-        -elementHeight + minVisible,
-        Math.min(y, designSize.height - minVisible)
+        minVisible - (b.y + b.height),
+        Math.min(y, designSize.height - minVisible - b.y)
       );
       return { x: clampedX, y: clampedY };
     },
@@ -613,7 +639,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
             updates.x ?? el.x,
             updates.y ?? el.y,
             el.width,
-            el.height
+            el.height,
+            el.rotation
           );
           updates = { ...updates, x: clamped.x, y: clamped.y };
         }
@@ -792,7 +819,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     // Update current slide based on element position
     const element = elementMap.get(elementId);
     if (element) {
-      const slideIndex = getSlideIndexFromCenter(element.x, element.width, designSize.width);
+      const eb = getRotatedBounds(element.x, element.y, element.width, element.height, element.rotation);
+      const slideIndex = getSlideIndexFromCenter(eb.x, eb.width, designSize.width);
       if (slideIndex >= 0 && slideIndex < numSlides) {
         setCurrentSlide(slideIndex);
       }
@@ -806,6 +834,8 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   const elementFillPreviewRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
   // Replace preview for element drag (updated during handleDragMove)
   const elementReplacePreviewRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  // Swap preview for element drag (updated during handleDragMove)
+  const elementSwapPreviewRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
 
   const handleDragMove = useCallback(
     (elementId: string, e: Konva.KonvaEventObject<DragEvent>) => {
@@ -826,9 +856,16 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       const cursorX = pointerPos ? (pointerPos.x - layerX) / layerScale : newX + element.width / 2;
       const cursorY = pointerPos ? (pointerPos.y - layerY) / layerScale : newY + element.height / 2;
 
-      // Fill mode preview during element drag
+      // Fill mode preview during element drag. A placeholder frame under
+      // the cursor wins over the snap-line region (the frame is the fill
+      // target; region lookup splits multi-slide frames at the slide
+      // boundary). Frame fill moves the element's media, so only preview
+      // it for elements that have media.
       if (fillKeyRef.current) {
-        const bounds = getFillBoundsExcluding(cursorX, cursorY, elementId);
+        const frame = element.mediaId
+          ? findPlaceholderAt(elementsRef.current, cursorX, cursorY, elementId)
+          : null;
+        const bounds = frame ?? getFillBoundsExcluding(cursorX, cursorY, elementId);
         if (bounds && (
           !elementFillPreviewRef.current ||
           elementFillPreviewRef.current.x !== bounds.x ||
@@ -863,75 +900,101 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         setReplacePreviewState(null);
       }
 
-      // Apply snapping (snap to slide boundaries and other elements)
-      // THROTTLED: Only recalculate snap lines if enough time/distance has passed,
-      // but always apply the cached snap offset so the element "sticks" to the snap
-      // position instead of jittering between raw and snapped positions.
-      if (snapEnabled && !fillKeyRef.current && !replaceKeyRef.current) {
-        const now = performance.now();
-        const lastCalc = lastSnapCalcRef.current;
-        const dx = Math.abs(newX - lastCalc.x);
-        const dy = Math.abs(newY - lastCalc.y);
-        const timeSinceLastCalc = now - lastCalc.time;
+      // Swap mode preview: highlight the frame this one will trade with.
+      // Valid in both directions — dragging a photo onto an empty frame
+      // (leaving an empty frame behind) or an empty frame onto a photo.
+      if (swapKeyRef.current) {
+        const target = getSwapTarget(cursorX, cursorY, elementId);
+        if (target && (
+          !elementSwapPreviewRef.current ||
+          elementSwapPreviewRef.current.x !== target.x ||
+          elementSwapPreviewRef.current.y !== target.y
+        )) {
+          elementSwapPreviewRef.current = target;
+          setSwapPreviewState(target);
+        } else if (!target && elementSwapPreviewRef.current) {
+          elementSwapPreviewRef.current = null;
+          setSwapPreviewState(null);
+        }
+      } else if (elementSwapPreviewRef.current) {
+        elementSwapPreviewRef.current = null;
+        setSwapPreviewState(null);
+      }
 
-        // Only recalculate if moved enough or enough time passed
-        if (dx >= SNAP_MIN_DISTANCE || dy >= SNAP_MIN_DISTANCE || timeSinceLastCalc >= SNAP_THROTTLE_MS) {
-          const snapLines = calculateSnapLines(
-            elements,
-            elementId,
-            totalDesignWidth,
-            designSize.height,
-            snapSettings,
-            designSize.width,
-            numSlides
-          );
-
-          const elementRect = {
-            x: newX,
-            y: newY,
-            width: element.width,
-            height: element.height,
-          };
-          const snapResult = findSnap(elementRect, snapLines, 10);
-
-          // Cache the snap target so throttled frames stick to it
-          lastSnapTargetRef.current = {
-            x: snapResult.x,
-            y: snapResult.y,
-            snappedX: snapResult.x !== newX,
-            snappedY: snapResult.y !== newY,
-          };
-
-          newX = snapResult.x;
-          newY = snapResult.y;
+      // Apply snapping (snap to slide boundaries and other elements).
+      // Snap lines are computed ONCE per drag in handleDragStart (they
+      // depend only on other elements + slide geometry, which are frozen
+      // while dragging), so per-move work is just the cheap findSnap scan —
+      // no throttle needed, and snapping responds on every frame.
+      if (snapEnabled && !fillKeyRef.current && !replaceKeyRef.current && !swapKeyRef.current && dragSnapLinesRef.current) {
+        // Snap the element's VISIBLE box. A rotated element's footprint is
+        // not [x, x+width] (it rotates about its top-left anchor), so
+        // snapping raw x/y would align an invisible box and leave the image
+        // sitting somewhere off the guide.
+        const elementRect = getRotatedBounds(
+          newX,
+          newY,
+          element.width,
+          element.height,
+          element.rotation
+        );
+        const snapResult = findSnap(elementRect, dragSnapLinesRef.current, 10);
+        // findSnap moved the visible box; shift the element's anchor by the
+        // same amount (identical to assigning directly when unrotated).
+        newX += snapResult.x - elementRect.x;
+        newY += snapResult.y - elementRect.y;
+        // Only push guides to the store when they actually changed — a
+        // store set per mousemove would re-render CanvasSnapGuides for
+        // nothing on most frames.
+        if (!guidesEqual(useSnapStore.getState().activeGuides, snapResult.guides)) {
           setActiveGuides(snapResult.guides);
-
-          // Update last calculation tracking
-          lastSnapCalcRef.current = { x: newX, y: newY, time: now };
-        } else {
-          // Throttled frame: force to cached snap target for sticky feel
-          const lastSnap = lastSnapTargetRef.current;
-          if (lastSnap.snappedX) newX = lastSnap.x;
-          if (lastSnap.snappedY) newY = lastSnap.y;
         }
       }
 
       // Clamp to bounds (cheap operation, always do it)
-      const clamped = clampToVisibleBounds(newX, newY, element.width, element.height);
+      const clamped = clampToVisibleBounds(newX, newY, element.width, element.height, element.rotation);
       node.x(clamped.x);
       node.y(clamped.y);
 
       // Update auto-scroll based on mouse position
       updateScrollSpeed(e.evt.clientX);
     },
-    [elementMap, snapEnabled, snapSettings, totalDesignWidth, designSize.width, designSize.height, numSlides, setActiveGuides, clampToVisibleBounds, updateScrollSpeed, elements, fillKeyRef, replaceKeyRef, getFillBoundsExcluding, getReplacementTarget, setFillPreviewState, setReplacePreviewState]
+    [elementMap, snapEnabled, setActiveGuides, clampToVisibleBounds, updateScrollSpeed, fillKeyRef, replaceKeyRef, swapKeyRef, getFillBoundsExcluding, getReplacementTarget, getSwapTarget, setFillPreviewState, setReplacePreviewState, setSwapPreviewState]
   );
 
-  // Handle drag start
-  const handleDragStart = useCallback(() => {
+  // Handle drag start — compute this drag's snap lines once (see ref above)
+  const handleDragStart = useCallback((elementId: string) => {
     isDraggingRef.current = true;
-    lastSnapTargetRef.current = { x: 0, y: 0, snappedX: false, snappedY: false };
-  }, []);
+    // Publish the drag so crop mode refuses to open mid-move and so `s`
+    // switches from "toggle slides panel" to "swap" for its duration.
+    useElementStore.getState().setDraggingElement(true);
+    // Dragging is an interaction: select the element (border + transformer
+    // + current slide), same as a click. Konva fires dragstart without a
+    // click when the user presses and immediately moves, which previously
+    // left the dragged element unselected.
+    if (useElementStore.getState().selectedElementId !== elementId) {
+      selectElement(elementId);
+      const el = elementMap.get(elementId);
+      if (el) {
+        const eb = getRotatedBounds(el.x, el.y, el.width, el.height, el.rotation);
+        const slideIndex = getSlideIndexFromCenter(eb.x, eb.width, designSize.width);
+        if (slideIndex >= 0 && slideIndex < numSlides) {
+          setCurrentSlide(slideIndex);
+        }
+      }
+    }
+    dragSnapLinesRef.current = snapEnabled
+      ? calculateSnapLines(
+          elements,
+          elementId,
+          totalDesignWidth,
+          designSize.height,
+          snapSettings,
+          designSize.width,
+          numSlides
+        )
+      : null;
+  }, [snapEnabled, elements, totalDesignWidth, designSize.height, designSize.width, numSlides, snapSettings, selectElement, elementMap, setCurrentSlide]);
 
   // Handle drag end - apply final snap (or fill mode) and persist position
   const handleDragEnd = useCallback(
@@ -943,27 +1006,140 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       // Stop auto-scroll and reset drag state
       stopAutoScroll();
       isDraggingRef.current = false;
+      useElementStore.getState().setDraggingElement(false);
 
-      // Clear fill/replace previews
+      // Take this drag's snap lines and clear the ref (covers every exit
+      // path below, including the replace/fill early returns)
+      const dragSnapLines = dragSnapLinesRef.current;
+      dragSnapLinesRef.current = null;
+
+      // Clear fill/replace/swap previews
       elementFillPreviewRef.current = null;
       setFillPreviewState(null);
       elementReplacePreviewRef.current = null;
       setReplacePreviewState(null);
+      elementSwapPreviewRef.current = null;
+      setSwapPreviewState(null);
 
       let newX = node.x();
       let newY = node.y();
 
-      // Replace mode: swap dragged element's media into the target element
-      if (replaceKeyRef.current && element.mediaId) {
-        const stage = node.getStage();
-        const pointerPos = stage?.getPointerPosition();
-        const layer = node.getLayer();
-        const layerScale = layer?.scaleX() ?? 1;
-        const layerX = layer?.x() ?? 0;
-        const layerY = layer?.y() ?? 0;
-        const cursorX = pointerPos ? (pointerPos.x - layerX) / layerScale : newX + element.width / 2;
-        const cursorY = pointerPos ? (pointerPos.y - layerY) / layerScale : newY + element.height / 2;
-        const target = getReplacementTarget(cursorX, cursorY, elementId);
+      // Cursor position in design space (shared by replace + fill modes)
+      const stage = node.getStage();
+      const pointerPos = stage?.getPointerPosition();
+      const layer = node.getLayer();
+      const layerScale = layer?.scaleX() ?? 1;
+      const layerX = layer?.x() ?? 0;
+      const layerY = layer?.y() ?? 0;
+      const cursorX = pointerPos ? (pointerPos.x - layerX) / layerScale : newX + element.width / 2;
+      const cursorY = pointerPos ? (pointerPos.y - layerY) / layerScale : newY + element.height / 2;
+
+      // Replace mode: swap dragged element's media into the target
+      // (photo or placeholder frame). Fill mode over a frame is the same
+      // operation — the frame consumes the dragged element's media.
+      // ── Swap: trade the two photos between their frames ────────────────
+      // Both frames keep their own geometry (position, size, rotation,
+      // z-order); only the image payloads change places. Each photo's own
+      // edits travel with it — its straighten angle, flips, and crop — with
+      // the crop re-shaped for the frame it lands in so nothing stretches.
+      if (swapKeyRef.current) {
+        const target = getSwapTarget(cursorX, cursorY, elementId);
+        const partner = target && project
+          ? project.elements.find(el => el.id === target.elementId) ?? null
+          : null;
+        // At least one side must hold an image — trading two empty frames
+        // would be a no-op.
+        if (project && partner && (element.mediaId || partner.mediaId)) {
+          const mediaPool = project.mediaPool || [];
+
+            // Build the payload `source`'s image needs to sit correctly in
+            // `frame`, carrying its edits across. When `source` is empty the
+            // frame is emptied instead — that is the "leave an empty frame
+            // behind" half of a swap with a placeholder.
+            const moveInto = (source: Element, frame: Element): Element => {
+              if (!source.mediaId) {
+                return {
+                  ...frame,
+                  type: 'placeholder' as const,
+                  mediaId: undefined,
+                  assetPath: undefined,
+                  cropX: 0,
+                  cropY: 0,
+                  cropWidth: 1,
+                  cropHeight: 1,
+                  contentRotation: 0,
+                  flipX: false,
+                  flipY: false,
+                  lastCropRatio: null,
+                };
+              }
+              const media = mediaPool.find(m => m.id === source.mediaId);
+              const imageW = media?.width ?? frame.width;
+              const imageH = media?.height ?? frame.height;
+              const rotation = source.contentRotation ?? 0;
+              // Re-shape the crop for the destination frame, then make sure
+              // it still fits once the carried straighten is applied.
+              const reshaped = adaptCropToFrame(
+                imageW,
+                imageH,
+                {
+                  cropX: source.cropX ?? 0,
+                  cropY: source.cropY ?? 0,
+                  cropWidth: source.cropWidth ?? 1,
+                  cropHeight: source.cropHeight ?? 1,
+                },
+                frame.width / frame.height
+              );
+              const fitted = fitCropToRotation(frame.width, frame.height, reshaped, rotation);
+              return {
+                ...frame,
+                type: 'photo' as const,
+                mediaId: source.mediaId,
+                assetPath: source.assetPath,
+                cropX: fitted.cropX,
+                cropY: fitted.cropY,
+                cropWidth: fitted.cropWidth,
+                cropHeight: fitted.cropHeight,
+                contentRotation: rotation,
+                flipX: source.flipX,
+                flipY: source.flipY,
+                lastCropRatio: null,
+              };
+            };
+
+            const swappedDragged = moveInto(partner, element);
+            const swappedPartner = moveInto(element, partner);
+
+            const updatedElements = project.elements.map(el => {
+              if (el.id === element.id) return swappedDragged;
+              if (el.id === partner.id) return swappedPartner;
+              return el;
+            });
+            const updatedProject = { ...project, elements: updatedElements };
+
+            // Neither asset is orphaned — both are still referenced, just by
+            // the other element — so unlike replace there is nothing to
+            // register for cleanup.
+            setProjectSilent(updatedProject);
+            // Return the dragged node to where it started: a swap moves
+            // images, never frames.
+            node.x(element.x);
+            node.y(element.y);
+            selectElement(element.id);
+            pushState(updatedProject, { source: 'element', actionType: 'update', elementId: element.id });
+            updateProject(updatedProject).catch(err => console.error('Failed to persist swap:', err));
+
+            setActiveGuides([]);
+            return;
+        }
+        // S held but not over a swappable frame — fall through and treat it
+        // as an ordinary move rather than silently doing nothing.
+      }
+
+      if (element.mediaId && (replaceKeyRef.current || fillKeyRef.current)) {
+        const target: ReplaceTarget | null = replaceKeyRef.current
+          ? getReplacementTarget(cursorX, cursorY, elementId)
+          : findPlaceholderAt(elementsRef.current, cursorX, cursorY, elementId);
         if (target) {
           // Compute crop to fit the dragged media into the target's frame
           const mediaPool = project?.mediaPool || [];
@@ -984,6 +1160,17 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
             cropY = (1 - cropHeight) / 2;
           }
 
+          // The photo keeps its own straighten angle when it moves into a
+          // different frame; the crop just computed assumes it is upright,
+          // so re-fit it for that angle (a no-op when the photo is upright).
+          const carriedRotation = element.contentRotation ?? 0;
+          const carried = fitCropToRotation(
+            target.width,
+            target.height,
+            { cropX, cropY, cropWidth, cropHeight },
+            carriedRotation
+          );
+
           // Apply both mutations (update target + remove source) as a single
           // atomic operation so undo/redo treats it as one step.
           if (project) {
@@ -994,15 +1181,20 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
                 if (el.id !== target.elementId) return el;
                 return {
                   ...el,
+                  // Placeholder frames become photos; no-op for photos.
+                  type: 'photo' as const,
                   mediaId: element.mediaId,
                   // The source element is removed in the same operation, so
                   // the target takes ownership of its embedded asset file.
                   assetPath: element.assetPath,
-                  cropX,
-                  cropY,
-                  cropWidth,
-                  cropHeight,
+                  ...carried,
                   lastCropRatio: null,
+                  // The straighten angle belongs to the PHOTO, so it travels
+                  // with it into the new frame. `carried` re-fits the freshly
+                  // computed cover crop for that angle (zooming only as far
+                  // as the tilt requires), because the crop above was worked
+                  // out as if the photo were upright.
+                  contentRotation: carriedRotation,
                 };
               });
 
@@ -1010,6 +1202,11 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
 
             // Synchronous local update for immediate UI
             setProjectSilent(updatedProject);
+
+            // The dragged element no longer exists — select the target
+            // that received its media so the selection border lands on
+            // the result instead of lingering on the destroyed node.
+            selectElement(target.elementId);
 
             // Single history entry
             pushState(updatedProject, { source: 'element', actionType: 'update', elementId: target.elementId });
@@ -1038,16 +1235,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         }
       }
 
-      // Fill mode: snap element into the bounded region (use cursor, not element center)
+      // Fill mode: snap element into the bounded region (use cursor, not
+      // element center). Frame targets were already handled above.
       if (fillKeyRef.current) {
-        const stage = node.getStage();
-        const pointerPos = stage?.getPointerPosition();
-        const layer = node.getLayer();
-        const layerScale = layer?.scaleX() ?? 1;
-        const layerX = layer?.x() ?? 0;
-        const layerY = layer?.y() ?? 0;
-        const cursorX = pointerPos ? (pointerPos.x - layerX) / layerScale : newX + element.width / 2;
-        const cursorY = pointerPos ? (pointerPos.y - layerY) / layerScale : newY + element.height / 2;
         const bounds = getFillBoundsExcluding(cursorX, cursorY, elementId);
         if (bounds) {
           // Compute crop to cover the fill region using media's native aspect ratio
@@ -1102,39 +1292,38 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         }
       }
 
-      // Apply final snap calculation on drop (since drag snap was throttled)
-      if (snapEnabled) {
-        const snapLines = calculateSnapLines(
-          elements,
-          elementId,
-          totalDesignWidth,
-          designSize.height,
-          snapSettings,
-          designSize.width,
-          numSlides
+      // Apply final snap on drop, reusing the lines computed at drag start
+      if (snapEnabled && dragSnapLines) {
+        // Snap the element's VISIBLE box. A rotated element's footprint is
+        // not [x, x+width] (it rotates about its top-left anchor), so
+        // snapping raw x/y would align an invisible box and leave the image
+        // sitting somewhere off the guide.
+        const elementRect = getRotatedBounds(
+          newX,
+          newY,
+          element.width,
+          element.height,
+          element.rotation
         );
-        const elementRect = {
-          x: newX,
-          y: newY,
-          width: element.width,
-          height: element.height,
-        };
-        const snapResult = findSnap(elementRect, snapLines, 10);
-        newX = snapResult.x;
-        newY = snapResult.y;
+        const snapResult = findSnap(elementRect, dragSnapLines, 10);
+        // findSnap moved the visible box; shift the element's anchor by the
+        // same amount (identical to assigning directly when unrotated).
+        newX += snapResult.x - elementRect.x;
+        newY += snapResult.y - elementRect.y;
       }
 
       setActiveGuides([]);
-      const clamped = clampToVisibleBounds(newX, newY, element.width, element.height);
+      const clamped = clampToVisibleBounds(newX, newY, element.width, element.height, element.rotation);
       updateElement(elementId, { x: clamped.x, y: clamped.y });
 
       // Update current slide based on where element was dropped
-      const slideIndex = getSlideIndexFromCenter(clamped.x, element.width, designSize.width);
+      const db = getRotatedBounds(clamped.x, clamped.y, element.width, element.height, element.rotation);
+      const slideIndex = getSlideIndexFromCenter(db.x, db.width, designSize.width);
       if (slideIndex >= 0 && slideIndex < numSlides) {
         setCurrentSlide(slideIndex);
       }
     },
-    [elementMap, updateElement, updateElementLocal, setProjectSilent, pushState, setActiveGuides, clampToVisibleBounds, designSize.width, designSize.height, numSlides, setCurrentSlide, stopAutoScroll, snapEnabled, snapSettings, totalDesignWidth, elements, fillKeyRef, replaceKeyRef, getFillBoundsExcluding, getReplacementTarget, setFillPreviewState, setReplacePreviewState, project]
+    [elementMap, updateElement, updateElementLocal, setProjectSilent, pushState, setActiveGuides, clampToVisibleBounds, designSize.width, designSize.height, numSlides, setCurrentSlide, stopAutoScroll, snapEnabled, snapSettings, totalDesignWidth, elements, fillKeyRef, replaceKeyRef, swapKeyRef, getFillBoundsExcluding, getReplacementTarget, getSwapTarget, setFillPreviewState, setReplacePreviewState, setSwapPreviewState, project, selectElement, updateProject]
   );
 
   // Handle transform end
@@ -1157,9 +1346,10 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       node.width(newWidth);
       node.height(newHeight);
 
-      // Clear guides and anchor ref
+      // Clear guides, anchor ref, and this transform's snap lines
       setActiveGuides([]);
       activeAnchorRef.current = null;
+      transformSnapLinesRef.current = null;
 
       updateElement(elementId, {
         x: node.x(),
@@ -1179,7 +1369,20 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       // Store the active anchor name
       activeAnchorRef.current = transformer.getActiveAnchor() || null;
     }
-  }, []);
+    // Compute this transform's snap lines once (other elements + slide
+    // geometry are frozen during the gesture) — same optimization as drag.
+    transformSnapLinesRef.current = snapEnabled && selectedElementId
+      ? calculateSnapLines(
+          elements,
+          selectedElementId,
+          totalDesignWidth,
+          designSize.height,
+          snapSettings,
+          designSize.width,
+          numSlides
+        )
+      : null;
+  }, [snapEnabled, selectedElementId, elements, totalDesignWidth, designSize.height, designSize.width, numSlides, snapSettings]);
 
   const handleTransform = useCallback((e: Konva.KonvaEventObject<Event>) => {
     const transformer = transformerRef.current;
@@ -1219,15 +1422,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     const boundsX = currentX;
     const boundsY = currentY;
 
-    const snapLines = calculateSnapLines(
-      elements,
-      selectedElementId,
-      totalDesignWidth,
-      designSize.height,
-      snapSettings,
-      designSize.width,
-      numSlides
-    );
+    // Snap lines were computed once in handleTransformStart
+    const snapLines = transformSnapLinesRef.current;
+    if (!snapLines) return;
 
     // For centered scaling, check all edges (not just the ones being dragged)
     const effectiveAnchor = isCenteredScaling ? 'top-left-bottom-right' : anchorName;
@@ -1307,7 +1504,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     } else {
       setActiveGuides([]);
     }
-  }, [snapEnabled, selectedElementId, elements, totalDesignWidth, designSize.height, designSize.width, numSlides, snapSettings, setActiveGuides]);
+  }, [snapEnabled, selectedElementId, setActiveGuides]);
 
   // Context menu handlers
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -1848,7 +2045,18 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
               ref={stageRef}
               width={totalCanvasWidth * zoomLevel + 2 * stageOverflow}
               height={canvasSize.height * zoomLevel + 2 * stageOverflow}
-              style={{ position: 'absolute', left: 24 - stageOverflow, top: -stageOverflow }}
+              style={{
+                position: 'absolute',
+                left: 24 - stageOverflow,
+                top: -stageOverflow,
+                // CanvasSlideIndicators (a DOM sibling within the same
+                // positioned ancestor) sets z-30, which always paints above
+                // this z-index:auto Stage regardless of DOM order — so the
+                // crop rotation dial (drawn on this canvas) rendered under
+                // it. Only bump while actively cropping, so normal editing
+                // keeps the original stacking (elements below the tabs).
+                zIndex: cropModeElementId ? 40 : undefined,
+              }}
               onClick={handleStageClick}
               onContextMenu={handleStageContextMenu}
             >
@@ -1932,6 +2140,21 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
                   />
                 )}
 
+                {/* Swap preview overlay (S-key swap during element drag) */}
+                {swapPreview && (
+                  <Rect
+                    x={swapPreview.x}
+                    y={swapPreview.y}
+                    width={swapPreview.width}
+                    height={swapPreview.height}
+                    fill="rgba(16, 185, 129, 0.2)"
+                    stroke="#10b981"
+                    strokeWidth={2 / (scale * zoomLevel)}
+                    dash={[6 / (scale * zoomLevel), 4 / (scale * zoomLevel)]}
+                    listening={false}
+                  />
+                )}
+
                 {/* Transformer */}
                 {!cropModeElementId && (
                   <Transformer
@@ -1979,6 +2202,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
                       canvasHeight={designSize.height}
                       slideWidth={designSize.width}
                       numSlides={numSlides}
+                      layerScale={scale * zoomLevel}
                       resetKey={cropResetKey}
                       contentRotation={cropContentRotation}
                       onContentRotationChange={setCropContentRotation}

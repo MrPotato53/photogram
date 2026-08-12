@@ -2,7 +2,7 @@ import { memo, useCallback, useLayoutEffect, useRef } from 'react';
 import { Image as KonvaImage, Group, Rect } from 'react-konva';
 import type Konva from 'konva';
 import type { Element } from '../../types';
-import { coverScaleForRotation } from '../../utils/contentRotation';
+import { contentRenderScale, contentPivotLocalOffset } from '../../utils/contentRotation';
 
 interface CanvasElementRendererProps {
   element: Element;
@@ -11,7 +11,7 @@ interface CanvasElementRendererProps {
   isBeingCropped: boolean;
   zoomLevel: number;
   onElementClick: (elementId: string, e: Konva.KonvaEventObject<MouseEvent>) => void;
-  onDragStart: () => void;
+  onDragStart: (elementId: string) => void;
   onDragMove: (elementId: string, e: Konva.KonvaEventObject<any>) => void;
   onDragEnd: (elementId: string, e: Konva.KonvaEventObject<any>) => void;
   onTransformEnd: (elementId: string, e: Konva.KonvaEventObject<Event>) => void;
@@ -61,26 +61,54 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
       onElementClick(element.id, e as unknown as Konva.KonvaEventObject<MouseEvent>),
     [element.id, onElementClick]
   );
+  const handleDragStart = useCallback(
+    () => onDragStart(element.id),
+    [element.id, onDragStart]
+  );
   const strokeRef = useRef<Konva.Rect>(null);
   // Visual group for the content-rotation branch; synced imperatively from
   // the interaction proxy during drag/transform (same pattern as strokeRef).
   const clipGroupRef = useRef<Konva.Group>(null);
   const handleDragMove = useCallback(
     (e: Konva.KonvaEventObject<DragEvent>) => {
+      // Parent handler FIRST: it may snap/clamp-adjust the node position.
+      onDragMove(element.id, e);
       // Stroke is a sibling node (so selection doesn't invalidate the image
       // cache). Konva updates e.target.x/y imperatively during drag, but the
       // stroke's x/y props only refresh on React re-render (after drag end),
-      // so we sync it here or the border appears to lag behind.
+      // so we sync it here or the border appears to lag behind. Must run
+      // AFTER onDragMove so the stroke lands on the snapped coordinates,
+      // not the raw pointer position — otherwise the border visibly
+      // detaches from the image whenever snapping displaces the node
+      // (same ordering as the content-rotation proxy's syncGroup).
       if (strokeRef.current) {
         strokeRef.current.x(e.target.x());
         strokeRef.current.y(e.target.y());
       }
-      onDragMove(element.id, e);
     },
     [element.id, onDragMove]
   );
   const handleDragEnd = useCallback(
-    (e: Konva.KonvaEventObject<DragEvent>) => onDragEnd(element.id, e),
+    (e: Konva.KonvaEventObject<DragEvent>) => {
+      onDragEnd(element.id, e);
+      // Re-seat the imperatively-synced companions on the node's FINAL
+      // position. During the drag the stroke (and the rotated branch's clip
+      // Group) are moved by hand to follow the node; if the drag ends with
+      // the element's committed x/y unchanged — a swap leaves both frames
+      // put, and snap-backs do the same — React sees identical props, skips
+      // the re-render, and the stroke would be stranded wherever the pointer
+      // left it. Doing this here rather than in any one handler keeps it
+      // true for every drag path.
+      const node = e.target;
+      if (strokeRef.current) {
+        strokeRef.current.x(node.x());
+        strokeRef.current.y(node.y());
+      }
+      if (clipGroupRef.current) {
+        clipGroupRef.current.x(node.x());
+        clipGroupRef.current.y(node.y());
+      }
+    },
     [element.id, onDragEnd]
   );
   const handleTransformEnd = useCallback(
@@ -90,7 +118,9 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
       // bounds would show the image at its old size for one frame. Clearing
       // here makes the post-commit paint use raw drawScene at the correct new
       // size (one slow frame) before useLayoutEffect rebuilds the cache.
+      // Content-rotated elements cache the clip Group instead of the image.
       imageRef.current?.clearCache();
+      clipGroupRef.current?.clearCache();
       onTransformEnd(element.id, e);
     },
     [element.id, onTransformEnd]
@@ -108,7 +138,12 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
   // paints — otherwise the first post-commit paint draws with a stale cache
   // against the new dimensions, producing a one-frame flash on resize.
   useLayoutEffect(() => {
-    const node = imageRef.current;
+    // Content-rotated elements draw the FULL image clipped to the frame, so
+    // the cache target is the clip Group — its raster is frame-sized (the
+    // clip bounds), while caching the oversized image node would rasterize
+    // the whole source extent.
+    const rotated = !isBeingCropped && (element.contentRotation ?? 0) !== 0;
+    const node: Konva.Node | null = rotated ? clipGroupRef.current : imageRef.current;
     if (!node || !loadedImage) return;
     // In crop mode we render the full uncropped image and want live updates
     // (pan, aspect change), so cache would freeze the view. Clear it.
@@ -126,22 +161,26 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
       return;
     }
     try {
-      // Content rotation cover-scales the image up; multiply the cache
-      // resolution by that factor so the upscaled draw still lands at the
-      // chosen canvas density (otherwise we'd be magnifying a lower-res
-      // rasterization → visible blur). Cover is capped at 2 to bound memory
-      // for extreme aspect ratios at high angles. The base ratio comes from
-      // the user's canvas-resolution preference. The final ratio is recorded
-      // on the node so the export path can re-cache at the same density after
-      // a high-res export clears caches.
-      const cover = coverScaleForRotation(
-        element.width,
-        element.height,
-        element.contentRotation ?? 0
-      );
-      const ratio = cachePixelRatio * Math.min(cover, 2);
-      node.setAttr('cachePixelRatio', ratio);
-      node.cache({ pixelRatio: ratio });
+      // The ratio comes from the user's canvas-resolution preference and is
+      // recorded on the node so the export path can re-cache at the same
+      // density after a high-res export clears caches. No cover-scale
+      // multiplier is needed for rotated content: the group is rasterized
+      // AFTER the rotation/scale is applied, so the raster density is
+      // uniform regardless of how far the content is magnified.
+      node.setAttr('cachePixelRatio', cachePixelRatio);
+      if (rotated) {
+        // Explicit bounds: a clipped Group's default cache bounds come from
+        // its content (the oversized rotated image), not its clip.
+        node.cache({
+          x: 0,
+          y: 0,
+          width: element.width,
+          height: element.height,
+          pixelRatio: cachePixelRatio,
+        });
+      } else {
+        node.cache({ pixelRatio: cachePixelRatio });
+      }
       node.getLayer()?.batchDraw();
     } catch {
       // cache() throws on zero-size nodes; safe to skip
@@ -181,7 +220,7 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
         draggable={isDraggable}
         onClick={handleClick}
         onTap={handleTap}
-        onDragStart={onDragStart}
+        onDragStart={handleDragStart}
         onDragMove={handleDragMove}
         onDragEnd={handleDragEnd}
         onTransformEnd={handleTransformEnd}
@@ -236,7 +275,7 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
         draggable={isDraggable}
         onClick={handleClick}
         onTap={handleTap}
-        onDragStart={onDragStart}
+        onDragStart={handleDragStart}
         onDragMove={handleDragMove}
         onDragEnd={handleDragEnd}
         onTransformEnd={handleTransformEnd}
@@ -337,7 +376,12 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
   // ── Content-rotation branch ──────────────────────────────────────────
   // Image rotated INSIDE an upright frame. Structure:
   //   1. clipped Group (visual only, listening=false) — frame-shaped clip
-  //      containing the image rotated/cover-scaled around the frame center
+  //      containing the FULL image (no Konva crop) positioned so the crop
+  //      window lands on the frame, rotated around the frame center and
+  //      scaled by the adaptive cover factor. Drawing the full image (same
+  //      as the crop-mode preview) lets content outside the stored window
+  //      show through the frame when the rotation calls for it — a crop
+  //      attr can't sample beyond its window.
   //   2. invisible proxy Rect carrying the element id + all interaction
   //      (drag, click, Transformer attachment). Its geometry == frame, so
   //      the Transformer box is correct (a clipped Group's getClientRect
@@ -346,7 +390,25 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
   // pattern as the selection-stroke sync above. The zero-rotation path
   // below is byte-identical to the pre-feature renderer.
   if (contentRotation !== 0) {
-    const cover = coverScaleForRotation(element.width, element.height, contentRotation);
+    const fullW = element.width / existingCropW;
+    const fullH = element.height / existingCropH;
+    const winX = existingCropX * fullW;
+    const winY = existingCropY * fullH;
+    // Normally exactly 1: crop mode already folded any zoom the rotation
+    // needed into the crop values, so the image draws at natural size and
+    // its edges can sit right against the frame. Rises above 1 only to
+    // rescue legacy state that would otherwise show blank corners — and,
+    // crucially, depends only on sizes and the angle, never on where the
+    // window sits, so it can never make the image swim.
+    const cover = contentRenderScale(fullW, fullH, element.width, element.height, contentRotation);
+    // Rotation pivot = the FULL IMAGE'S OWN CENTER (fixed — independent of
+    // where the crop window sits), not the window/frame center. This keeps
+    // the underlying image visually stationary as the window moves (e.g.
+    // during a future re-crop), only its required cover scale changes.
+    // `local` is the pivot's position in the clip Group's LOCAL (i.e.
+    // pre-element.rotation) coordinate space; the outer Group below composes
+    // element.rotation on top of it for free via normal Konva nesting.
+    const local = contentPivotLocalOffset(fullW, fullH, winX, winY);
     const syncGroup = (node: Konva.Node) => {
       const g = clipGroupRef.current;
       if (!g) return;
@@ -363,6 +425,10 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
           key={`${element.id}-clip`}
           x={element.x}
           y={element.y}
+          // width/height carry the frame size so cache bounds (here and in
+          // the export path's re-cache) cover exactly the clipped area.
+          width={element.width}
+          height={element.height}
           rotation={element.rotation}
           clipFunc={(ctx) => {
             ctx.rect(0, 0, element.width, element.height);
@@ -372,16 +438,18 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
           <KonvaImage
             ref={imageRef}
             image={loadedImage}
-            x={element.width / 2}
-            y={element.height / 2}
-            width={element.width}
-            height={element.height}
-            offsetX={element.width / 2}
-            offsetY={element.height / 2}
+            x={local.x}
+            y={local.y}
+            width={fullW}
+            height={fullH}
+            // Content pivot (fullW/2, fullH/2) is exactly the image's own
+            // center, so it's flip-invariant (fullW/2 == fullW - fullW/2) —
+            // no flip-conditional needed, unlike the old window-center pivot.
+            offsetX={fullW / 2}
+            offsetY={fullH / 2}
             rotation={contentRotation}
             scaleX={cover * flipScaleX}
             scaleY={cover * flipScaleY}
-            crop={cropConfig}
             listening={false}
             perfectDrawEnabled={false}
           />
@@ -401,7 +469,7 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
           draggable={isDraggable}
           onClick={handleClick}
           onTap={handleTap}
-          onDragStart={onDragStart}
+          onDragStart={handleDragStart}
           onDragMove={(e) => {
             // Parent handler may snap-adjust the node position; sync the
             // visual group AFTER so it lands on the snapped coordinates.
@@ -453,7 +521,7 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
         draggable={isDraggable}
         onClick={handleClick}
         onTap={handleTap}
-        onDragStart={onDragStart}
+        onDragStart={handleDragStart}
         onDragMove={handleDragMove}
         onDragEnd={handleDragEnd}
         onTransformEnd={handleTransformEnd}

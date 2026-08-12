@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "validate:geometry": "node scripts/validate-geometry.mjs",
+    "check": "tsc --noEmit && node scripts/validate-geometry.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",

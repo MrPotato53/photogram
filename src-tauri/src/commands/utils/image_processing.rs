@@ -9,6 +9,33 @@ use std::path::PathBuf;
 /// thumbnails — see backfill in `get_project`.
 pub const THUMBNAIL_MAX_SIDE: u32 = 1024;
 
+/// Max side of the fast first-pass thumbnail. Deliberately small ("ultra
+/// low res"): it exists so imported media becomes visible in the pool
+/// within a fraction of the full pipeline time. The quality pass
+/// (`generate_thumbnail`) overwrites it at THUMBNAIL_MAX_SIDE afterwards.
+pub const FAST_THUMBNAIL_MAX_SIDE: u32 = 256;
+
+/// Fast low-res thumbnail. Same decode as the quality pass, but:
+/// - sizes with `DynamicImage::thumbnail()` (progressive 2× box sampling)
+///   instead of Lanczos3, which dominates generate_thumbnail's runtime on
+///   large photos;
+/// - applies EXIF orientation AFTER the resize, so rotation/flip touches
+///   ~0.07MP instead of the full-size raster.
+pub fn generate_thumbnail_fast(source_path: &PathBuf, thumb_path: &PathBuf) -> Result<(), String> {
+    let img = image::open(source_path)
+        .map_err(|e| format!("Failed to open image: {}", e))?;
+
+    let thumb = img.thumbnail(FAST_THUMBNAIL_MAX_SIDE, FAST_THUMBNAIL_MAX_SIDE);
+
+    let orientation = get_exif_orientation(source_path).unwrap_or(1);
+    let thumb = apply_exif_orientation(thumb, orientation);
+
+    thumb.save(thumb_path)
+        .map_err(|e| format!("Failed to save thumbnail: {}", e))?;
+
+    Ok(())
+}
+
 /// Generate a thumbnail for the media pool. Resizes the largest side to
 /// THUMBNAIL_MAX_SIDE preserving aspect ratio. JPEG quality 85.
 pub fn generate_thumbnail(source_path: &PathBuf, thumb_path: &PathBuf) -> Result<(), String> {

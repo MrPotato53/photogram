@@ -3,17 +3,34 @@ import { v4 as uuidv4 } from 'uuid';
 import type { Slide, Template, Element } from '../types';
 import { updateProject, embedElementAsset } from '../services/tauri';
 import { getSlideWidth } from '../utils/designConstants';
-import { getSlideIndex } from '../utils/slideUtils';
+import { getSlideIndexFromCenter } from '../utils/slideUtils';
+import { getRotatedBounds } from '../utils/coordinates';
 import { useProjectStore } from './projectStore';
 import { useHistoryStore } from './historyStore';
+import { useElementStore } from './elementStore';
 import type { AspectRatio } from '../types';
 
-// Home slide = leftmost slide an element occupies. Elements can sit at
-// slightly negative x (drag clamp allows up to -width+50), which would
-// give index -1 and silently exempt them from slide remove/reorder/shift
-// logic — clamp to slide 0 instead.
-function getHomeSlideIndex(elementX: number, slideWidth: number): number {
-  return Math.max(0, getSlideIndex(elementX, slideWidth));
+// Home slide = the slide under the element's CENTER — the same rule the
+// rest of the app uses (selection, slide indicators, template capture via
+// getElementsOnSlide). Slide ops previously homed by left edge, which
+// disagreed for multi-slide spreads: a 2-panel image spanning slides
+// [N, N+1] reads as belonging to N+1 everywhere in the UI (center floors
+// to the right slide on the exact boundary), but reorder/remove treated
+// it as N's content — so moving the spread's slide shifted the image into
+// the wrong slot (off-canvas when it was the last slide).
+// Clamped to [0, numSlides-1]: elements can hang off either canvas edge
+// (drag clamp allows up to -width+50 / totalWidth-50), which would give
+// out-of-range indices and silently exempt them from remove/reorder/shift
+// logic.
+function getHomeSlideIndex(element: Element, slideWidth: number, numSlides: number): number {
+  // Measure the element's VISIBLE centre: elements rotate about their
+  // top-left anchor, so for a rotated element x + width/2 is not where it
+  // appears (at 90° the footprint is entirely left of x) and it would be
+  // filed under a slide it isn't on — which then misdirects reorder and
+  // remove, exactly the class of bug the comment above describes.
+  const b = getRotatedBounds(element.x, element.y, element.width, element.height, element.rotation);
+  const idx = getSlideIndexFromCenter(b.x, b.width, slideWidth);
+  return Math.max(0, Math.min(numSlides - 1, idx));
 }
 
 interface SlideState {
@@ -134,18 +151,18 @@ export const useSlideStore = create<SlideState>((set, get) => ({
     const aspectRatio: AspectRatio = project.aspectRatio;
     const slideWidth = getSlideWidth(aspectRatio);
 
-    // Find elements "homed" on this slide and remove them
-    // An element's home slide is the leftmost slide it occupies
+    // Find elements "homed" on this slide (slide under the element center)
+    // and remove them
     const removedElements = project.elements.filter(
-      (element) => getHomeSlideIndex(element.x, slideWidth) === slideIndex
+      (element) => getHomeSlideIndex(element, slideWidth, project.slides.length) === slideIndex
     );
     const updatedElements = project.elements.filter(
-      (element) => getHomeSlideIndex(element.x, slideWidth) !== slideIndex
+      (element) => getHomeSlideIndex(element, slideWidth, project.slides.length) !== slideIndex
     );
 
     // Adjust x coordinates for elements on slides after the deleted one
     const adjustedElements = updatedElements.map((element) => {
-      const homeSlideIndex = getHomeSlideIndex(element.x, slideWidth);
+      const homeSlideIndex = getHomeSlideIndex(element, slideWidth, project.slides.length);
       if (homeSlideIndex > slideIndex) {
         return { ...element, x: element.x - slideWidth };
       }
@@ -175,6 +192,17 @@ export const useSlideStore = create<SlideState>((set, get) => ({
         slideIndex,
       });
       set({ currentSlideIndex: newCurrentIndex });
+
+      // If the selected element was deleted with the slide, clear the
+      // selection so the transformer border doesn't linger on a node
+      // that no longer exists.
+      const elementStore = useElementStore.getState();
+      if (
+        elementStore.selectedElementId &&
+        removedElements.some((el) => el.id === elementStore.selectedElementId)
+      ) {
+        elementStore.selectElement(null);
+      }
 
       // Track embedded assets of removed elements so their files are
       // cleaned up when the deletion falls off the history stack (same
@@ -216,9 +244,9 @@ export const useSlideStore = create<SlideState>((set, get) => ({
     const newSlides = reordered.map((slide, index) => ({ ...slide, order: index }));
 
     // Adjust element positions based on slide movement
-    // Elements stay with their "home" slide (leftmost slide they occupy)
+    // Elements stay with their "home" slide (slide under the element center)
     const adjustedElements = project.elements.map((element) => {
-      const homeSlideIndex = getHomeSlideIndex(element.x, slideWidth);
+      const homeSlideIndex = getHomeSlideIndex(element, slideWidth, project.slides.length);
 
       if (homeSlideIndex === fromIndex) {
         // Element is homed on the moved slide - move it to new position
@@ -341,7 +369,7 @@ export const useSlideStore = create<SlideState>((set, get) => ({
 
     // Shift elements on slides after the new slide
     const updatedElements = project.elements.map((element) => {
-      const homeSlideIndex = getHomeSlideIndex(element.x, slideWidth);
+      const homeSlideIndex = getHomeSlideIndex(element, slideWidth, project.slides.length);
       if (homeSlideIndex >= newSlideIndex) {
         return { ...element, x: element.x + slideWidth };
       }

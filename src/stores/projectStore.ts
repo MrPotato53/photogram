@@ -2,8 +2,13 @@ import { create } from 'zustand';
 import type { Project } from '../types';
 import type { HistoryOperationContext } from '../types/history';
 import { getProject } from '../services/tauri';
+import { clearImageCache } from '../utils/imageCache';
 import { useHistoryStore, setCurrentProjectId, setProjectStoreGetter } from './historyStore';
 import { useSnapStore, setSnapProjectStoreGetter } from './snapStore';
+
+// Last project loaded — used to clear the image cache only on real
+// project switches (not same-project reloads, where URLs are still valid).
+let lastLoadedProjectId: string | null = null;
 
 interface ProjectState {
   project: Project | null;
@@ -23,6 +28,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   loadProject: async (id: string) => {
     set({ isLoading: true, error: null });
+    // Switching to a different project: drop the other project's decoded
+    // images so they don't stay resident in memory.
+    if (lastLoadedProjectId !== null && lastLoadedProjectId !== id) {
+      clearImageCache();
+    }
+    lastLoadedProjectId = id;
     try {
       const project = await getProject(id);
       set({ project, isLoading: false });

@@ -1,5 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { useCropStore } from '../../stores/cropStore';
+import {
+  minImageScaleForRotation,
+  clampWindowToRotatedImage,
+} from '../../utils/contentRotation';
 
 interface CropRect {
   x: number;
@@ -215,9 +219,45 @@ export function useCropRect({
     setCropRect({ ...target.cropRect });
   }, [restoreVersion]);
 
-  // Clamp crop rect within full bounds
+  // Keep the crop rect inside the image. Unrotated that is a plain
+  // axis-aligned clamp; rotated, the image is a tilted quad, so the rect
+  // has to be clamped against THAT — otherwise the box could be dragged
+  // out over the blank corners the rotation opened up.
   const clampCropRect = (rect: CropRect): CropRect => {
     const minSize = 20;
+
+    if (contentRotation) {
+      // Deliberately NOT clamped against fullBounds.width/height: those are
+      // the image's UNROTATED extents, and once rotated the image is
+      // legitimately smaller than the rect along an axis (at 90° it only
+      // needs to be as wide as the rect is tall). Clamping each axis against
+      // them independently squashed the rect and changed its aspect ratio.
+      // The only real size limit when rotated is the rotated fit, and it is
+      // applied as ONE uniform factor so the aspect is preserved exactly.
+      let width = rect.width;
+      let height = rect.height;
+
+      const needed = minImageScaleForRotation(
+        fullBounds.width,
+        fullBounds.height,
+        width,
+        height,
+        contentRotation
+      );
+      let factor = needed > 1 ? 1 / needed : 1;
+      // Honour the minimum size the same way — uniformly, never per-axis.
+      factor = Math.max(factor, minSize / width, minSize / height);
+      width *= factor;
+      height *= factor;
+
+      return clampWindowToRotatedImage(fullBounds.width, fullBounds.height, contentRotation, {
+        x: rect.x,
+        y: rect.y,
+        width,
+        height,
+      });
+    }
+
     const width = Math.max(minSize, Math.min(rect.width, fullBounds.width));
     const height = Math.max(minSize, Math.min(rect.height, fullBounds.height));
     const x = Math.max(0, Math.min(rect.x, fullBounds.width - width));

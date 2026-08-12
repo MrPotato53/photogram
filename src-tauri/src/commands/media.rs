@@ -8,6 +8,7 @@ use super::utils::paths::{get_projects_dir, get_thumbnails_dir, get_assets_dir};
 use super::utils::fs_atomic::write_atomic;
 use super::utils::image_processing::{
     collect_image_files, is_image_file, get_image_dimensions, generate_thumbnail,
+    generate_thumbnail_fast,
 };
 
 // Data for background thumbnail generation
@@ -15,6 +16,18 @@ struct ThumbnailJob {
     media_id: String,
     source_path: PathBuf,
     thumb_path: PathBuf,
+}
+
+/// Payload for the `thumbnails-ready` event: which media just got a (new
+/// or re-rendered) thumbnail and where it lives. The frontend merges these
+/// straight into its in-memory project — it must NOT re-fetch the project
+/// per event, because `get_project`'s low-res backfill would see the fast
+/// first-pass thumbnails and queue duplicate quality regens (feedback loop).
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailUpdate {
+    pub media_id: String,
+    pub thumbnail_path: String,
 }
 
 #[command]
@@ -105,42 +118,122 @@ pub fn import_media_files(
         }
     }
 
-    // Spawn background thread to generate thumbnails in parallel
+    // Background thumbnail pipeline. Two phases over the same job list:
+    //   1. FAST pass — tiny (256px) thumbnails with a cheap sampler, so
+    //      every imported tile becomes visible almost immediately.
+    //   2. QUALITY pass — the normal Lanczos3 THUMBNAIL_MAX_SIDE render
+    //      overwrites each fast thumbnail in place.
+    // Workers stream results through a channel as each image finishes; a
+    // coalescing writer updates the project file and emits incremental
+    // `thumbnails-ready` events (~every 150ms) instead of one event after
+    // the whole batch. Media deleted mid-import is voided: pending jobs
+    // are skipped before the (expensive) decode, and in-flight results
+    // whose media vanished get their thumbnail file removed.
     if !thumbnail_jobs.is_empty() {
         let app_handle = app.clone();
         std::thread::spawn(move || {
-            // Generate thumbnails in parallel using rayon
-            let results: Vec<(String, Option<String>)> = thumbnail_jobs
-                .par_iter()
-                .map(|job| {
-                    let thumb_path_str = match generate_thumbnail(&job.source_path, &job.thumb_path) {
-                        Ok(_) => Some(job.thumb_path.to_string_lossy().to_string()),
+            use std::sync::mpsc;
+            use std::time::{Duration, Instant};
+
+            let (tx, rx) = mpsc::channel::<ThumbnailUpdate>();
+
+            let producer_project_path = project_path_clone.clone();
+            let producer = std::thread::spawn(move || {
+                // Deleting media mid-import voids its job: skip before the
+                // expensive decode. Reading + parsing the project JSON per
+                // job is trivial next to an image decode.
+                let still_present = |media_id: &str| -> bool {
+                    fs::read_to_string(&producer_project_path)
+                        .ok()
+                        .and_then(|c| serde_json::from_str::<Project>(&c).ok())
+                        .map(|p| p.media_pool.iter().any(|m| m.id == media_id))
+                        .unwrap_or(false)
+                };
+
+                // Phase 1: fast low-res thumbnails
+                thumbnail_jobs.par_iter().for_each(|job| {
+                    if !still_present(&job.media_id) {
+                        return;
+                    }
+                    match generate_thumbnail_fast(&job.source_path, &job.thumb_path) {
+                        Ok(_) => {
+                            let _ = tx.send(ThumbnailUpdate {
+                                media_id: job.media_id.clone(),
+                                thumbnail_path: job.thumb_path.to_string_lossy().to_string(),
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("Failed fast thumbnail for {}: {}", job.media_id, e);
+                        }
+                    }
+                });
+
+                // Phase 2: quality thumbnails overwrite the fast ones.
+                // Re-emitting the same path makes the frontend cache-bust
+                // the tile so the sharper bytes swap in.
+                thumbnail_jobs.par_iter().for_each(|job| {
+                    if !still_present(&job.media_id) {
+                        return;
+                    }
+                    match generate_thumbnail(&job.source_path, &job.thumb_path) {
+                        Ok(_) => {
+                            let _ = tx.send(ThumbnailUpdate {
+                                media_id: job.media_id.clone(),
+                                thumbnail_path: job.thumb_path.to_string_lossy().to_string(),
+                            });
+                        }
                         Err(e) => {
                             eprintln!("Failed to generate thumbnail for {}: {}", job.media_id, e);
-                            None
-                        }
-                    };
-                    (job.media_id.clone(), thumb_path_str)
-                })
-                .collect();
-
-            // Update project with thumbnail paths
-            if let Ok(contents) = fs::read_to_string(&project_path_clone) {
-                if let Ok(mut project) = serde_json::from_str::<Project>(&contents) {
-                    for (media_id, thumb_path) in results {
-                        if let Some(media) = project.media_pool.iter_mut().find(|m| m.id == media_id) {
-                            media.thumbnail_path = thumb_path;
                         }
                     }
+                });
+                // tx drops here → writer loop below terminates
+            });
 
-                    if let Ok(json) = serde_json::to_string_pretty(&project) {
-                        let _ = write_atomic(&project_path_clone, &json);
+            // Coalescing writer: batch results that arrive within 150ms so
+            // a large import doesn't rewrite the project file per image.
+            loop {
+                let first = match rx.recv() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let mut batch = vec![first];
+                let deadline = Instant::now() + Duration::from_millis(150);
+                while let Some(remaining) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) {
+                    match rx.recv_timeout(remaining) {
+                        Ok(v) => batch.push(v),
+                        Err(_) => break,
                     }
+                }
 
-                    // Emit event to notify frontend that thumbnails are ready
-                    let _ = app_handle.emit("thumbnails-ready", ());
+                if let Ok(contents) = fs::read_to_string(&project_path_clone) {
+                    if let Ok(mut project) = serde_json::from_str::<Project>(&contents) {
+                        let mut applied: Vec<ThumbnailUpdate> = vec![];
+                        for update in batch {
+                            if let Some(media) = project
+                                .media_pool
+                                .iter_mut()
+                                .find(|m| m.id == update.media_id)
+                            {
+                                media.thumbnail_path = Some(update.thumbnail_path.clone());
+                                applied.push(update);
+                            } else {
+                                // Media deleted while its thumbnail was in
+                                // flight — void the job's output.
+                                let _ = fs::remove_file(&update.thumbnail_path);
+                            }
+                        }
+                        if !applied.is_empty() {
+                            if let Ok(json) = serde_json::to_string_pretty(&project) {
+                                let _ = write_atomic(&project_path_clone, &json);
+                            }
+                            let _ = app_handle.emit("thumbnails-ready", applied);
+                        }
+                    }
                 }
             }
+
+            let _ = producer.join();
         });
     }
 
@@ -268,7 +361,13 @@ pub fn relink_media(
                     }
 
                     // Notify frontend
-                    let _ = app_handle.emit("thumbnails-ready", ());
+                    let _ = app_handle.emit(
+                        "thumbnails-ready",
+                        vec![ThumbnailUpdate {
+                            media_id: media_id_clone.clone(),
+                            thumbnail_path: thumb_path.to_string_lossy().to_string(),
+                        }],
+                    );
                 }
             }
         }
@@ -516,6 +615,7 @@ pub fn bulk_relink_media(
         let app_handle = app.clone();
         std::thread::spawn(move || {
             fs::create_dir_all(&thumbnails_dir_clone).ok();
+            let mut updates: Vec<ThumbnailUpdate> = vec![];
             for (media_id, src, thumb) in &thumb_jobs {
                 if generate_thumbnail(src, thumb).is_ok() {
                     if let Ok(contents) = fs::read_to_string(&project_path_clone) {
@@ -526,11 +626,15 @@ pub fn bulk_relink_media(
                             if let Ok(j) = serde_json::to_string_pretty(&p) {
                                 let _ = write_atomic(&project_path_clone, &j);
                             }
+                            updates.push(ThumbnailUpdate {
+                                media_id: media_id.clone(),
+                                thumbnail_path: thumb.to_string_lossy().to_string(),
+                            });
                         }
                     }
                 }
             }
-            let _ = app_handle.emit("thumbnails-ready", ());
+            let _ = app_handle.emit("thumbnails-ready", updates);
         });
     }
 

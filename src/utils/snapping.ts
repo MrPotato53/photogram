@@ -1,5 +1,6 @@
 import type { Element as AppElement, Guide } from '../types';
 import type { SnapSettings } from '../stores/snapStore';
+import { getRotatedBounds } from './coordinates';
 
 export interface StaticGuide {
   orientation: 'vertical' | 'horizontal';
@@ -12,9 +13,24 @@ interface SnapLine {
   type: 'edge' | 'center' | 'margin' | 'grid';
 }
 
-interface SnapLines {
+export interface SnapLines {
   vertical: SnapLine[];
   horizontal: SnapLine[];
+}
+
+/**
+ * Cheap equality check for guide arrays — used to avoid store updates
+ * (and the re-renders they trigger) on drag frames where the active
+ * guides did not change.
+ */
+export function guidesEqual(a: Guide[], b: Guide[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].orientation !== b[i].orientation || a[i].position !== b[i].position) {
+      return false;
+    }
+  }
+  return true;
 }
 
 interface SnapResult {
@@ -178,23 +194,35 @@ export function calculateSnapLines(
     }
   }
 
-  // Other elements' edges and centers
+  // Other elements' edges and centers.
+  // Taken from each element's ROTATED footprint, not its raw width/height:
+  // elements rotate about their top-left anchor, so a rotated element's
+  // visible box is not [x, x+width] and raw values would drop guides where
+  // there is nothing on screen to align to.
   if (settings.elements) {
     for (const element of elements) {
       if (element.id === currentElementId) continue;
 
+      const b = getRotatedBounds(
+        element.x,
+        element.y,
+        element.width,
+        element.height,
+        element.rotation
+      );
+
       // Vertical lines (left, center, right edges of other elements)
       vertical.push(
-        { position: element.x, type: 'edge' },
-        { position: element.x + element.width / 2, type: 'center' },
-        { position: element.x + element.width, type: 'edge' }
+        { position: b.x, type: 'edge' },
+        { position: b.x + b.width / 2, type: 'center' },
+        { position: b.x + b.width, type: 'edge' }
       );
 
       // Horizontal lines (top, center, bottom edges of other elements)
       horizontal.push(
-        { position: element.y, type: 'edge' },
-        { position: element.y + element.height / 2, type: 'center' },
-        { position: element.y + element.height, type: 'edge' }
+        { position: b.y, type: 'edge' },
+        { position: b.y + b.height / 2, type: 'center' },
+        { position: b.y + b.height, type: 'edge' }
       );
     }
   }

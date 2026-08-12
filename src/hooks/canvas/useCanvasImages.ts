@@ -14,6 +14,16 @@ export function useCanvasImages(elements: Element[]) {
   const [loadedImages, setLoadedImages] = useState<Map<string, HTMLImageElement>>(new Map());
   const project = useProjectStore((s) => s.project);
 
+  // O(1) media lookup — the per-element .find() made key computation and
+  // the load passes O(elements × mediaPool).
+  const mediaById = useMemo(() => {
+    const map = new Map<string, NonNullable<typeof project>['mediaPool'][number]>();
+    for (const media of project?.mediaPool ?? []) {
+      map.set(media.id, media);
+    }
+    return map;
+  }, [project?.mediaPool]);
+
   // Track the image-relevant parts of elements to detect actual changes.
   // Includes the resolved media filePath + thumbnailPath so a relink (which
   // keeps mediaId stable but swaps the underlying file) re-runs the loader.
@@ -23,11 +33,11 @@ export function useCanvasImages(elements: Element[]) {
     return elements
       .filter((el) => el.type === 'photo' && el.mediaId)
       .map((el) => {
-        const media = project?.mediaPool.find((m) => m.id === el.mediaId);
+        const media = mediaById.get(el.mediaId!);
         return `${el.id}:${el.mediaId}:${el.assetPath || ''}:${media?.filePath || ''}:${media?.thumbnailPath || ''}`;
       })
       .join('|');
-  }, [elements, project?.mediaPool]);
+  }, [elements, mediaById]);
 
   const lastProcessedKeyRef = useRef<string>('');
   const loadedImagesRef = useRef<Map<string, HTMLImageElement>>(new Map());
@@ -48,7 +58,7 @@ export function useCanvasImages(elements: Element[]) {
     for (const element of elements) {
       if (element.type !== 'photo' || !element.mediaId) continue;
 
-      const media = project?.mediaPool.find((m) => m.id === element.mediaId);
+      const media = mediaById.get(element.mediaId);
       const fullPath = element.assetPath || media?.filePath;
       const thumbPath = media?.thumbnailPath || null;
       if (!fullPath) continue;
@@ -137,7 +147,7 @@ export function useCanvasImages(elements: Element[]) {
     for (const id of elementSrcRef.current.keys()) {
       if (!neededIds.has(id)) elementSrcRef.current.delete(id);
     }
-  }, [imageRelevantKey, project?.mediaPool]);
+  }, [imageRelevantKey, mediaById]);
 
   return loadedImages;
 }

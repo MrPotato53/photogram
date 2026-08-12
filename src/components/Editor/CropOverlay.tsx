@@ -8,8 +8,15 @@ import { useCropRect } from '../../hooks/crop/useCropRect';
 import { useCropSnapping } from '../../hooks/crop/useCropSnapping';
 import { useCropEdgeHandles } from '../../hooks/crop/useCropEdgeHandles';
 import { findTransformSnap } from '../../utils/snapping';
-import { coverScaleForRotation } from '../../utils/contentRotation';
+import {
+  contentRenderScale,
+  contentPivotDisplay,
+  minImageScaleForRotation,
+  clampWindowToRotatedImage,
+  fitCropToRotation,
+} from '../../utils/contentRotation';
 import { CropOverlayDarkOverlay } from './CropOverlayDarkOverlay';
+import { CropRotationDial } from './CropRotationDial';
 import { CropOverlayHandles } from './CropOverlayHandles';
 import { CropOverlayGrid } from './CropOverlayGrid';
 import { CropOverlayGuides } from './CropOverlayGuides';
@@ -43,6 +50,9 @@ interface CropOverlayProps {
   canvasHeight: number;
   slideWidth: number;
   numSlides: number;
+  // Layer scale (design units → screen px), for constant-screen-size UI
+  // chrome like the rotation dial.
+  layerScale: number;
   // Reset key - when changed, resets crop rect to full bounds
   resetKey?: number;
   // Live content rotation (degrees) from the crop toolbar's Straighten
@@ -73,6 +83,7 @@ export function CropOverlay({
   canvasHeight,
   slideWidth,
   numSlides,
+  layerScale,
   resetKey,
   contentRotation,
   onContentRotationChange,
@@ -736,7 +747,32 @@ export function CropOverlay({
         ? currentCropRect.height / (2 * bottomSpace + currentCropRect.height)
         : minSY;
 
-      const minScale = Math.max(minSX, minSY, minSXPos, minSXRight, minSYPos, minSYBottom);
+      // With rotation there is no automatic cover inflation any more, so
+      // THIS is the limit that stops the image shrinking away from the crop
+      // rect: the window must still fit inside the rotated image. It is the
+      // exact "shrink until the edges meet the box" boundary, and at 0° it
+      // equals the plain width/height limits above. The positional terms
+      // (minSXPos/…) only apply unrotated — when rotated, position is
+      // handled by clamping the window instead, so including them would
+      // stop the zoom-out early for no reason.
+      const rotMin = contentRotationLiveRef.current
+        ? minImageScaleForRotation(
+            currentFullBounds.width,
+            currentFullBounds.height,
+            currentCropRect.width,
+            currentCropRect.height,
+            contentRotationLiveRef.current
+          )
+        : 0;
+      // Rotated: rotMin is the WHOLE limit. minSX/minSY are the unrotated
+      // fit terms — at 90° the window's extent along the image's horizontal
+      // axis is its HEIGHT, not its width, so minSY over-constrains and
+      // stops the zoom-out early (the "this is as small as it goes" bug).
+      // rotMin already reduces to max(minSX, minSY) at 0°, so it subsumes
+      // them at every angle.
+      const minScale = contentRotationLiveRef.current
+        ? rotMin
+        : Math.max(minSX, minSY, minSXPos, minSXRight, minSYPos, minSYBottom);
       const clampedScale = Math.max(minScale, scaleFactor);
 
       if (Math.abs(clampedScale - 1) < 0.001) return;
@@ -749,16 +785,28 @@ export function CropOverlay({
       const newCropRectX = clampedScale * cropCenterX - currentCropRect.width / 2;
       const newCropRectY = clampedScale * cropCenterY - currentCropRect.height / 2;
 
-      // Clamp to new fullBounds (safety net)
-      const clampedCropX = Math.max(0, Math.min(newCropRectX, newFullBoundsW - currentCropRect.width));
-      const clampedCropY = Math.max(0, Math.min(newCropRectY, newFullBoundsH - currentCropRect.height));
-
-      const newCropRect = {
-        x: clampedCropX,
-        y: clampedCropY,
-        width: currentCropRect.width,
-        height: currentCropRect.height,
-      };
+      // Clamp to new fullBounds (safety net). Rotated, the valid region is
+      // the tilted quad — the axis-aligned form below would be nonsense
+      // here, because once rotated the image is legitimately NARROWER than
+      // the rect is wide (at 90° it only needs to be as wide as the rect is
+      // tall), making `newFullBoundsW - width` negative and slamming the
+      // rect to x=0 on every scroll step.
+      const rotNow = contentRotationLiveRef.current;
+      const newCropRect = rotNow
+        ? clampWindowToRotatedImage(newFullBoundsW, newFullBoundsH, rotNow, {
+            x: newCropRectX,
+            y: newCropRectY,
+            width: currentCropRect.width,
+            height: currentCropRect.height,
+          })
+        : {
+            x: Math.max(0, Math.min(newCropRectX, newFullBoundsW - currentCropRect.width)),
+            y: Math.max(0, Math.min(newCropRectY, newFullBoundsH - currentCropRect.height)),
+            width: currentCropRect.width,
+            height: currentCropRect.height,
+          };
+      const clampedCropX = newCropRect.x;
+      const clampedCropY = newCropRect.y;
 
       // New normalized element crop values
       const newCropWidth = currentCropW / clampedScale;
@@ -802,6 +850,66 @@ export function CropOverlay({
     };
   }, [onElementScale, setCropRect]);
 
+  // ── Refit on angle change ────────────────────────────────────────────
+  // Turning the image can leave the crop window hanging over a corner the
+  // rotation just emptied. When that happens, zoom the image in by exactly
+  // the shortfall and re-seat the window — Lightroom's behaviour.
+  //
+  // This is the ONLY place the image is allowed to change scale, and it
+  // fires only when the ANGLE changes. Dragging or resizing the box never
+  // reaches here, which is precisely why the image now stays put while the
+  // box moves. The zoom is folded into the crop values, so the renderer
+  // keeps drawing at natural size.
+  const refitAngleRef = useRef(contentRotation);
+  useLayoutEffect(() => {
+    if (refitAngleRef.current === contentRotation) return;
+    refitAngleRef.current = contentRotation;
+
+    const rect = scaleCropRectRef.current;
+    const fb = scaleFullBoundsRef.current;
+    if (!fb.width || !fb.height) return;
+
+    // Same shared, harness-validated re-fit the replace/fill path uses when
+    // a photo carries its straighten into a new frame.
+    const fitted = fitCropToRotation(
+      rect.width,
+      rect.height,
+      {
+        cropX: rect.x / fb.width,
+        cropY: rect.y / fb.height,
+        cropWidth: rect.width / fb.width,
+        cropHeight: rect.height / fb.height,
+      },
+      contentRotation
+    );
+
+    // Translate the fitted window back into this session's units: the crop
+    // rect is in image pixels, the element stores it normalized against the
+    // (possibly newly zoomed) image.
+    const zoom = (rect.width / fb.width) / fitted.cropWidth;
+    const newFullW = fb.width * zoom;
+    const newFullH = fb.height * zoom;
+    const newRect = {
+      x: fitted.cropX * newFullW,
+      y: fitted.cropY * newFullH,
+      width: rect.width,
+      height: rect.height,
+    };
+
+    if (zoom > 1) {
+      onElementScale({
+        cropX: newRect.x / newFullW,
+        cropY: newRect.y / newFullH,
+        cropWidth: scaleCropWRef.current / zoom,
+        cropHeight: scaleCropHRef.current / zoom,
+      });
+      setCropRect(newRect);
+      return;
+    }
+
+    if (newRect.x !== rect.x || newRect.y !== rect.y) setCropRect(newRect);
+  }, [contentRotation, onElementScale, setCropRect]);
+
   // During shift+pan, calculate crop rect position relative to current full bounds
   // The crop rect stays stationary in canvas coordinates, but full bounds moves
   const getCropRectForOverlay = () => {
@@ -831,11 +939,78 @@ export function CropOverlay({
   // Render dark overlay - always positioned at current full bounds
   const overlayCropRect = getCropRectForOverlay();
 
+  // When content rotation is active, the rotation-preview effect below moves
+  // the image node off the axis-aligned fullBounds rect: rotated around the
+  // FULL IMAGE'S OWN (fixed) center and cover-scaled to keep the live crop
+  // rect covered. Compute that transform's image footprint so the dark
+  // shadow tracks the rotated image instead of the stale upright rect. Must
+  // mirror the preview transform exactly; flip can be ignored because
+  // mirroring maps the corner set onto itself.
+  let rotatedShadow: {
+    footprint: { x: number; y: number }[];
+    hole: { x: number; y: number; width: number; height: number };
+  } | null = null;
+  if (contentRotation) {
+    const rect = overlayCropRect;
+    // Size-and-angle only — deliberately NOT a function of where the
+    // window currently is. A position-dependent scale here is what used to
+    // make the image rescale as the box was dragged sideways.
+    const s = contentRenderScale(
+      fullBounds.width,
+      fullBounds.height,
+      rect.width,
+      rect.height,
+      contentRotation
+    );
+    // Pivot uses the crop SESSION's base window (existingCropX/Y — constant
+    // across a plain box-drag, only moving via Option+scroll/reset/aspect
+    // changes), NOT the live-dragged rect — this is what keeps the
+    // underlying image visually stationary while the box is repositioned.
+    const pivot = contentPivotDisplay(
+      element.x,
+      element.y,
+      element.rotation,
+      fullBounds.width,
+      fullBounds.height,
+      existingCropX * fullBounds.width,
+      existingCropY * fullBounds.height
+    );
+    const rad = ((element.rotation + contentRotation) * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    // Image corners relative to the image's OWN (fixed) center.
+    const halfW = fullBounds.width / 2;
+    const halfH = fullBounds.height / 2;
+    const corners = [
+      { x: -halfW, y: -halfH },
+      { x: halfW, y: -halfH },
+      { x: halfW, y: halfH },
+      { x: -halfW, y: halfH },
+    ];
+    rotatedShadow = {
+      footprint: corners.map((p) => {
+        const dx = p.x * s;
+        const dy = p.y * s;
+        return { x: pivot.x + dx * cos - dy * sin, y: pivot.y + dx * sin + dy * cos };
+      }),
+      hole: {
+        x: fullBoundsX + rect.x,
+        y: fullBoundsY + rect.y,
+        width: rect.width,
+        height: rect.height,
+      },
+    };
+  }
+
   // ── Content-rotation live preview ────────────────────────────────────
   // Imperatively transforms the crop-mode full-image node (rendered by
-  // CanvasElementRenderer) so it rotates around the live crop-rect center
-  // with the same cover scale the final render will use. What's inside the
-  // crop rect during editing is therefore exactly the final composition.
+  // CanvasElementRenderer) so it rotates around the FULL IMAGE'S OWN fixed
+  // center — not the live crop-rect center — with the cover scale the final
+  // render will use for the current window. Anchoring the pivot to the
+  // image itself (rather than the window being dragged) is what keeps the
+  // image visually still while the crop rect is repositioned; only the
+  // scale grows as the window nears the rotated image's edge. What's inside
+  // the crop rect during editing is therefore exactly the final composition.
   // Runs after every render (no deps array) so it always re-applies AFTER
   // react-konva has re-applied JSX props — otherwise a re-render would
   // stomp the imperative attrs. When rotation is 0 and was never applied,
@@ -873,15 +1048,38 @@ export function CropOverlay({
     }
 
     const rect = overlayCropRect;
-    const s = coverScaleForRotation(rect.width, rect.height, contentRotation);
-    // Pivot = crop-rect center, in design coords and in node-local coords.
-    // Local coords must account for flip (local axis runs mirrored).
-    const centerLocalX = rect.x + rect.width / 2;
-    const centerLocalY = rect.y + rect.height / 2;
-    node.offsetX(element.flipX ? fullBounds.width - centerLocalX : centerLocalX);
-    node.offsetY(element.flipY ? fullBounds.height - centerLocalY : centerLocalY);
-    node.x(fullBoundsX + centerLocalX);
-    node.y(fullBoundsY + centerLocalY);
+    // Normally exactly 1 — the image draws at natural size so its edges can
+    // meet the crop rect. Depends on sizes and angle only, never on the
+    // window's position, which is what keeps the image dead still while the
+    // box is dragged.
+    const s = contentRenderScale(
+      fullBounds.width,
+      fullBounds.height,
+      rect.width,
+      rect.height,
+      contentRotation
+    );
+    // Pivot = the full image's own center — FIXED regardless of where the
+    // live crop rect currently is, so dragging the rect never moves this
+    // node. Content pivot (fullBounds.width/2, .height/2) is flip-invariant
+    // (W/2 == W - W/2), unlike the old window-center pivot. The display
+    // position composes element.rotation with the session's BASE window
+    // (existingCropX/Y — constant across a plain box-drag; only Option
+    // +scroll/reset/aspect changes move it), matching the shadow above and
+    // the final renderer's nested-Group composition.
+    const pivot = contentPivotDisplay(
+      element.x,
+      element.y,
+      element.rotation,
+      fullBounds.width,
+      fullBounds.height,
+      existingCropX * fullBounds.width,
+      existingCropY * fullBounds.height
+    );
+    node.offsetX(fullBounds.width / 2);
+    node.offsetY(fullBounds.height / 2);
+    node.x(pivot.x);
+    node.y(pivot.y);
     node.rotation(element.rotation + contentRotation);
     node.scaleX(s * flipSX);
     node.scaleY(s * flipSY);
@@ -900,6 +1098,7 @@ export function CropOverlay({
         fullBoundsY={fullBoundsY}
         fullBounds={fullBounds}
         overlayCropRect={overlayCropRect}
+        rotatedShadow={rotatedShadow}
       />
 
     {/* Crop interface Group - only shown when NOT in shift+pan */}
@@ -945,6 +1144,39 @@ export function CropOverlay({
           fullBounds={fullBounds}
         />
       </Group>
+    )}
+
+    {/* Rotation dial — angle pill above the frame; drag orbits the cursor
+        around the crop center to rotate the content, with a tick ring
+        appearing during the drag. Hidden while shift+pan is active. */}
+    {!shiftPanStart && (
+      <CropRotationDial
+        cropRect={{
+          x: fullBoundsX + cropRect.x,
+          y: fullBoundsY + cropRect.y,
+          width: cropRect.width,
+          height: cropRect.height,
+        }}
+        layerScale={layerScale}
+        rotation={contentRotation}
+        onRotationChange={onContentRotationChange}
+        onRotateEnd={(deg) => {
+          // Push immediately so Cmd+Z right after the drag finds the entry —
+          // the debounced watcher alone loses an undo pressed within its
+          // 400ms window (and then pushes the entry afterwards, making undo
+          // look dead). Cancel the pending debounce; if it were left to
+          // fire it would be deduped by entriesEqual anyway. The final
+          // value is passed explicitly so this doesn't depend on the last
+          // pointermove's render having committed.
+          if (rotationHistoryTimerRef.current) {
+            clearTimeout(rotationHistoryTimerRef.current);
+            rotationHistoryTimerRef.current = null;
+          }
+          useCropStore
+            .getState()
+            .pushCropHistory({ ...makeEntryRef.current(), contentRotation: deg });
+        }}
+      />
     )}
 
     {/* Shift+pan drag layer - OUTSIDE the Group to avoid position feedback loops */}
@@ -1000,6 +1232,30 @@ export function CropOverlay({
           const startCrop = start.cropRect;
 
           // Calculate bounds in design coords, then convert to screen
+          // Rotated: the region the crop rect may occupy is a tilted quad,
+          // so the two axes are coupled and cannot be clamped independently
+          // the way the axis-aligned path below does. Turn the candidate
+          // delta into the crop rect it implies, clamp THAT with the shared
+          // (validated) helper, then convert back to a delta.
+          const rot = contentRotationLiveRef.current;
+          if (rot) {
+            const candidate = clampWindowToRotatedImage(
+              fullBounds.width,
+              fullBounds.height,
+              rot,
+              {
+                x: startCrop.x - (pos.x - startXScreen) / scale,
+                y: startCrop.y - (pos.y - startYScreen) / scale,
+                width: startCrop.width,
+                height: startCrop.height,
+              }
+            );
+            return {
+              x: startXScreen + (startCrop.x - candidate.x) * scale,
+              y: startYScreen + (startCrop.y - candidate.y) * scale,
+            };
+          }
+
           const minDeltaXScreen = (startCrop.x + startCrop.width - fullBounds.width) * scale;
           const maxDeltaXScreen = startCrop.x * scale;
           const minDeltaYScreen = (startCrop.y + startCrop.height - fullBounds.height) * scale;
@@ -1036,11 +1292,18 @@ export function CropOverlay({
 
             // Finalize cropRect: when full bounds moves by delta, crop rect moves opposite
             const startCrop = start.cropRect;
-            const finalCropRect = {
-              ...startCrop,
-              x: Math.max(0, Math.min(startCrop.x - deltaX, fullBounds.width - startCrop.width)),
-              y: Math.max(0, Math.min(startCrop.y - deltaY, fullBounds.height - startCrop.height)),
-            };
+            // Same clamp the drag used, so the committed rect matches what
+            // was on screen (rotated: against the tilted image quad).
+            const finalCropRect = clampWindowToRotatedImage(
+              fullBounds.width,
+              fullBounds.height,
+              contentRotationLiveRef.current,
+              {
+                ...startCrop,
+                x: startCrop.x - deltaX,
+                y: startCrop.y - deltaY,
+              }
+            );
             setCropRect(finalCropRect);
 
             elementPositionRef.current = { x: element.x, y: element.y };

@@ -52,6 +52,27 @@ pub fn get_project(app: AppHandle, id: String) -> Result<Project, String> {
         }
     }
 
+    // Heal media whose thumbnail_path is missing (e.g. an undo past an
+    // import persisted a pre-thumbnail media pool). If the expected file
+    // (<thumbnails_dir>/<media_id>.jpg — the name every generator uses)
+    // already exists, just restore the path; otherwise queue generation.
+    let thumbnails_dir = get_thumbnails_dir(&app, &id);
+    let mut heal_jobs: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+    for media in project.media_pool.iter_mut() {
+        if media.thumbnail_path.is_none() {
+            let expected = thumbnails_dir.join(format!("{}.jpg", media.id));
+            if expected.exists() {
+                media.thumbnail_path = Some(expected.to_string_lossy().to_string());
+                backfilled = true;
+            } else {
+                let source = PathBuf::from(&media.file_path);
+                if source.exists() {
+                    heal_jobs.push((media.id.clone(), source, expected));
+                }
+            }
+        }
+    }
+
     // Detect thumbnails generated at the old smaller resolution. Reading
     // dimensions is cheap (the image crate does a header-only decode). Any
     // thumbnail whose largest side is meaningfully smaller than the current
@@ -91,15 +112,40 @@ pub fn get_project(app: AppHandle, id: String) -> Result<Project, String> {
     // `thumbnails-ready` listener re-fetches the project once the batch
     // finishes, which (combined with the cache-bust versioning the media
     // pool applies on file path changes) swaps the higher-res bytes in.
-    if !regen_jobs.is_empty() {
+    if !regen_jobs.is_empty() || !heal_jobs.is_empty() {
         let app_handle = app.clone();
+        let project_path_clone = project_path.clone();
         std::thread::spawn(move || {
-            for (_media_id, source_path, thumb_path) in &regen_jobs {
-                if source_path.exists() {
-                    let _ = generate_thumbnail(source_path, thumb_path);
+            let _ = fs::create_dir_all(&thumbnails_dir);
+            let mut updates: Vec<crate::commands::media::ThumbnailUpdate> = vec![];
+            for (media_id, source_path, thumb_path) in regen_jobs.iter().chain(heal_jobs.iter()) {
+                if source_path.exists() && generate_thumbnail(source_path, thumb_path).is_ok() {
+                    // For regens the path is unchanged (rewritten in place)
+                    // but the payload still carries it so the frontend can
+                    // cache-bust the tile; for heals it's a brand-new path.
+                    updates.push(crate::commands::media::ThumbnailUpdate {
+                        media_id: media_id.clone(),
+                        thumbnail_path: thumb_path.to_string_lossy().to_string(),
+                    });
                 }
             }
-            let _ = app_handle.emit("thumbnails-ready", ());
+            if !updates.is_empty() {
+                // Persist the paths (heal jobs start as None on disk; the
+                // frontend merge only fixes the in-memory copy).
+                if let Ok(contents) = fs::read_to_string(&project_path_clone) {
+                    if let Ok(mut p) = serde_json::from_str::<Project>(&contents) {
+                        for u in &updates {
+                            if let Some(m) = p.media_pool.iter_mut().find(|m| m.id == u.media_id) {
+                                m.thumbnail_path = Some(u.thumbnail_path.clone());
+                            }
+                        }
+                        if let Ok(j) = serde_json::to_string_pretty(&p) {
+                            let _ = write_atomic(&project_path_clone, &j);
+                        }
+                    }
+                }
+                let _ = app_handle.emit("thumbnails-ready", updates);
+            }
         });
     }
 

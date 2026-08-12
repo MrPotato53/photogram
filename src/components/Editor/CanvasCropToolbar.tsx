@@ -88,8 +88,15 @@ export function CanvasCropToolbar({
     const move = (ev: PointerEvent) => {
       // Shift state read PER EVENT so fine mode can engage mid-drag.
       const sensitivity = ev.shiftKey ? 0.1 : 1;
-      value = clampContentRotation(
-        value + ((ev.clientX - lastX) / rect.width) * range * sensitivity
+      // Pin (not wrap) at the range ends: a linear slider jumping from
+      // +180 to -180 mid-drag reads as a glitch. The circular dial is the
+      // control that wraps.
+      value = Math.max(
+        -CONTENT_ROTATION_MAX,
+        Math.min(
+          CONTENT_ROTATION_MAX,
+          value + ((ev.clientX - lastX) / rect.width) * range * sensitivity
+        )
       );
       lastX = ev.clientX;
       onContentRotationChange(Math.round(value * 100) / 100);

@@ -10,7 +10,7 @@ import { useElementStore } from '../../stores/elementStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { updateDragLabel } from '../../components/Editor/DragPreview';
 import { findFillBounds, type FillBounds } from '../../utils/snapping';
-import type { ReplaceTarget } from './useCanvasFillMode';
+import { findPlaceholderAt, type ReplaceTarget } from './useCanvasFillMode';
 
 interface UseCanvasMediaDropOptions {
   stageContainerRef: React.RefObject<HTMLDivElement>;
@@ -49,6 +49,7 @@ export function useCanvasMediaDrop({
   const setCurrentSlide = useSlideStore((s) => s.setCurrentSlide);
   const addElement = useElementStore((s) => s.addElement);
   const updateElement = useElementStore((s) => s.updateElement);
+  const selectElement = useElementStore((s) => s.selectElement);
   const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
   const setDraggingMedia = useMediaStore((s) => s.setDraggingMedia);
   const clearMediaSelection = useMediaStore((s) => s.clearMediaSelection);
@@ -56,23 +57,33 @@ export function useCanvasMediaDrop({
   // --- Fill preview state (exposed to CanvasArea for rendering) ---
   const fillPreviewRef = useRef<FillBounds | null>(null);
   const fillPreviewListenerRef = useRef<((bounds: FillBounds | null) => void) | null>(null);
+  const fillLabelRef = useRef('Drop on canvas');
 
-  const setFillPreview = useCallback((bounds: FillBounds | null) => {
-    const changed = (fillPreviewRef.current === null) !== (bounds === null);
+  const setFillPreview = useCallback((bounds: FillBounds | null, isFrame = false) => {
     fillPreviewRef.current = bounds;
     fillPreviewListenerRef.current?.(bounds);
-    if (changed) updateDragLabel(bounds ? 'Fill area (F)' : 'Drop on canvas');
+    const label = bounds ? (isFrame ? 'Fill frame (F)' : 'Fill area (F)') : 'Drop on canvas';
+    if (label !== fillLabelRef.current) {
+      fillLabelRef.current = label;
+      updateDragLabel(label);
+    }
   }, []);
 
   // --- Replace preview state (exposed to CanvasArea for rendering) ---
   const replacePreviewRef = useRef<ReplaceTarget | null>(null);
   const replacePreviewListenerRef = useRef<((target: ReplaceTarget | null) => void) | null>(null);
+  const replaceLabelRef = useRef('Drop on canvas');
 
   const setReplacePreview = useCallback((target: ReplaceTarget | null) => {
-    const changed = (replacePreviewRef.current === null) !== (target === null);
     replacePreviewRef.current = target;
     replacePreviewListenerRef.current?.(target);
-    if (changed) updateDragLabel(target ? 'Replace image (R)' : 'Drop on canvas');
+    const label = target
+      ? (target.targetType === 'placeholder' ? 'Fill frame (R)' : 'Replace image (R)')
+      : 'Drop on canvas';
+    if (label !== replaceLabelRef.current) {
+      replaceLabelRef.current = label;
+      updateDragLabel(label);
+    }
   }, []);
 
   // Refs for drop handling (to avoid stale closures in always-attached listener)
@@ -126,12 +137,22 @@ export function useCanvasMediaDrop({
 
       const pos = screenToDesign(e.clientX, e.clientY);
 
-      // Fill preview
+      // Fill preview. A placeholder frame under the cursor wins over the
+      // snap-line region: the frame IS the fill target (and region lookup
+      // is wrong for multi-slide frames, which are split by the
+      // slide-boundary snap line).
       const lines = fillLinesRef.current;
-      if (fillKeyRef.current && lines && pos) {
-        const bounds = findFillBounds(pos.x, pos.y, lines.vertical, lines.horizontal);
-        if (bounds.width > 0 && bounds.height > 0) {
-          setFillPreview(bounds);
+      if (fillKeyRef.current && pos) {
+        const frame = findPlaceholderAt(state.elements, pos.x, pos.y);
+        if (frame) {
+          setFillPreview(frame, true);
+        } else if (lines) {
+          const bounds = findFillBounds(pos.x, pos.y, lines.vertical, lines.horizontal);
+          if (bounds.width > 0 && bounds.height > 0) {
+            setFillPreview(bounds);
+          } else {
+            setFillPreview(null);
+          }
         } else {
           setFillPreview(null);
         }
@@ -234,6 +255,9 @@ export function useCanvasMediaDrop({
             }
 
             await updateElement(target.elementId, {
+              // Placeholder targets become photos (fill the frame);
+              // for photo targets this is a no-op.
+              type: 'photo',
               mediaId: media.id,
               assetPath,
               cropX,
@@ -241,7 +265,17 @@ export function useCanvasMediaDrop({
               cropWidth,
               cropHeight,
               lastCropRatio: null,
+              // The frame's own canvas rotation is preserved (this is a
+              // merge), but the straighten angle belonged to the OUTGOING
+              // photo. Carrying it over would tilt the new image by an
+              // amount the user never chose for it, against a crop window
+              // that was just recomputed as if unrotated.
+              contentRotation: 0,
             });
+
+            // Select the result — dropping media is an interaction with
+            // this element, so the border should land on it.
+            selectElement(target.elementId);
 
             // The replaced element's old embedded asset is no longer
             // referenced by the live project — register it for cleanup
@@ -266,9 +300,19 @@ export function useCanvasMediaDrop({
         }
       }
 
-      // --- Fill mode: F key held + fill lines ready ---
+      // --- Check if dropping on a placeholder frame ---
+      // Checked BEFORE fill mode: with F held over a frame, the frame is
+      // the fill target. The snap-line region would create a NEW element
+      // over the frame (leaving the empty frame beneath) — and for a
+      // multi-slide frame the region is split at the slide boundary, so
+      // it would only cover half the frame.
+      // Topmost frame by z-order — must match the preview's hit-test so
+      // the frame that highlights is the frame that fills.
+      const placeholderFrame = findPlaceholderAt(state.elements, dropX, dropY);
+
+      // --- Fill mode: F key held + fill lines ready (no frame hit) ---
       const lines = fillLinesRef.current;
-      if (fillKeyRef.current && lines) {
+      if (!placeholderFrame && fillKeyRef.current && lines) {
         const bounds = findFillBounds(dropX, dropY, lines.vertical, lines.horizontal);
         if (bounds.width > 0 && bounds.height > 0) {
           const frameRatio = bounds.width / bounds.height;
@@ -322,12 +366,6 @@ export function useCanvasMediaDrop({
         }
       }
 
-      // --- Check if dropping on a placeholder frame ---
-      const placeholderFrame = state.elements.find((el) => {
-        if (el.type !== 'placeholder') return false;
-        return dropX >= el.x && dropX <= el.x + el.width && dropY >= el.y && dropY <= el.y + el.height;
-      });
-
       if (placeholderFrame) {
         const frameRatio = placeholderFrame.width / placeholderFrame.height;
         const mediaRatio = media.width / media.height;
@@ -352,14 +390,20 @@ export function useCanvasMediaDrop({
         void (async () => {
           // Embed like addElement does so the element owns its own copy
           // of the image instead of referencing the media pool file.
+          // Fresh uuid for the FILENAME (not the element id): the asset
+          // path must be unique per fill. Keyed by element id, refilling
+          // the same frame (e.g. after an undo) overwrites the previous
+          // asset file in place — history snapshots then point at the new
+          // image's bytes, and the unchanged URL makes the image cache
+          // keep serving the OLD image for the new fill.
           let assetPath: string | undefined;
           try {
-            assetPath = await embedElementAsset(projectId, placeholderFrame.id, media.filePath);
+            assetPath = await embedElementAsset(projectId, uuidv4(), media.filePath);
           } catch (error) {
             console.error('Failed to embed asset for placeholder fill:', error);
           }
 
-          await updateElement(placeholderFrame.id, {
+          await updateElement(placeholderFrame.elementId, {
             type: 'photo',
             mediaId: media.id,
             assetPath,
@@ -367,7 +411,13 @@ export function useCanvasMediaDrop({
             cropY,
             cropWidth,
             cropHeight,
+            // Frame rotation is kept (merge); the straighten angle is not —
+            // it belonged to whatever was in the frame before.
+            contentRotation: 0,
           });
+
+          // Select the filled frame — same rationale as the replace path.
+          selectElement(placeholderFrame.elementId);
         })();
 
         const slideIndex = getSlideIndexFromCenter(placeholderFrame.x, placeholderFrame.width, state.designSize.width);
@@ -420,7 +470,7 @@ export function useCanvasMediaDrop({
 
     window.addEventListener('mouseup', handleMouseUp);
     return () => window.removeEventListener('mouseup', handleMouseUp);
-  }, [setDraggingMedia, clearMediaSelection, addElement, updateElement, setCurrentSlide, screenToDesign, setFillPreview, setReplacePreview, fillKeyRef, replaceKeyRef, fillLinesRef, getReplacementTarget]);
+  }, [setDraggingMedia, clearMediaSelection, addElement, updateElement, selectElement, setCurrentSlide, screenToDesign, setFillPreview, setReplacePreview, fillKeyRef, replaceKeyRef, fillLinesRef, getReplacementTarget]);
 
   return {
     fillPreviewRef,

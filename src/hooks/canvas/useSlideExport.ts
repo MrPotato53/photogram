@@ -73,10 +73,11 @@ export function useSlideExport({ stageRef, project, scale }: UseSlideExportProps
       // Nodes in "Full" mode aren't cached at all, so they always draw from
       // source at the export resolution.
       const displayPixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-      const wereCached: Konva.Image[] = [];
-      const imageNodes = stage.find('Image') as Konva.Image[];
-      for (const node of imageNodes) {
-        if (!node.isCached()) continue;
+      const wereCached: Konva.Node[] = [];
+      // Content-rotated elements cache their clip Group rather than the
+      // Image node, so match any cached node instead of Images only.
+      const cachedNodes = stage.find((n: Konva.Node) => n.isCached());
+      for (const node of cachedNodes) {
         const nodeRatio = (node.getAttr('cachePixelRatio') as number | undefined) ?? displayPixelRatio;
         if (effectivePixelRatio > nodeRatio + 0.01) {
           wereCached.push(node);
@@ -112,7 +113,14 @@ export function useSlideExport({ stageRef, project, scale }: UseSlideExportProps
           for (const node of wereCached) {
             try {
               const ratio = (node.getAttr('cachePixelRatio') as number | undefined) ?? displayPixelRatio;
-              node.cache({ pixelRatio: ratio });
+              if (node.getClassName() === 'Group') {
+                // Clip Groups need explicit frame bounds (their default cache
+                // bounds come from the oversized rotated content, not the
+                // clip). The renderer sets width/height to the frame size.
+                node.cache({ x: 0, y: 0, width: node.width(), height: node.height(), pixelRatio: ratio });
+              } else {
+                node.cache({ pixelRatio: ratio });
+              }
             } catch {
               // cache() throws on zero-size nodes; safe to skip
             }

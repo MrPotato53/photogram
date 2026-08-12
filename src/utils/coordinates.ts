@@ -150,3 +150,98 @@ export function calculateScale(canvasHeight: number, designHeight: number): numb
   return canvasHeight > 0 ? canvasHeight / designHeight : 1;
 }
 
+export interface Bounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Whether a design-space point lands on an element, honouring its
+ * rotation.
+ *
+ * Exact rather than bounding-box based: the point is carried back into the
+ * element's own unrotated frame and tested there, so the hit area is the
+ * tilted rectangle the user actually sees. A plain [x, x+width] test would
+ * report hits on empty canvas beside a rotated element and miss the
+ * element itself.
+ */
+export function isPointInRotatedRect(
+  pointX: number,
+  pointY: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  rotation: number = 0
+): boolean {
+  let localX = pointX - x;
+  let localY = pointY - y;
+
+  if (rotation) {
+    const rad = (-rotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const rx = localX * cos - localY * sin;
+    const ry = localX * sin + localY * cos;
+    localX = rx;
+    localY = ry;
+  }
+
+  return localX >= 0 && localX <= width && localY >= 0 && localY <= height;
+}
+
+/**
+ * Axis-aligned bounding box, in design space, of an element rotated by
+ * `rotation` degrees.
+ *
+ * Elements rotate around their top-left anchor (x, y) — Konva's default
+ * with no offset — so the visual footprint of a rotated element is NOT
+ * [x, x+width]×[y, y+height]. At 90°, for instance, it sits entirely to
+ * the LEFT of x. Anything reasoning about where an element visually is —
+ * snap lines, snap targets, on-canvas drag limits — must use this box, or
+ * it will be off by up to a full dimension.
+ *
+ * At rotation 0 this returns exactly { x, y, width, height }.
+ */
+export function getRotatedBounds(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  rotation: number = 0
+): Bounds {
+  if (!rotation) return { x, y, width, height };
+
+  const rad = (rotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  for (const [px, py] of [
+    [0, 0],
+    [width, 0],
+    [width, height],
+    [0, height],
+  ]) {
+    const rx = px * cos - py * sin;
+    const ry = px * sin + py * cos;
+    if (rx < minX) minX = rx;
+    if (rx > maxX) maxX = rx;
+    if (ry < minY) minY = ry;
+    if (ry > maxY) maxY = ry;
+  }
+
+  return {
+    x: x + minX,
+    y: y + minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  };
+}
+

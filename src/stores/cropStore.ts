@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { useElementStore } from './elementStore';
+import { flushPersistProject } from '../services/projectPersistence';
 
 interface CropRect {
   x: number;
@@ -81,6 +82,17 @@ export const useCropStore = create<CropStoreState>((set, get) => ({
   restoreTarget: null,
 
   enterCropMode: (elementId: string) => {
+    // Refuse to open mid-drag. Crop mode snapshots the element's geometry on
+    // entry and drives an imperative preview from it; opening while the
+    // element is still moving captures a position that is already stale and
+    // leaves the overlay detached from the image. Guarding here covers every
+    // entry point (toolbar button, context menu, keyboard) at once.
+    if (useElementStore.getState().isDraggingElement) return;
+
+    // Crop cancel restores in-memory state locally and assumes the backend
+    // still holds the pre-crop project. Flush any pending debounced write
+    // NOW so no timer can fire mid-crop and persist transient crop state.
+    flushPersistProject();
     useElementStore.getState().selectElement(elementId);
     set({
       cropModeElementId: elementId,

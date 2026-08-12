@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { Element } from '../types';
 import { updateProject, embedElementAsset } from '../services/tauri';
+import { schedulePersistProject } from '../services/projectPersistence';
 import { useProjectStore } from './projectStore';
 import { useCropStore } from './cropStore';
 import { useClipboardStore } from './clipboardStore';
@@ -8,12 +9,18 @@ import { useHistoryStore } from './historyStore';
 
 interface ElementState {
   selectedElementId: string | null;
+  // True from the moment a canvas element drag starts until it ends.
+  // Shared (rather than a local ref) because two unrelated systems need it:
+  // crop mode must refuse to open mid-drag, and the `s` key means "swap"
+  // during a drag but "toggle slides panel" at rest.
+  isDraggingElement: boolean;
   // Monotonic counter. Incremented whenever a caller requests the canvas
   // to scroll/center on the currently-selected element (e.g. double-click
   // in the layers panel). CanvasArea watches this and runs its focus logic.
   focusRequestId: number;
 
   selectElement: (id: string | null) => void;
+  setDraggingElement: (dragging: boolean) => void;
   focusElement: (id: string) => void;
   addElement: (element: Element) => Promise<void>;
   updateElement: (elementId: string, updates: Partial<Element>) => Promise<void>;
@@ -43,9 +50,14 @@ interface ElementState {
 export const useElementStore = create<ElementState>((set, get) => ({
   selectedElementId: null,
   focusRequestId: 0,
+  isDraggingElement: false,
 
   selectElement: (id: string | null) => {
     set({ selectedElementId: id });
+  },
+
+  setDraggingElement: (dragging: boolean) => {
+    set({ isDraggingElement: dragging });
   },
 
   focusElement: (id: string) => {
@@ -137,9 +149,9 @@ export const useElementStore = create<ElementState>((set, get) => ({
       elementId,
     });
 
-    updateProject(updatedProject).catch((error) => {
-      console.error('Failed to persist element update:', error);
-    });
+    // Debounced disk write — coalesces bursts (nudge key repeats, rapid
+    // drag ends) into one full-project serialization.
+    schedulePersistProject();
   },
 
   removeElement: async (elementId: string) => {

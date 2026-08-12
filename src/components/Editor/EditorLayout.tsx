@@ -22,6 +22,7 @@ import { TemplatePickerModal } from './TemplatePickerModal';
 import { KeyboardShortcutsModal } from '../KeyboardShortcutsModal';
 import type { Template } from '../../types';
 import { exportSlides, showInFolder, type ExportOptions } from '../../services/tauri';
+import { flushPersistProject } from '../../services/projectPersistence';
 import { useEditorShortcuts } from '../../hooks/useEditorShortcuts';
 import { useShortcutsStore } from '../../stores/shortcutsStore';
 
@@ -34,7 +35,6 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   const isLoading = useProjectStore((s) => s.isLoading);
   const error = useProjectStore((s) => s.error);
   const loadProject = useProjectStore((s) => s.loadProject);
-  const refreshProject = useProjectStore((s) => s.refreshProject);
   const currentSlideIndex = useSlideStore((s) => s.currentSlideIndex);
   const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
   // Granular selectors — only re-render when the specific value changes,
@@ -75,19 +75,52 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
   } | null>(null);
 
   useEffect(() => {
+    // Flush any pending debounced write BEFORE switching projects — the
+    // store still holds the outgoing project here, so its last edits are
+    // persisted rather than dropped (or worse, written after the new
+    // project loads).
+    flushPersistProject();
     loadProject(projectId);
   }, [projectId, loadProject]);
 
-  // Listen for thumbnails-ready event from Rust backend
+  // Listen for thumbnails-ready events from the Rust backend. The payload
+  // carries the updated (mediaId, thumbnailPath) pairs; merge JUST those
+  // into the in-memory project. Deliberately NOT refreshProject():
+  //  - a full re-fetch would clobber unsaved in-memory edits (imports now
+  //    emit repeatedly while the user may be editing), and
+  //  - get_project's low-res backfill would see the import's fast
+  //    first-pass thumbnails and queue duplicate quality regens, whose
+  //    events would re-fetch again — a feedback loop.
   useEffect(() => {
-    const unlisten = listen('thumbnails-ready', () => {
-      refreshProject();
-    });
+    const unlisten = listen<{ mediaId: string; thumbnailPath: string }[]>(
+      'thumbnails-ready',
+      (event) => {
+        const updates = event.payload;
+        if (!Array.isArray(updates) || updates.length === 0) return;
+        const current = useProjectStore.getState().project;
+        if (!current) return;
+        const pathById = new Map(updates.map((u) => [u.mediaId, u.thumbnailPath]));
+        let changed = false;
+        const mergedPool = current.mediaPool.map((m) => {
+          const path = pathById.get(m.id);
+          if (path !== undefined && path !== m.thumbnailPath) {
+            changed = true;
+            return { ...m, thumbnailPath: path };
+          }
+          return m;
+        });
+        if (changed) {
+          // Silent: disk already has these paths (the backend wrote them
+          // before emitting); this is sync, not a user edit.
+          useProjectStore.getState().setProjectSilent({ ...current, mediaPool: mergedPool });
+        }
+      }
+    );
 
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [refreshProject]);
+  }, []);
 
   // Change cursor during drag
   useEffect(() => {

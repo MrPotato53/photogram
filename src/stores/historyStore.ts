@@ -100,26 +100,51 @@ function generateLabel(context: HistoryOperationContext): string {
 }
 
 /**
- * Create a lightweight snapshot from a project
- * Only includes JSON-serializable data, NO image instances
+ * Create a lightweight snapshot from a project.
+ *
+ * Stores REFERENCES, not deep copies — O(1) per push instead of
+ * re-serializing the whole document, and history entries share structure
+ * with live state instead of holding up to maxEntries full copies.
+ *
+ * This is only correct because project state is IMMUTABLE: every mutation
+ * path builds new arrays and new element/slide/media objects (verified:
+ * elementStore, slideStore, mediaStore, snapStore persistence,
+ * templatesStore; clipboard paste spreads elements before insert). If any
+ * code ever mutates project state in place, past history entries would
+ * silently change with it — keep mutations copy-on-write.
  */
 function createSnapshot(project: Project): HistorySnapshot {
   return {
-    elements: JSON.parse(JSON.stringify(project.elements)),
-    slides: JSON.parse(JSON.stringify(project.slides)),
-    mediaPool: JSON.parse(JSON.stringify(project.mediaPool)),
+    elements: project.elements,
+    slides: project.slides,
+    mediaPool: project.mediaPool,
   };
 }
 
 /**
- * Apply a snapshot back to a project
+ * Apply a snapshot back to a project.
+ *
+ * Thumbnail paths are NOT user-editable state — they arrive asynchronously
+ * from the backend after an import. A snapshot taken before generation
+ * finished has thumbnailPath: null; restoring it verbatim would strand
+ * those tiles on the loading placeholder and persist the path-less pool to
+ * disk. Carry live paths over instead (new objects — snapshots are shared
+ * by reference and must never be mutated).
  */
 function applySnapshot(project: Project, snapshot: HistorySnapshot): Project {
+  const liveThumbs = new Map(project.mediaPool.map((m) => [m.id, m.thumbnailPath]));
+  const mediaPool = snapshot.mediaPool.map((m) => {
+    if (!m.thumbnailPath) {
+      const live = liveThumbs.get(m.id);
+      if (live) return { ...m, thumbnailPath: live };
+    }
+    return m;
+  });
   return {
     ...project,
     elements: snapshot.elements,
     slides: snapshot.slides,
-    mediaPool: snapshot.mediaPool,
+    mediaPool,
   };
 }
 
