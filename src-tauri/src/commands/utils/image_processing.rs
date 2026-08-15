@@ -111,9 +111,12 @@ pub fn get_image_dimensions(path: &PathBuf) -> Option<(u32, u32)> {
     }
 }
 
-/// Check if a file path is an image file based on extension
+/// Check if a file path is an image file based on extension.
+///
+/// Must stay in step with the frontend's canvas-drop filter — a format
+/// accepted there but rejected here imports nothing, with no error shown.
 pub fn is_image_file(path: &PathBuf) -> bool {
-    let extensions = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+    let extensions = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif"];
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| extensions.contains(&ext.to_lowercase().as_str()))

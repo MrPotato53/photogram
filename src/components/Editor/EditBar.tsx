@@ -5,6 +5,7 @@ import { useElementStore } from '../../stores/elementStore';
 import { usePanelStore } from '../../stores/panelStore';
 import { useCropStore } from '../../stores/cropStore';
 import { useSnapStore, type SnapSettings, type SnapSettingsUpdate, type GuideType } from '../../stores/snapStore';
+import { FULL_CROP, getCropWindow, hasCrop } from '../../utils/photoFraming';
 import { DESIGN_HEIGHT, getSlideWidth } from '../../utils/designConstants';
 
 // Reusable number input with visible spinner arrows
@@ -444,7 +445,7 @@ export function EditBar() {
     if (!selectedElement || !selectedMedia) return 100;
     const fitSize = getFitSize();
     // Current visible width (accounting for crop)
-    const currentWidth = selectedElement.width / (selectedElement.cropWidth ?? 1);
+    const currentWidth = selectedElement.width / getCropWindow(selectedElement).cropWidth;
     return Math.round((currentWidth / fitSize.width) * 100);
   };
 
@@ -475,12 +476,7 @@ export function EditBar() {
 
   const handleResetCrop = () => {
     if (!selectedElement) return;
-    updateElement(selectedElement.id, {
-      cropX: 0,
-      cropY: 0,
-      cropWidth: 1,
-      cropHeight: 1,
-    });
+    updateElement(selectedElement.id, { ...FULL_CROP });
   };
 
   /**
@@ -529,10 +525,9 @@ export function EditBar() {
     if (!selectedElement || !selectedMedia) return;
     const scale = percent / 100;
     const fitSize = getFitSize();
-    const cropW = selectedElement.cropWidth ?? 1;
-    const cropH = selectedElement.cropHeight ?? 1;
-    const newWidth = fitSize.width * scale * cropW;
-    const newHeight = fitSize.height * scale * cropH;
+    const { cropWidth, cropHeight } = getCropWindow(selectedElement);
+    const newWidth = fitSize.width * scale * cropWidth;
+    const newHeight = fitSize.height * scale * cropHeight;
 
     const rot = selectedElement.rotation ?? 0;
     const fX = selectedElement.flipX ?? false;
@@ -575,10 +570,9 @@ export function EditBar() {
   const handleResetScale = () => {
     if (!selectedElement || !selectedMedia) return;
     const fitSize = getFitSize();
-    const cropW = selectedElement.cropWidth ?? 1;
-    const cropH = selectedElement.cropHeight ?? 1;
-    const newWidth = fitSize.width * cropW;
-    const newHeight = fitSize.height * cropH;
+    const { cropWidth, cropHeight } = getCropWindow(selectedElement);
+    const newWidth = fitSize.width * cropWidth;
+    const newHeight = fitSize.height * cropHeight;
 
     const rot = selectedElement.rotation ?? 0;
     const fX = selectedElement.flipX ?? false;
@@ -606,12 +600,7 @@ export function EditBar() {
     updateElement(selectedElement.id, { rotation: 0, x, y });
   };
 
-  const hasCrop = selectedElement && (
-    (selectedElement.cropX ?? 0) !== 0 ||
-    (selectedElement.cropY ?? 0) !== 0 ||
-    (selectedElement.cropWidth ?? 1) !== 1 ||
-    (selectedElement.cropHeight ?? 1) !== 1
-  );
+  const isCropped = !!selectedElement && hasCrop(selectedElement);
 
   if (!editBarOpen) {
     return (
@@ -696,7 +685,7 @@ export function EditBar() {
             }
             label="Reset Crop"
             onClick={handleResetCrop}
-            disabled={!isElementSelected || !hasCrop || isCropping}
+            disabled={!isElementSelected || !isCropped || isCropping}
           />
         </div>
 

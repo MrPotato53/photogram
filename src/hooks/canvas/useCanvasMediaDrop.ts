@@ -10,6 +10,8 @@ import { useElementStore } from '../../stores/elementStore';
 import { useMediaStore } from '../../stores/mediaStore';
 import { updateDragLabel } from '../../components/Editor/DragPreview';
 import { findFillBounds, type FillBounds } from '../../utils/snapping';
+import { coverCrop } from '../../utils/photoFraming';
+import { buildPhotoPayload } from '../../utils/photoTransfer';
 import { findPlaceholderAt, type ReplaceTarget } from './useCanvasFillMode';
 
 interface UseCanvasMediaDropOptions {
@@ -219,22 +221,6 @@ export function useCanvasMediaDrop({
       if (replaceKeyRef.current) {
         const target = getReplacementTarget(dropX, dropY);
         if (target) {
-          const frameRatio = target.width / target.height;
-          const mediaRatio = media.width / media.height;
-
-          let cropX = 0;
-          let cropY = 0;
-          let cropWidth = 1;
-          let cropHeight = 1;
-
-          if (mediaRatio > frameRatio) {
-            cropWidth = frameRatio / mediaRatio;
-            cropX = (1 - cropWidth) / 2;
-          } else if (mediaRatio < frameRatio) {
-            cropHeight = mediaRatio / frameRatio;
-            cropY = (1 - cropHeight) / 2;
-          }
-
           setDraggingMedia(null);
           clearMediaSelection();
 
@@ -254,24 +240,24 @@ export function useCanvasMediaDrop({
               console.error('Failed to embed asset for replace:', error);
             }
 
-            await updateElement(target.elementId, {
-              // Placeholder targets become photos (fill the frame);
-              // for photo targets this is a no-op.
-              type: 'photo',
-              mediaId: media.id,
-              assetPath,
-              cropX,
-              cropY,
-              cropWidth,
-              cropHeight,
-              lastCropRatio: null,
-              // The frame's own canvas rotation is preserved (this is a
-              // merge), but the straighten angle belonged to the OUTGOING
-              // photo. Carrying it over would tilt the new image by an
-              // amount the user never chose for it, against a crop window
-              // that was just recomputed as if unrotated.
-              contentRotation: 0,
-            });
+            // Placeholder targets become photos (fill the frame); for photo
+            // targets this is a no-op. The frame's own canvas rotation is
+            // preserved (this is a merge), but the straighten angle and
+            // flips are not: they belonged to the OUTGOING photo, and
+            // carrying them over would transform the new image by an amount
+            // the user never chose for it. A pool item arrives with no edits
+            // of its own, so the payload defaults handle that.
+            await updateElement(
+              target.elementId,
+              buildPhotoPayload({
+                mediaId: media.id,
+                assetPath,
+                mediaWidth: media.width,
+                mediaHeight: media.height,
+                frameWidth: target.width,
+                frameHeight: target.height,
+              })
+            );
 
             // Select the result — dropping media is an interaction with
             // this element, so the border should land on it.
@@ -281,14 +267,7 @@ export function useCanvasMediaDrop({
             // referenced by the live project — register it for cleanup
             // when it falls off the history stack (mirrors removeElement).
             if (oldAssetPath && oldAssetPath !== assetPath) {
-              const historyStore = useHistoryStore.getState();
-              const currentEntry = historyStore.entries[historyStore.currentIndex];
-              historyStore.trackDeletedAsset({
-                assetPath: oldAssetPath,
-                mediaId: oldElement?.mediaId || '',
-                deletedAt: Date.now(),
-                historyEntryId: currentEntry?.id || '',
-              });
+              useHistoryStore.getState().trackOrphanedAsset(oldAssetPath, oldElement?.mediaId);
             }
           })();
 
@@ -315,21 +294,7 @@ export function useCanvasMediaDrop({
       if (!placeholderFrame && fillKeyRef.current && lines) {
         const bounds = findFillBounds(dropX, dropY, lines.vertical, lines.horizontal);
         if (bounds.width > 0 && bounds.height > 0) {
-          const frameRatio = bounds.width / bounds.height;
-          const mediaRatio = media.width / media.height;
-
-          let cropX = 0;
-          let cropY = 0;
-          let cropWidth = 1;
-          let cropHeight = 1;
-
-          if (mediaRatio > frameRatio) {
-            cropWidth = frameRatio / mediaRatio;
-            cropX = (1 - cropWidth) / 2;
-          } else if (mediaRatio < frameRatio) {
-            cropHeight = mediaRatio / frameRatio;
-            cropY = (1 - cropHeight) / 2;
-          }
+          const crop = coverCrop(media.width, media.height, bounds.width, bounds.height);
 
           const maxZIndex = state.elements.length > 0
             ? Math.max(...state.elements.map(el => el.zIndex)) + 1
@@ -347,10 +312,7 @@ export function useCanvasMediaDrop({
             scale: 1,
             locked: false,
             zIndex: maxZIndex,
-            cropX,
-            cropY,
-            cropWidth,
-            cropHeight,
+            ...crop,
             lastCropRatio: null,
           };
 
@@ -367,22 +329,6 @@ export function useCanvasMediaDrop({
       }
 
       if (placeholderFrame) {
-        const frameRatio = placeholderFrame.width / placeholderFrame.height;
-        const mediaRatio = media.width / media.height;
-
-        let cropX = 0;
-        let cropY = 0;
-        let cropWidth = 1;
-        let cropHeight = 1;
-
-        if (mediaRatio > frameRatio) {
-          cropWidth = frameRatio / mediaRatio;
-          cropX = (1 - cropWidth) / 2;
-        } else if (mediaRatio < frameRatio) {
-          cropHeight = mediaRatio / frameRatio;
-          cropY = (1 - cropHeight) / 2;
-        }
-
         setDraggingMedia(null);
         clearMediaSelection();
 
@@ -403,18 +349,19 @@ export function useCanvasMediaDrop({
             console.error('Failed to embed asset for placeholder fill:', error);
           }
 
-          await updateElement(placeholderFrame.elementId, {
-            type: 'photo',
-            mediaId: media.id,
-            assetPath,
-            cropX,
-            cropY,
-            cropWidth,
-            cropHeight,
-            // Frame rotation is kept (merge); the straighten angle is not —
-            // it belonged to whatever was in the frame before.
-            contentRotation: 0,
-          });
+          // Frame rotation is kept (merge); the straighten angle and flips
+          // are not — they belonged to whatever was in the frame before.
+          await updateElement(
+            placeholderFrame.elementId,
+            buildPhotoPayload({
+              mediaId: media.id,
+              assetPath,
+              mediaWidth: media.width,
+              mediaHeight: media.height,
+              frameWidth: placeholderFrame.width,
+              frameHeight: placeholderFrame.height,
+            })
+          );
 
           // Select the filled frame — same rationale as the replace path.
           selectElement(placeholderFrame.elementId);

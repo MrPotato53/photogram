@@ -1,6 +1,6 @@
 import clsx from 'clsx';
 import { usePanelStore, type PanelId } from '../../stores/panelStore';
-import { useHistoryStore, useCanUndo, useCanRedo } from '../../stores/historyStore';
+import { useEditorHistory } from '../../hooks/useEditorHistory';
 
 interface EditorToolbarProps {
   projectName: string;
@@ -44,10 +44,9 @@ export function EditorToolbar({ projectName, onPreviewClick, onExportClick }: Ed
     mediaPool: mediaPoolOpen, layers: layersOpen, templates: templatesOpen,
     slides: slidesOpen, editBar: editBarOpen,
   };
-  const canUndo = useCanUndo();
-  const canRedo = useCanRedo();
-  const undo = useHistoryStore((s) => s.undo);
-  const redo = useHistoryStore((s) => s.redo);
+  // Crop-aware: inside crop mode these drive the crop-local stack, matching
+  // what Cmd+Z does.
+  const { undo, redo, canUndo, canRedo } = useEditorHistory();
 
   const panelButtons: { id: PanelId; label: string; icon: React.ReactNode }[] = [
     {

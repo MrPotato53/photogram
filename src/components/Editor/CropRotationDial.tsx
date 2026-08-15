@@ -12,6 +12,10 @@ interface CropRotationDialProps {
   // Current content rotation (degrees)
   rotation: number;
   onRotationChange: (deg: number) => void;
+  // Called once when a drag begins, before any onRotationChange. The parent
+  // uses it to open a single undo step and to pin the zoom reference for the
+  // whole gesture.
+  onRotateStart?: () => void;
   // Called with the final value when a drag (or double-click reset) commits —
   // the parent pushes crop history immediately so undo right after the
   // gesture doesn't race the debounced watcher.
@@ -42,6 +46,7 @@ export function CropRotationDial({
   layerScale,
   rotation,
   onRotationChange,
+  onRotateStart,
   onRotateEnd,
 }: CropRotationDialProps) {
   const anchorRef = useRef<Konva.Group>(null);
@@ -96,6 +101,22 @@ export function CropRotationDial({
 
     setIsRotating(true);
     document.body.style.cursor = 'grabbing';
+    onRotateStart?.();
+
+    // Pointer events fire far faster than the display refreshes — high-rate
+    // trackpads and mice deliver several hundred per second. Each one used to
+    // drive a full React commit AND the crop re-fit, so the work queued up
+    // faster than it could drain and the image visibly trailed the cursor.
+    //
+    // The angle accumulator below still integrates EVERY event (dropping any
+    // would lose rotation and change the math); only the publish is coalesced
+    // to one per animation frame, which is as often as the screen can show it.
+    let frame = 0;
+    let pending = displayed;
+    const publish = () => {
+      frame = 0;
+      onRotationChange(Math.round(pending * 10) / 10);
+    };
 
     const move = (ev: PointerEvent) => {
       const a = (Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180) / Math.PI;
@@ -110,16 +131,25 @@ export function CropRotationDial({
       // Shift (fine-tune mode) skips snapping — the whole point is precise
       // sub-degree control.
       displayed = ev.shiftKey ? raw : snapContentRotation(raw);
-      onRotationChange(Math.round(displayed * 10) / 10);
+      pending = displayed;
+      if (!frame) frame = requestAnimationFrame(publish);
     };
     const finish = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', finish);
       window.removeEventListener('pointercancel', finish);
+      // Cancel any frame still queued and emit the exact final angle, so the
+      // committed value is never one frame stale.
+      if (frame) {
+        cancelAnimationFrame(frame);
+        frame = 0;
+      }
+      const final = Math.round(displayed * 10) / 10;
+      onRotationChange(final);
       document.body.style.cursor = '';
       cleanupRef.current = null;
       setIsRotating(false);
-      onRotateEnd?.(Math.round(displayed * 10) / 10);
+      onRotateEnd?.(final);
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', finish);

@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, useCallback, memo } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import clsx from 'clsx';
 import { useProjectStore } from '../../../stores/projectStore';
@@ -13,6 +12,7 @@ import { showInFolder, checkMediaExists, relinkMedia, bulkRelinkMedia, type Reli
 import type { MediaItem } from '../../../types';
 import { updateDragPreviewPosition } from '../DragPreview';
 import { preloadImage } from '../../../utils/imageCache';
+import { MEDIA_DROPZONE_ATTR, isPointerOverMediaPool } from '../../../utils/dropZones';
 
 // Zoom settings
 const MIN_ZOOM = 0.5;
@@ -335,6 +335,8 @@ export function MediaPoolPanel() {
   const removeMedia = useMediaStore((s) => s.removeMedia);
   const isMediaInUse = useMediaStore((s) => s.isMediaInUse);
   const draggingMediaId = useMediaStore((s) => s.draggingMediaId);
+  const thumbnailVersions = useMediaStore((s) => s.thumbnailVersions);
+  const bumpThumbnailVersions = useMediaStore((s) => s.bumpThumbnailVersions);
   const setDraggingMedia = useMediaStore((s) => s.setDraggingMedia);
   const setDragPosition = useMediaStore((s) => s.setDragPosition);
 
@@ -352,24 +354,9 @@ export function MediaPoolPanel() {
   // Track which media files are missing
   const [missingMediaIds, setMissingMediaIds] = useState<Set<string>>(new Set());
 
-  // Per-media thumbnail cache-bust version. Thumbnails regenerate at the
-  // SAME path on disk (e.g. {media_id}.jpg) after relink or backend-side
-  // resolution bumps, so the browser would otherwise serve the cached old
-  // bytes until session restart. Bumping the version appends ?v=N to the
-  // URL — forces a fresh fetch.
-  //
-  // The thumbnails-ready listener below bumps versions for every media id
-  // so old low-res thumbnails get refreshed once the backend regenerates
-  // them. Per-id targeted bumps still come from the relink handlers.
-  const [thumbnailVersions, setThumbnailVersions] = useState<Map<string, number>>(new Map());
-  const bumpThumbnailVersions = useCallback((ids: string[]) => {
-    if (ids.length === 0) return;
-    setThumbnailVersions((prev) => {
-      const next = new Map(prev);
-      for (const id of ids) next.set(id, (next.get(id) ?? 0) + 1);
-      return next;
-    });
-  }, []);
+  // Per-media thumbnail cache-bust version, owned by mediaStore so it
+  // survives this panel being closed mid-import. Bumped by useThumbnailSync
+  // whenever the backend rewrites a thumbnail at its existing path.
 
   // Empty-area context menu (right-click in the grid background, not on a tile)
   const [emptyContextMenu, setEmptyContextMenu] = useState<{
@@ -457,44 +444,41 @@ export function MediaPoolPanel() {
     checkMissingMedia();
   }, [mediaPool]);
 
-  // Bump cache-bust versions when the backend signals thumbnails were
-  // (re)generated. Covers backend-initiated regens (import fast/quality
-  // passes, the higher-resolution backfill in get_project, relink) where
-  // the file path is unchanged but the bytes on disk are new. The payload
-  // names the affected media so an incremental import event doesn't force
-  // every already-final tile to refetch; empty/missing payload falls back
-  // to bumping everything.
-  useEffect(() => {
-    const unlistenPromise = listen<{ mediaId: string; thumbnailPath: string }[]>(
-      'thumbnails-ready',
-      (event) => {
-        const ids = Array.isArray(event.payload) && event.payload.length > 0
-          ? event.payload.map((u) => u.mediaId)
-          : mediaPool.map((m) => m.id);
-        bumpThumbnailVersions(ids);
-      }
-    );
-    return () => {
-      void unlistenPromise.then((fn) => fn());
-    };
-  }, [mediaPool, bumpThumbnailVersions]);
+  // Thumbnail arrival is handled by useThumbnailSync (mounted once by
+  // EditorLayout), which writes the generated paths into the project and
+  // bumps `thumbnailVersions`. Subscribing here as well would re-register
+  // the listener on every batch and drop updates mid-import.
 
-  // Listen for Tauri drag-drop events from file explorer
+  // Listen for Tauri drag-drop events from file explorer.
+  // Tauri broadcasts these to the whole webview, so this handler must check
+  // that the pointer is actually over the pool — otherwise it also claims
+  // drops meant for the canvas, and the two importers race.
   useEffect(() => {
     const webview = getCurrentWebviewWindow();
 
     const unlistenPromise = webview.onDragDropEvent(async (event) => {
       const dragEvent = event.payload;
-      if (dragEvent.type === 'over' || dragEvent.type === 'enter') {
-        setIsDraggingOver(true);
-      } else if (dragEvent.type === 'drop') {
+
+      if (dragEvent.type === 'leave') {
         setIsDraggingOver(false);
+        return;
+      }
+
+      const position = dragEvent.position;
+      const overPool = !!position && isPointerOverMediaPool(position.x, position.y);
+
+      if (dragEvent.type === 'over' || dragEvent.type === 'enter') {
+        setIsDraggingOver(overPool);
+        return;
+      }
+
+      if (dragEvent.type === 'drop') {
+        setIsDraggingOver(false);
+        if (!overPool) return;
         const paths = dragEvent.paths;
         if (paths && paths.length > 0) {
           await importMedia(paths);
         }
-      } else if (dragEvent.type === 'leave') {
-        setIsDraggingOver(false);
       }
     });
 
@@ -851,7 +835,7 @@ export function MediaPoolPanel() {
       // session — the thumbnail file at `path` has changed on disk but the
       // URL is identical, so without ?v=N the browser would serve the old
       // cached bytes.
-      const v = thumbnailVersions.get(media.id);
+      const v = thumbnailVersions[media.id];
       return v ? `${url}?v=${v}` : url;
     },
     [thumbnailVersions]
@@ -862,6 +846,8 @@ export function MediaPoolPanel() {
       ref={containerRef}
       tabIndex={0}
       data-panel="mediaPool"
+      // Claims OS file drops landing anywhere on the panel — see dropZones.
+      {...{ [MEDIA_DROPZONE_ATTR]: 'true' }}
       className={clsx(
         'p-3 h-full flex flex-col outline-none',
         isDraggingOver && 'bg-blue-500/10'

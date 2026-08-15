@@ -13,7 +13,6 @@ import {
   contentPivotDisplay,
   minImageScaleForRotation,
   clampWindowToRotatedImage,
-  fitCropToRotation,
 } from '../../utils/contentRotation';
 import { CropOverlayDarkOverlay } from './CropOverlayDarkOverlay';
 import { CropRotationDial } from './CropRotationDial';
@@ -643,6 +642,12 @@ export function CropOverlay({
   const makeEntryRef = useRef(makeCropHistoryEntry);
   makeEntryRef.current = makeCropHistoryEntry;
   const rotationMountedRef = useRef(false);
+  // True from dial pointerdown until pointerup. A drag is ONE user action, so
+  // the debounce must not carve it up: rotating slowly, or pausing mid-turn,
+  // used to let the 400ms timer fire repeatedly and bank an entry each time,
+  // which is why undoing a single fast spin took several presses. The gesture
+  // pushes exactly one entry, from onRotateEnd.
+  const rotationDragActiveRef = useRef(false);
   useEffect(() => {
     if (!rotationMountedRef.current) {
       // Initial mount: the seed value comes from the element, already
@@ -655,6 +660,7 @@ export function CropOverlay({
       rotationRestoreInProgressRef.current = false;
       return;
     }
+    if (rotationDragActiveRef.current) return;
     if (rotationHistoryTimerRef.current) clearTimeout(rotationHistoryTimerRef.current);
     rotationHistoryTimerRef.current = setTimeout(() => {
       rotationHistoryTimerRef.current = null;
@@ -860,6 +866,90 @@ export function CropOverlay({
   // reaches here, which is precisely why the image now stays put while the
   // box moves. The zoom is folded into the crop values, so the renderer
   // keeps drawing at natural size.
+  // ── Zoom reference ───────────────────────────────────────────────────
+  // The un-zoomed ("natural") image size this session measures against.
+  //
+  // The refit used to re-fit the CURRENT window against the CURRENT bounds,
+  // which compounds: each angle change measured against an image the previous
+  // angle change had already enlarged, so the zoom only ever ratcheted up.
+  // Rotating out and back left the photo permanently larger, and a full 180°
+  // — which geometrically needs exactly the same room as 0° — grew it twice.
+  //
+  // Anchoring to a fixed reference makes the applied scale a pure function of
+  // the angle: the same angle always yields the same size, the zoom shrinks
+  // back on the way out exactly as it grew on the way in, and ±180° lands on
+  // the size it started at.
+  // Holds the window's ORIGIN as well as the image size, both in natural
+  // units. Position has to be anchored for the same reason size does: the
+  // per-angle clamp that keeps the box inside the tilted image is lossy, so
+  // deriving each frame from the previous frame's already-clamped position
+  // lets the offset creep and never walk back. A crop framed hard against the
+  // top edge would drift down and stay there once the angle returned to 0.
+  const naturalBoundsRef = useRef({
+    width: fullBounds.width,
+    height: fullBounds.height,
+    rectX: cropRect.x,
+    rectY: cropRect.y,
+  });
+  const naturalSeededRef = useRef(false);
+  if (!naturalSeededRef.current && fullBounds.width > 0 && fullBounds.height > 0) {
+    naturalSeededRef.current = true;
+    naturalBoundsRef.current = {
+      width: fullBounds.width,
+      height: fullBounds.height,
+      rectX: cropRect.x,
+      rectY: cropRect.y,
+    };
+  }
+
+  /** Scale the reference image needs so `rect` fits at `deg`. Never below 1. */
+  const appliedScaleFor = useCallback((rectW: number, rectH: number, deg: number) => {
+    const nat = naturalBoundsRef.current;
+    if (!nat.width || !nat.height) return 1;
+    return Math.max(1, minImageScaleForRotation(nat.width, nat.height, rectW, rectH, deg));
+  }, []);
+
+  /**
+   * Re-anchor the reference after a non-rotation change to the window
+   * (resize, pan, option+scroll zoom, aspect-ratio change, undo restore).
+   * Those legitimately redefine what "natural" means, so divide out whatever
+   * zoom the current angle is responsible for and keep the remainder.
+   */
+  const reanchorNaturalBounds = useCallback(() => {
+    const fb = scaleFullBoundsRef.current;
+    const rect = scaleCropRectRef.current;
+    if (!fb.width || !fb.height) return;
+    const applied = appliedScaleFor(rect.width, rect.height, contentRotationLiveRef.current);
+    naturalBoundsRef.current = {
+      width: fb.width / applied,
+      height: fb.height / applied,
+      // Same divisor for the origin — the anchor is the window's position on
+      // the un-zoomed image, so it survives any amount of angle-driven zoom.
+      rectX: rect.x / applied,
+      rectY: rect.y / applied,
+    };
+  }, [appliedScaleFor]);
+  const reanchorRef = useRef(reanchorNaturalBounds);
+  reanchorRef.current = reanchorNaturalBounds;
+
+  // Set by the refit so the invalidation watcher below can tell the refit's
+  // own write apart from a genuine user change to the window.
+  const refitJustAppliedRef = useRef(false);
+
+  // Anything that resizes the crop box or re-zooms the image (handle drag,
+  // option+scroll, aspect-ratio change, undo restore) redefines the baseline.
+  // Watching the window's SIZE catches all of them — the required scale for
+  // an angle depends only on the reference bounds and the box's dimensions,
+  // never on where the box sits — and covers the Straighten slider path too,
+  // which has no gesture start/end to hook.
+  useEffect(() => {
+    if (refitJustAppliedRef.current) {
+      refitJustAppliedRef.current = false;
+      return;
+    }
+    reanchorRef.current();
+  }, [cropRect.width, cropRect.height, existingCropW, existingCropH]);
+
   const refitAngleRef = useRef(contentRotation);
   useLayoutEffect(() => {
     if (refitAngleRef.current === contentRotation) return;
@@ -869,34 +959,31 @@ export function CropOverlay({
     const fb = scaleFullBoundsRef.current;
     if (!fb.width || !fb.height) return;
 
-    // Same shared, harness-validated re-fit the replace/fill path uses when
-    // a photo carries its straighten into a new frame.
-    const fitted = fitCropToRotation(
-      rect.width,
-      rect.height,
-      {
-        cropX: rect.x / fb.width,
-        cropY: rect.y / fb.height,
-        cropWidth: rect.width / fb.width,
-        cropHeight: rect.height / fb.height,
-      },
-      contentRotation
-    );
+    // Size AND position for THIS angle, both measured against the fixed
+    // reference — never against the current (already zoomed, already clamped)
+    // state. Deriving from the anchor each time is what makes the whole
+    // gesture reversible: the framing you started with is reproduced exactly
+    // whenever the angle comes back, however far it wandered in between.
+    const nat = naturalBoundsRef.current;
+    const scale = appliedScaleFor(rect.width, rect.height, contentRotation);
+    const newFullW = nat.width * scale;
+    const newFullH = nat.height * scale;
+    const zoom = newFullW / fb.width;
+    if (!Number.isFinite(zoom) || zoom <= 0) return;
 
-    // Translate the fitted window back into this session's units: the crop
-    // rect is in image pixels, the element stores it normalized against the
-    // (possibly newly zoomed) image.
-    const zoom = (rect.width / fb.width) / fitted.cropWidth;
-    const newFullW = fb.width * zoom;
-    const newFullH = fb.height * zoom;
-    const newRect = {
-      x: fitted.cropX * newFullW,
-      y: fitted.cropY * newFullH,
+    // The window keeps its offset on the image: a crop framed against the top
+    // edge stays against the top edge. It moves only where the tilt leaves it
+    // no choice, and the clamp is the minimum correction for that.
+    const seated = clampWindowToRotatedImage(newFullW, newFullH, contentRotation, {
+      x: nat.rectX * scale,
+      y: nat.rectY * scale,
       width: rect.width,
       height: rect.height,
-    };
+    });
+    const newRect = { x: seated.x, y: seated.y, width: rect.width, height: rect.height };
 
-    if (zoom > 1) {
+    if (zoom !== 1) {
+      refitJustAppliedRef.current = true;
       onElementScale({
         cropX: newRect.x / newFullW,
         cropY: newRect.y / newFullH,
@@ -908,7 +995,7 @@ export function CropOverlay({
     }
 
     if (newRect.x !== rect.x || newRect.y !== rect.y) setCropRect(newRect);
-  }, [contentRotation, onElementScale, setCropRect]);
+  }, [contentRotation, onElementScale, setCropRect, appliedScaleFor]);
 
   // During shift+pan, calculate crop rect position relative to current full bounds
   // The crop rect stays stationary in canvas coordinates, but full bounds moves
@@ -1160,7 +1247,21 @@ export function CropOverlay({
         layerScale={layerScale}
         rotation={contentRotation}
         onRotationChange={onContentRotationChange}
+        onRotateStart={() => {
+          rotationDragActiveRef.current = true;
+          // Drop any debounce still armed from an earlier gesture so it can't
+          // land mid-drag and split this one into two undo steps.
+          if (rotationHistoryTimerRef.current) {
+            clearTimeout(rotationHistoryTimerRef.current);
+            rotationHistoryTimerRef.current = null;
+          }
+          // Pin the zoom reference to the state the gesture starts from, so
+          // the whole drag scales against one fixed baseline and returning to
+          // the starting angle returns to the starting size.
+          reanchorRef.current();
+        }}
         onRotateEnd={(deg) => {
+          rotationDragActiveRef.current = false;
           // Push immediately so Cmd+Z right after the drag finds the entry —
           // the debounced watcher alone loses an undo pressed within its
           // 400ms window (and then pushes the entry afterwards, making undo

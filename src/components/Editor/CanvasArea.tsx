@@ -17,7 +17,15 @@ import { canvasResolutionToPixelRatio } from '../../constants/canvasResolutions'
 import { saveProjectThumbnail, updateProject } from '../../services/tauri';
 import { calculateSnapLines, findSnap, findTransformSnap, guidesEqual, type SnapLines } from '../../utils/snapping';
 import { getRotatedBounds } from '../../utils/coordinates';
-import { fitCropToRotation, adaptCropToFrame } from '../../utils/contentRotation';
+import {
+  FULL_CROP,
+  cropForFrame,
+  getCropWindow,
+  getFullImageRect,
+  hasCrop,
+} from '../../utils/photoFraming';
+import { buildPhotoPayload, emptyFramePayload } from '../../utils/photoTransfer';
+import { useEditorHistory } from '../../hooks/useEditorHistory';
 import { CropOverlay } from './CropOverlay';
 import { ContextMenu, ContextMenuItem } from '../common/ContextMenu';
 import { CanvasSlideIndicators } from './CanvasSlideIndicators';
@@ -119,9 +127,9 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
   const templates = useTemplatesStore((s) => s.templates);
   const saveSlideAsTemplate = useTemplatesStore((s) => s.saveSlideAsTemplate);
 
-  // History store
-  const undo = useHistoryStore((s) => s.undo);
-  const redo = useHistoryStore((s) => s.redo);
+  // History. Undo/redo route themselves to the crop-local stack while crop
+  // mode is open — see useEditorHistory.
+  const { undo, redo } = useEditorHistory();
   const pushState = useHistoryStore((s) => s.pushState);
   const setProjectSilent = useProjectStore((s) => s.setProjectSilent);
 
@@ -1052,58 +1060,28 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         if (project && partner && (element.mediaId || partner.mediaId)) {
           const mediaPool = project.mediaPool || [];
 
-            // Build the payload `source`'s image needs to sit correctly in
-            // `frame`, carrying its edits across. When `source` is empty the
-            // frame is emptied instead — that is the "leave an empty frame
-            // behind" half of a swap with a placeholder.
+            // Put `source`'s image into `frame`, carrying its edits across.
+            // An empty source empties the frame instead — that is the "leave
+            // an empty frame behind" half of a swap with a placeholder.
+            // `carry` preserves the user's framing and zoom, which is what
+            // separates a swap from a replace (replace re-covers the frame).
             const moveInto = (source: Element, frame: Element): Element => {
-              if (!source.mediaId) {
-                return {
-                  ...frame,
-                  type: 'placeholder' as const,
-                  mediaId: undefined,
-                  assetPath: undefined,
-                  cropX: 0,
-                  cropY: 0,
-                  cropWidth: 1,
-                  cropHeight: 1,
-                  contentRotation: 0,
-                  flipX: false,
-                  flipY: false,
-                  lastCropRatio: null,
-                };
-              }
+              if (!source.mediaId) return { ...frame, ...emptyFramePayload() };
               const media = mediaPool.find(m => m.id === source.mediaId);
-              const imageW = media?.width ?? frame.width;
-              const imageH = media?.height ?? frame.height;
-              const rotation = source.contentRotation ?? 0;
-              // Re-shape the crop for the destination frame, then make sure
-              // it still fits once the carried straighten is applied.
-              const reshaped = adaptCropToFrame(
-                imageW,
-                imageH,
-                {
-                  cropX: source.cropX ?? 0,
-                  cropY: source.cropY ?? 0,
-                  cropWidth: source.cropWidth ?? 1,
-                  cropHeight: source.cropHeight ?? 1,
-                },
-                frame.width / frame.height
-              );
-              const fitted = fitCropToRotation(frame.width, frame.height, reshaped, rotation);
               return {
                 ...frame,
-                type: 'photo' as const,
-                mediaId: source.mediaId,
-                assetPath: source.assetPath,
-                cropX: fitted.cropX,
-                cropY: fitted.cropY,
-                cropWidth: fitted.cropWidth,
-                cropHeight: fitted.cropHeight,
-                contentRotation: rotation,
-                flipX: source.flipX,
-                flipY: source.flipY,
-                lastCropRatio: null,
+                ...buildPhotoPayload({
+                  mediaId: source.mediaId,
+                  assetPath: source.assetPath,
+                  mediaWidth: media?.width ?? frame.width,
+                  mediaHeight: media?.height ?? frame.height,
+                  frameWidth: frame.width,
+                  frameHeight: frame.height,
+                  contentRotation: source.contentRotation ?? 0,
+                  flipX: source.flipX,
+                  flipY: source.flipY,
+                  carry: getCropWindow(source),
+                }),
               };
             };
 
@@ -1140,36 +1118,24 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
         const target: ReplaceTarget | null = replaceKeyRef.current
           ? getReplacementTarget(cursorX, cursorY, elementId)
           : findPlaceholderAt(elementsRef.current, cursorX, cursorY, elementId);
-        if (target) {
-          // Compute crop to fit the dragged media into the target's frame
+        if (target && element.mediaId) {
           const mediaPool = project?.mediaPool || [];
           const media = mediaPool.find(m => m.id === element.mediaId);
-          const mediaRatio = media ? media.width / media.height : element.width / element.height;
-          const frameRatio = target.width / target.height;
-
-          let cropX = 0;
-          let cropY = 0;
-          let cropWidth = 1;
-          let cropHeight = 1;
-
-          if (mediaRatio > frameRatio) {
-            cropWidth = frameRatio / mediaRatio;
-            cropX = (1 - cropWidth) / 2;
-          } else if (mediaRatio < frameRatio) {
-            cropHeight = mediaRatio / frameRatio;
-            cropY = (1 - cropHeight) / 2;
-          }
-
-          // The photo keeps its own straighten angle when it moves into a
-          // different frame; the crop just computed assumes it is upright,
-          // so re-fit it for that angle (a no-op when the photo is upright).
-          const carriedRotation = element.contentRotation ?? 0;
-          const carried = fitCropToRotation(
-            target.width,
-            target.height,
-            { cropX, cropY, cropWidth, cropHeight },
-            carriedRotation
-          );
+          // No `carry`: replace re-covers the destination frame with a fresh
+          // centred crop. The photo's own edits (straighten, flips) still
+          // travel with it — the source element is being consumed, so the
+          // target also takes ownership of its embedded asset file.
+          const payload = buildPhotoPayload({
+            mediaId: element.mediaId,
+            assetPath: element.assetPath,
+            mediaWidth: media?.width ?? element.width,
+            mediaHeight: media?.height ?? element.height,
+            frameWidth: target.width,
+            frameHeight: target.height,
+            contentRotation: element.contentRotation ?? 0,
+            flipX: element.flipX,
+            flipY: element.flipY,
+          });
 
           // Apply both mutations (update target + remove source) as a single
           // atomic operation so undo/redo treats it as one step.
@@ -1177,26 +1143,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
             const targetElement = project.elements.find(el => el.id === target.elementId);
             const updatedElements = project.elements
               .filter(el => el.id !== elementId) // remove the replacer
-              .map(el => {
-                if (el.id !== target.elementId) return el;
-                return {
-                  ...el,
-                  // Placeholder frames become photos; no-op for photos.
-                  type: 'photo' as const,
-                  mediaId: element.mediaId,
-                  // The source element is removed in the same operation, so
-                  // the target takes ownership of its embedded asset file.
-                  assetPath: element.assetPath,
-                  ...carried,
-                  lastCropRatio: null,
-                  // The straighten angle belongs to the PHOTO, so it travels
-                  // with it into the new frame. `carried` re-fits the freshly
-                  // computed cover crop for that angle (zooming only as far
-                  // as the tilt requires), because the crop above was worked
-                  // out as if the photo were upright.
-                  contentRotation: carriedRotation,
-                };
-              });
+              .map(el => (el.id === target.elementId ? { ...el, ...payload } : el));
 
             const updatedProject = { ...project, elements: updatedElements };
 
@@ -1219,14 +1166,7 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
             // the history stack (mirrors removeElement).
             const oldAssetPath = targetElement?.assetPath;
             if (oldAssetPath && oldAssetPath !== element.assetPath) {
-              const historyStore = useHistoryStore.getState();
-              const currentEntry = historyStore.entries[historyStore.currentIndex];
-              historyStore.trackDeletedAsset({
-                assetPath: oldAssetPath,
-                mediaId: targetElement?.mediaId || '',
-                deletedAt: Date.now(),
-                historyEntryId: currentEntry?.id || '',
-              });
+              useHistoryStore.getState().trackOrphanedAsset(oldAssetPath, targetElement?.mediaId);
             }
           }
 
@@ -1240,34 +1180,27 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       if (fillKeyRef.current) {
         const bounds = getFillBoundsExcluding(cursorX, cursorY, elementId);
         if (bounds) {
-          // Compute crop to cover the fill region using media's native aspect ratio
+          // The element keeps its own image and stays selected — only its
+          // frame changes — so this is a re-cover for the new bounds rather
+          // than a transfer. The straighten angle stays with it, and the
+          // crop is re-fitted for that angle so the tilt can't expose blank
+          // corners in the new shape.
           const mediaPool = project?.mediaPool || [];
           const media = element.mediaId ? mediaPool.find(m => m.id === element.mediaId) : null;
-          const mediaRatio = media ? media.width / media.height : element.width / element.height;
-          const frameRatio = bounds.width / bounds.height;
-
-          let cropX = 0;
-          let cropY = 0;
-          let cropWidth = 1;
-          let cropHeight = 1;
-
-          if (mediaRatio > frameRatio) {
-            cropWidth = frameRatio / mediaRatio;
-            cropX = (1 - cropWidth) / 2;
-          } else if (mediaRatio < frameRatio) {
-            cropHeight = mediaRatio / frameRatio;
-            cropY = (1 - cropHeight) / 2;
-          }
+          const crop = cropForFrame({
+            mediaWidth: media?.width ?? element.width,
+            mediaHeight: media?.height ?? element.height,
+            frameWidth: bounds.width,
+            frameHeight: bounds.height,
+            contentRotation: element.contentRotation ?? 0,
+          });
 
           const fillUpdates = {
             x: bounds.x,
             y: bounds.y,
             width: bounds.width,
             height: bounds.height,
-            cropX,
-            cropY,
-            cropWidth,
-            cropHeight,
+            ...crop,
             lastCropRatio: null,
           };
 
@@ -1610,31 +1543,22 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
     const element = elementMap.get(contextMenu.elementId!);
     if (!element) return;
 
-    const existingCropX = element.cropX ?? 0;
-    const existingCropY = element.cropY ?? 0;
-    const existingCropW = element.cropWidth ?? 1;
-    const existingCropH = element.cropHeight ?? 1;
     const hasContentRotation = (element.contentRotation ?? 0) !== 0;
-
-    if (existingCropX === 0 && existingCropY === 0 && existingCropW === 1 && existingCropH === 1 && !hasContentRotation) {
+    if (!hasCrop(element) && !hasContentRotation) {
       setContextMenu({ ...contextMenu, isOpen: false });
       return;
     }
 
-    const fullWidth = element.width / existingCropW;
-    const fullHeight = element.height / existingCropH;
-    const fullX = element.x - existingCropX * fullWidth;
-    const fullY = element.y - existingCropY * fullHeight;
+    // Grow the frame out to the whole image so the visible content stays
+    // exactly where it is — only the hidden parts come back.
+    const full = getFullImageRect(element);
 
     updateElement(contextMenu.elementId, {
-      cropX: 0,
-      cropY: 0,
-      cropWidth: 1,
-      cropHeight: 1,
-      x: fullX,
-      y: fullY,
-      width: fullWidth,
-      height: fullHeight,
+      ...FULL_CROP,
+      x: full.x,
+      y: full.y,
+      width: full.width,
+      height: full.height,
       contentRotation: 0,
     });
     setContextMenu({ ...contextMenu, isOpen: false });
@@ -1833,17 +1757,11 @@ export function CanvasArea({ aspectRatio, onRenderSlideForExport, onRenderSlideT
       const element = elementMap.get(cropModeElementId);
       if (!element) return;
 
-      const existingCropX = element.cropX ?? 0;
-      const existingCropY = element.cropY ?? 0;
-      const existingCropW = element.cropWidth ?? 1;
-      const existingCropH = element.cropHeight ?? 1;
-      const fullBoundsWidth = element.width / existingCropW;
-      const fullBoundsHeight = element.height / existingCropH;
-      const fullBoundsX = element.x - existingCropX * fullBoundsWidth;
-      const fullBoundsY = element.y - existingCropY * fullBoundsHeight;
-
-      const newX = fullBoundsX + crop.cropX * fullBoundsWidth;
-      const newY = fullBoundsY + crop.cropY * fullBoundsHeight;
+      // The new crop values are normalized against the FULL image, so the
+      // frame's new position is that rect's origin plus the window offset.
+      const full = getFullImageRect(element);
+      const newX = full.x + crop.cropX * full.width;
+      const newY = full.y + crop.cropY * full.height;
 
       // Don't await - let the update happen in background to avoid race conditions
       // with component unmounting when exitCropMode is called

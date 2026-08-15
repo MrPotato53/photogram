@@ -33,6 +33,8 @@ function bundle(entry, name) {
 
 const R = await bundle('src/utils/contentRotation.ts', 'rotation.mjs');
 const C = await bundle('src/utils/coordinates.ts', 'coords.mjs');
+const F = await bundle('src/utils/photoFraming.ts', 'framing.mjs');
+const H = await bundle('src/utils/elementHitTest.ts', 'hittest.mjs');
 
 // ── tiny assertion kit ───────────────────────────────────────────────
 let passed = 0;
@@ -560,6 +562,336 @@ check('a point hits a rotated element exactly when it is drawn there', () => {
     const py = y + lx * Math.sin(rad) + ly * Math.cos(rad);
     const hit = C.isPointInRotatedRect(px, py, x, y, w, h, deg);
     ok(hit === insideLocal, `hit test disagreed at ${deg.toFixed(1)}° (expected ${insideLocal})`);
+  }
+});
+
+// ── shared photo framing ─────────────────────────────────────────────
+// These back every "put this photo in that frame" path (swap, replace,
+// fill, media-pool drop), so a break here breaks all of them at once.
+
+check('a photo dropped into any frame fills it without stretching or letterboxing', () => {
+  for (let i = 0; i < 4000; i++) {
+    const mediaW = 50 + rand() * 6000;
+    const mediaH = 50 + rand() * 6000;
+    const frameW = 20 + rand() * 2000;
+    const frameH = 20 + rand() * 2000;
+    const c = F.coverCrop(mediaW, mediaH, frameW, frameH);
+
+    // The window must lie inside the image...
+    ok(c.cropX >= -1e-9 && c.cropY >= -1e-9, 'crop origin escaped the image');
+    ok(c.cropX + c.cropWidth <= 1 + 1e-9, 'crop overflowed the image width');
+    ok(c.cropY + c.cropHeight <= 1 + 1e-9, 'crop overflowed the image height');
+    // ...and its on-screen shape must match the frame, or the photo is
+    // squashed. Crop values are normalized, so shape is (cw·mediaW):(ch·mediaH).
+    const windowRatio = (c.cropWidth * mediaW) / (c.cropHeight * mediaH);
+    near(windowRatio, frameW / frameH, 1e-6, 'photo would be stretched in its frame');
+    // Cover, not contain: one axis is always used in full.
+    ok(
+      Math.abs(c.cropWidth - 1) < 1e-9 || Math.abs(c.cropHeight - 1) < 1e-9,
+      'photo was zoomed in more than the frame required'
+    );
+  }
+});
+
+check('a cover crop is centred, so the drop keeps the middle of the photo', () => {
+  const c = F.coverCrop(4000, 1000, 100, 100);
+  near(c.cropX + c.cropWidth / 2, 0.5, 1e-9, 'horizontal centre drifted');
+  near(c.cropY + c.cropHeight / 2, 0.5, 1e-9, 'vertical centre drifted');
+});
+
+check('a degenerate or missing image size never produces an invisible element', () => {
+  for (const args of [[0, 100, 50, 50], [100, 0, 50, 50], [100, 100, 0, 50], [-5, 10, 10, 10]]) {
+    const c = F.coverCrop(...args);
+    ok(
+      Number.isFinite(c.cropX) && Number.isFinite(c.cropWidth) && c.cropWidth > 0 && c.cropHeight > 0,
+      `coverCrop(${args.join(',')}) produced an unusable window`
+    );
+  }
+});
+
+check('the image behind the crop rectangle lines up with the visible photo', () => {
+  for (let i = 0; i < 3000; i++) {
+    const cropWidth = 0.05 + rand() * 0.95;
+    const cropHeight = 0.05 + rand() * 0.95;
+    const el = {
+      x: -300 + rand() * 600,
+      y: -300 + rand() * 600,
+      width: 20 + rand() * 900,
+      height: 20 + rand() * 900,
+      cropX: rand() * (1 - cropWidth),
+      cropY: rand() * (1 - cropHeight),
+      cropWidth,
+      cropHeight,
+    };
+    const full = F.getFullImageRect(el);
+    // The frame must sit exactly on the crop window within the full image —
+    // this is what makes entering crop mode not jump the picture.
+    near(full.x + el.cropX * full.width, el.x, 1e-6, 'frame left edge drifted');
+    near(full.y + el.cropY * full.height, el.y, 1e-6, 'frame top edge drifted');
+    near(full.width * el.cropWidth, el.width, 1e-6, 'frame width drifted');
+    near(full.height * el.cropHeight, el.height, 1e-6, 'frame height drifted');
+    ok(full.width >= el.width - 1e-9, 'full image narrower than the frame it contains');
+  }
+});
+
+check('resetting crop reveals the whole photo without moving what you can see', () => {
+  const el = { x: 100, y: 50, width: 200, height: 100, cropX: 0.25, cropY: 0.5, cropWidth: 0.5, cropHeight: 0.25 };
+  const full = F.getFullImageRect(el);
+  // Reset writes full.* as the new frame — the previously visible region
+  // must still cover the same pixels on screen.
+  near(full.x + 0.25 * full.width, 100, 1e-9, 'visible region shifted horizontally on reset');
+  near(full.y + 0.5 * full.height, 50, 1e-9, 'visible region shifted vertically on reset');
+});
+
+check('a straightened photo moved to another frame still has no blank corners', () => {
+  for (const deg of ANGLES) {
+    for (let i = 0; i < 120; i++) {
+      const mediaW = 200 + rand() * 4000;
+      const mediaH = 200 + rand() * 4000;
+      const frameW = 40 + rand() * 900;
+      const frameH = 40 + rand() * 900;
+      // Both transfer flavours: fresh cover (replace/fill) and carried
+      // framing (swap).
+      const carry = i % 2 === 0 ? undefined : (() => {
+        const w = 0.2 + rand() * 0.8;
+        const h = 0.2 + rand() * 0.8;
+        return { cropX: rand() * (1 - w), cropY: rand() * (1 - h), cropWidth: w, cropHeight: h };
+      })();
+
+      const c = F.cropForFrame({
+        mediaWidth: mediaW,
+        mediaHeight: mediaH,
+        frameWidth: frameW,
+        frameHeight: frameH,
+        contentRotation: deg,
+        carry,
+      });
+
+      ok(c.cropWidth > 0 && c.cropHeight > 0, `empty window at ${deg}°`);
+      // The frame's window, expressed on the full image, must sit inside the
+      // rotated image — otherwise the tilt exposes background.
+      const fullW = frameW / c.cropWidth;
+      const fullH = frameH / c.cropHeight;
+      ok(
+        R.isWindowInsideRotatedImage(fullW, fullH, deg, {
+          x: c.cropX * fullW,
+          y: c.cropY * fullH,
+          width: frameW,
+          height: frameH,
+        }, 1e-6),
+        `blank corners after transfer at ${deg}°`
+      );
+    }
+  }
+});
+
+// ── shared drop-target lookup ────────────────────────────────────────
+
+check('the frame that highlights under the cursor is the one on top', () => {
+  const mk = (id, x, zIndex) => ({
+    id, x, y: 0, width: 100, height: 100, zIndex, rotation: 0,
+    type: 'photo', mediaId: 'm', locked: false, scale: 1,
+  });
+  // Three overlapping photos; the highest zIndex must win regardless of
+  // the order they happen to sit in the array.
+  const els = [mk('a', 0, 5), mk('b', 10, 9), mk('c', 20, 1)];
+  const hit = H.findTopmostElementAt(els, 50, 50, { match: H.isDropTarget });
+  ok(hit && hit.id === 'b', `expected the topmost frame, got ${hit && hit.id}`);
+  const excluded = H.findTopmostElementAt(els, 50, 50, { match: H.isDropTarget, excludeId: 'b' });
+  ok(excluded && excluded.id === 'a', 'excluding the dragged frame should fall through to the next');
+});
+
+check('a tilted frame is a drop target where it looks, not where its upright box was', () => {
+  const el = {
+    id: 'f', x: 200, y: 100, width: 200, height: 60, zIndex: 0, rotation: 90,
+    type: 'placeholder', locked: false, scale: 1,
+  };
+  const els = [el];
+  // Rotated 90° about its top-left anchor it occupies x 140..200, y 100..300.
+  ok(
+    H.findTopmostElementAt(els, 170, 200, { match: H.isEmptyFrame }),
+    'the drawn frame should accept a drop'
+  );
+  ok(
+    !H.findTopmostElementAt(els, 300, 130, { match: H.isEmptyFrame }),
+    'the unrotated box should NOT accept a drop'
+  );
+});
+
+check('empty frames and photos are both valid drop targets, and nothing else is', () => {
+  const base = { x: 0, y: 0, width: 100, height: 100, zIndex: 0, rotation: 0, locked: false, scale: 1 };
+  ok(H.isDropTarget({ ...base, id: '1', type: 'photo', mediaId: 'm' }), 'a photo should be a target');
+  ok(H.isDropTarget({ ...base, id: '2', type: 'placeholder' }), 'an empty frame should be a target');
+  // A photo element whose media is gone has nothing to trade.
+  ok(!H.isDropTarget({ ...base, id: '3', type: 'photo' }), 'a photo with no media should not be a target');
+});
+
+// ── crop-mode rotation: reversible zoom ──────────────────────────────
+// Crop mode zooms the image only as far as the tilt requires. Measured
+// against a FIXED reference, that factor is a pure function of the angle —
+// which is what makes the zoom shrink back on the way out instead of
+// ratcheting up, and what makes a half turn land where it started.
+
+const appliedScale = (fw, fh, w, h, deg) =>
+  Math.max(1, R.minImageScaleForRotation(fw, fh, w, h, deg));
+
+check('turning the image and back leaves it exactly the size it started', () => {
+  for (let i = 0; i < 2000; i++) {
+    const fw = 200 + rand() * 4000;
+    const fh = 200 + rand() * 4000;
+    const w = 20 + rand() * fw * 0.9;
+    const h = 20 + rand() * fh * 0.9;
+    const start = -180 + rand() * 360;
+
+    const before = appliedScale(fw, fh, w, h, start);
+    // Wander through arbitrary angles, then come back.
+    for (let step = 0; step < 5; step++) {
+      appliedScale(fw, fh, w, h, -180 + rand() * 360);
+    }
+    const after = appliedScale(fw, fh, w, h, start);
+    near(after, before, 1e-12, 'returning to the same angle changed the zoom');
+  }
+});
+
+check('a 180° turn ends at the same size as no turn at all', () => {
+  for (let i = 0; i < 2000; i++) {
+    const fw = 200 + rand() * 4000;
+    const fh = 200 + rand() * 4000;
+    const w = 20 + rand() * fw * 0.9;
+    const h = 20 + rand() * fh * 0.9;
+    const deg = -180 + rand() * 360;
+    // A half turn maps the window onto itself, so it needs identical room.
+    const opposite = deg > 0 ? deg - 180 : deg + 180;
+    near(
+      appliedScale(fw, fh, w, h, opposite),
+      appliedScale(fw, fh, w, h, deg),
+      1e-9,
+      `half turn changed the zoom at ${deg.toFixed(1)}°`
+    );
+    near(
+      appliedScale(fw, fh, w, h, 180),
+      appliedScale(fw, fh, w, h, 0),
+      1e-9,
+      '180° did not match 0°'
+    );
+  }
+});
+
+check('zooming for a tilt never shrinks the photo below its natural size', () => {
+  for (const deg of ANGLES) {
+    for (let i = 0; i < 200; i++) {
+      const fw = 200 + rand() * 4000;
+      const fh = 200 + rand() * 4000;
+      const w = 20 + rand() * fw;
+      const h = 20 + rand() * fh;
+      ok(appliedScale(fw, fh, w, h, deg) >= 1, `scale dropped below 1 at ${deg}°`);
+    }
+  }
+});
+
+check('the crop box still fits once the angle-driven zoom is applied', () => {
+  for (const deg of ANGLES) {
+    for (let i = 0; i < 200; i++) {
+      const fw = 300 + rand() * 3000;
+      const fh = 300 + rand() * 3000;
+      const w = 20 + rand() * fw * 0.8;
+      const h = 20 + rand() * fh * 0.8;
+      const s = appliedScale(fw, fh, w, h, deg);
+      // Centre the box in the scaled image, exactly as the refit does.
+      const zw = fw * s;
+      const zh = fh * s;
+      ok(
+        R.isWindowInsideRotatedImage(zw, zh, deg, {
+          x: (zw - w) / 2,
+          y: (zh - h) / 2,
+          width: w,
+          height: h,
+        }, 1e-6),
+        `box escaped the tilted image at ${deg}°`
+      );
+    }
+  }
+});
+
+// Mirrors CropOverlay's refit: size and position for an angle are both
+// derived from a fixed natural-space anchor, then clamped.
+const seatForAngle = (nat, w, h, deg) => {
+  const s = Math.max(1, R.minImageScaleForRotation(nat.width, nat.height, w, h, deg));
+  const seated = R.clampWindowToRotatedImage(nat.width * s, nat.height * s, deg, {
+    x: nat.rectX * s,
+    y: nat.rectY * s,
+    width: w,
+    height: h,
+  });
+  return { x: seated.x, y: seated.y, scale: s, fullW: nat.width * s, fullH: nat.height * s };
+};
+
+check('rotating away and back restores the exact framing, not just the size', () => {
+  for (let i = 0; i < 1500; i++) {
+    const width = 400 + rand() * 3000;
+    const height = 400 + rand() * 3000;
+    const w = 40 + rand() * width * 0.7;
+    const h = 40 + rand() * height * 0.7;
+    const nat = { width, height, rectX: rand() * (width - w), rectY: rand() * (height - h) };
+    const start = -180 + rand() * 360;
+
+    const before = seatForAngle(nat, w, h, start);
+    for (let step = 0; step < 4; step++) seatForAngle(nat, w, h, -180 + rand() * 360);
+    const after = seatForAngle(nat, w, h, start);
+
+    near(after.x, before.x, 1e-9, 'framing drifted horizontally after a round trip');
+    near(after.y, before.y, 1e-9, 'framing drifted vertically after a round trip');
+    near(after.scale, before.scale, 1e-12, 'zoom drifted after a round trip');
+  }
+});
+
+check('the framing you asked for is kept whenever the tilt allows it', () => {
+  // The real promise: the crop is only ever moved when it has to be. Note
+  // the valid region inside a TILTED image is itself tilted, so x and y are
+  // coupled — an edge-anchored crop can legitimately be nudged along one
+  // axis further than the other. What must hold is that a reachable framing
+  // is reproduced exactly.
+  for (const deg of ANGLES) {
+    for (let i = 0; i < 200; i++) {
+      const width = 600 + rand() * 2000;
+      const height = 600 + rand() * 2000;
+      const w = 40 + rand() * width * 0.6;
+      const h = 40 + rand() * height * 0.6;
+      const nat = { width, height, rectX: rand() * (width - w), rectY: rand() * (height - h) };
+
+      const seated = seatForAngle(nat, w, h, deg);
+      const s = seated.scale;
+      const desired = { x: nat.rectX * s, y: nat.rectY * s, width: w, height: h };
+
+      if (R.isWindowInsideRotatedImage(seated.fullW, seated.fullH, deg, desired, 1e-6)) {
+        near(seated.x, desired.x, 1e-6, `moved a crop that already fitted at ${deg}°`);
+        near(seated.y, desired.y, 1e-6, `moved a crop that already fitted at ${deg}°`);
+      }
+
+      ok(
+        R.isWindowInsideRotatedImage(seated.fullW, seated.fullH, deg, {
+          x: seated.x,
+          y: seated.y,
+          width: w,
+          height: h,
+        }, 1e-6),
+        `crop escaped the tilted image at ${deg}°`
+      );
+    }
+  }
+});
+
+check('an upright crop against the top edge is left exactly where it is', () => {
+  for (let i = 0; i < 500; i++) {
+    const width = 600 + rand() * 2000;
+    const height = 600 + rand() * 2000;
+    const w = 40 + rand() * width * 0.6;
+    const h = 40 + rand() * height * 0.6;
+    // Framed hard against the top-left, the way the reported case was.
+    const upright = seatForAngle({ width, height, rectX: 0, rectY: 0 }, w, h, 0);
+    near(upright.scale, 1, 1e-12, 'an upright crop should need no zoom');
+    near(upright.x, 0, 1e-9, 'upright crop left the left edge');
+    near(upright.y, 0, 1e-9, 'upright crop left the top edge');
   }
 });
 

@@ -48,6 +48,11 @@ interface HistoryState {
 
   // Asset management
   trackDeletedAsset: (info: DeletedAssetInfo) => void;
+  // Convenience wrapper for the common case: an element's embedded asset
+  // just became unreferenced (deleted, replaced, filled over). Stamps the
+  // timestamp and the current history entry id so callers don't each reach
+  // into `entries[currentIndex]` to do it.
+  trackOrphanedAsset: (assetPath: string, mediaId?: string) => void;
   restoreDeletedAsset: (assetPath: string) => void;
 
   // Internal helpers
@@ -360,6 +365,20 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
     });
   },
 
+  trackOrphanedAsset: (assetPath: string, mediaId?: string) => {
+    if (!assetPath) return;
+    const { entries, currentIndex } = get();
+    get().trackDeletedAsset({
+      assetPath,
+      mediaId: mediaId || '',
+      deletedAt: Date.now(),
+      // The entry the asset was still live in — cleanup runs once this
+      // falls off the stack, so the file survives as long as an undo could
+      // still bring it back.
+      historyEntryId: entries[currentIndex]?.id || '',
+    });
+  },
+
   restoreDeletedAsset: (assetPath: string) => {
     restoreAsset(assetPath);
     set((state) => {
@@ -458,14 +477,10 @@ function commitEntry(
   });
 }
 
-// Selector hooks for computed values
-export const useCanUndo = () =>
-  useHistoryStore((state) => !state.isUndoRedoInProgress && state.currentIndex > 0);
-
-export const useCanRedo = () =>
-  useHistoryStore(
-    (state) => !state.isUndoRedoInProgress && state.currentIndex < state.entries.length - 1
-  );
+// Note: there are deliberately no `useCanUndo`/`useCanRedo` selectors here.
+// Availability depends on which history stack is active (crop mode has its
+// own), and exposing a global-only selector is what let the toolbar buttons
+// disagree with the keyboard shortcut. Ask `useEditorHistory` instead.
 
 // Export for setting project context
 export { setCurrentProjectId };

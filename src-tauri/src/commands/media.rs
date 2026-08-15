@@ -140,19 +140,32 @@ pub fn import_media_files(
             let producer_project_path = project_path_clone.clone();
             let producer = std::thread::spawn(move || {
                 // Deleting media mid-import voids its job: skip before the
-                // expensive decode. Reading + parsing the project JSON per
-                // job is trivial next to an image decode.
-                let still_present = |media_id: &str| -> bool {
+                // expensive decode.
+                //
+                // Snapshot the live ids ONCE per phase rather than re-reading
+                // the project per job. The per-job read cost scales with the
+                // whole document (every element, the entire media pool), so on
+                // an established project N jobs × 2 phases meant 2N full JSON
+                // parses — with every rayon worker contending on the same
+                // file. That is the bulk of why importing into an open project
+                // felt so much slower than importing into a brand-new one,
+                // where the document is nearly empty.
+                //
+                // Deletions during a phase are no longer skipped early, but
+                // they are still honoured: the writer below discards results
+                // whose media has vanished and removes the orphaned file.
+                let live_media_ids = || -> std::collections::HashSet<String> {
                     fs::read_to_string(&producer_project_path)
                         .ok()
                         .and_then(|c| serde_json::from_str::<Project>(&c).ok())
-                        .map(|p| p.media_pool.iter().any(|m| m.id == media_id))
-                        .unwrap_or(false)
+                        .map(|p| p.media_pool.into_iter().map(|m| m.id).collect())
+                        .unwrap_or_default()
                 };
 
                 // Phase 1: fast low-res thumbnails
+                let present = live_media_ids();
                 thumbnail_jobs.par_iter().for_each(|job| {
-                    if !still_present(&job.media_id) {
+                    if !present.contains(&job.media_id) {
                         return;
                     }
                     match generate_thumbnail_fast(&job.source_path, &job.thumb_path) {
@@ -170,9 +183,11 @@ pub fn import_media_files(
 
                 // Phase 2: quality thumbnails overwrite the fast ones.
                 // Re-emitting the same path makes the frontend cache-bust
-                // the tile so the sharper bytes swap in.
+                // the tile so the sharper bytes swap in. Re-snapshotting here
+                // picks up anything deleted during phase 1.
+                let present = live_media_ids();
                 thumbnail_jobs.par_iter().for_each(|job| {
-                    if !still_present(&job.media_id) {
+                    if !present.contains(&job.media_id) {
                         return;
                     }
                     match generate_thumbnail(&job.source_path, &job.thumb_path) {

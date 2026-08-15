@@ -812,3 +812,73 @@ result; ④ undo after each still restores correct state and selection stays san
   optimization; see fix 8.
 - **Wheel zoom step loss**: only noticeable on fast trackpad gestures; see fix 11.
 - **Original media files**: never deleted by the project — confirmed and finding withdrawn.
+
+---
+
+## Recurring-pattern audit — centralization pass
+
+Prompted by: *"make sure they are implemented modularly so that we don't need to reimplement them
+every time we change something, what other reuseable patterns can you find that should be
+centralized?"*
+
+Method: grep each recurring idiom, compare the copies, and treat any divergence between them as a
+bug report. Three real defects fell out — all of them cases where a copy never received a fix that
+its siblings got.
+
+### Extracted modules
+
+| Module | Replaces | Call sites |
+|---|---|---|
+| `utils/photoFraming.ts` | `element.width / (cropWidth ?? 1)` + the 4-line cover-crop block | 5 + 5 |
+| `utils/konvaPhotoProps.ts` | per-renderer Konva prop derivation (`planPhotoDraw`) | 2 |
+| `utils/photoTransfer.ts` | "put this photo in that frame" payload assembly | 4 |
+| `utils/elementHitTest.ts` | z-sorted drop-target loops | 3 |
+| `hooks/useEditorHistory.ts` | "which undo stack is active?" | 2 |
+
+Plus `historyStore.trackOrphanedAsset()` for the `entries[currentIndex]` reach-in (3 sites).
+
+### Defects the duplication had produced
+
+1. **Slide thumbnails ignored `contentRotation`.** `SlidesPanel` carried its own copy of the
+   renderer and never grew the rotated branch, so a straightened photo showed up crooked in its
+   own thumbnail. Both renderers now draw from `planPhotoDraw`.
+2. **F-fill hit-tested rotated frames against the wrong box.** `findPlaceholderAt` still used an
+   axis-aligned comparison while replace and swap had moved to `isPointInRotatedRect`, so holding
+   F near a tilted frame filled a frame the cursor was not over. All three use
+   `findTopmostElementAt`.
+3. **The toolbar Undo button was not crop-aware.** `Cmd+Z` routed to the crop-local stack in crop
+   mode; the button always called global undo, reverting the whole project behind an open crop
+   overlay, and its enabled state described the wrong stack. Both go through `useEditorHistory`.
+
+Two smaller inconsistencies fixed by unifying the transfer payload: fill-into-region did not
+re-fit the crop for the photo's straighten angle (blank corners), and flips did not travel with a
+photo on replace/media-drop the way `contentRotation` already did.
+
+`utils/coordinates.ts` and `utils/contentRotation.ts` were already correctly centralized — the
+rotation work had pushed the geometry there; what remained scattered was the layer above it.
+
+### Harness
+
+`scripts/validate-geometry.mjs` now bundles `photoFraming` and `elementHitTest` too: 32 checks
+(was 23), covering cover-crop shape/centring/degenerate inputs, the full-image-rect ↔ frame
+identity that crop mode and reset-crop depend on, no-blank-corners after a transfer at every
+angle, and topmost/rotation-exact drop-target selection.
+
+### Remaining candidates (not done — ranked)
+
+1. **Two persistence paths.** `updateProject()` is called directly from 8 modules *and*
+   `schedulePersistProject()` debounces through the store. Same operation, different latency and
+   different failure handling. A single `persistProject({ immediate })` would remove the "which
+   one does this path use?" question — the crop-cancel flush already depends on getting it right.
+2. **`getWorldCenter` / `solvePositionForCenter`** are private to `EditBar.tsx` but are general
+   rotation-and-flip-aware centre math; the Transformer and nudge paths re-derive parts of it.
+   Belongs in `coordinates.ts`.
+3. **Modifier-key latches.** `useCanvasFillMode` (F/R/S), `useEditorShortcuts` (swallow latch),
+   `CropOverlay` (shift) each hand-roll keydown/keyup tracking with different edge-case handling
+   (`repeat`, blur, input-focus). One `useHeldKey(key, { whileDragging })` would make the rules
+   uniform.
+4. **`Math.max(...elements.map(e => e.zIndex)) + 1`** appears in 5 places — `nextZIndex(elements)`.
+5. **Element mutation via `elements.map(el => el.id === id ? {...} : el)`** is written inline in
+   components that bypass `elementStore` (the swap and replace paths build the project object
+   themselves to get one atomic history entry). A store action taking a set of element updates
+   would let those paths keep atomicity without re-implementing the update.

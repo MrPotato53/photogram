@@ -2,7 +2,8 @@ import { memo, useCallback, useLayoutEffect, useRef } from 'react';
 import { Image as KonvaImage, Group, Rect } from 'react-konva';
 import type Konva from 'konva';
 import type { Element } from '../../types';
-import { contentRenderScale, contentPivotLocalOffset } from '../../utils/contentRotation';
+import { getFullImageRect } from '../../utils/photoFraming';
+import { planPhotoDraw } from '../../utils/konvaPhotoProps';
 
 interface CanvasElementRendererProps {
   element: Element;
@@ -320,19 +321,12 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
   const flipScaleX = element.flipX ? -1 : 1;
   const flipScaleY = element.flipY ? -1 : 1;
 
-  const existingCropX = element.cropX ?? 0;
-  const existingCropY = element.cropY ?? 0;
-  const existingCropW = element.cropWidth ?? 1;
-  const existingCropH = element.cropHeight ?? 1;
-  const hasCrop = existingCropX > 0 || existingCropY > 0 || existingCropW < 1 || existingCropH < 1;
-
   if (isBeingCropped) {
-    const fullWidth = element.width / existingCropW;
-    const fullHeight = element.height / existingCropH;
-    const fullX = element.x - existingCropX * fullWidth;
-    const fullY = element.y - existingCropY * fullHeight;
-    const fullOffsetX = element.flipX ? fullWidth : 0;
-    const fullOffsetY = element.flipY ? fullHeight : 0;
+    // Crop mode shows the WHOLE image behind the crop rectangle, so the node
+    // is grown out to the full image's rect rather than the frame's.
+    const full = getFullImageRect(element);
+    const fullOffsetX = element.flipX ? full.width : 0;
+    const fullOffsetY = element.flipY ? full.height : 0;
 
     return (
       <KonvaImage
@@ -346,10 +340,10 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
         key={`${element.id}-cropmode`}
         id={element.id}
         image={loadedImage}
-        x={fullX}
-        y={fullY}
-        width={fullWidth}
-        height={fullHeight}
+        x={full.x}
+        y={full.y}
+        width={full.width}
+        height={full.height}
         rotation={element.rotation}
         scaleX={flipScaleX}
         scaleY={flipScaleY}
@@ -362,16 +356,9 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
     );
   }
 
-  const offsetX = element.flipX ? element.width : 0;
-  const offsetY = element.flipY ? element.height : 0;
-  const cropConfig = hasCrop ? {
-    x: existingCropX * loadedImage.naturalWidth,
-    y: existingCropY * loadedImage.naturalHeight,
-    width: existingCropW * loadedImage.naturalWidth,
-    height: existingCropH * loadedImage.naturalHeight,
-  } : undefined;
-
-  const contentRotation = element.contentRotation ?? 0;
+  // Shared with the slide-thumbnail renderer so a photo can only look one
+  // way — see planPhotoDraw.
+  const plan = planPhotoDraw(element, loadedImage.naturalWidth, loadedImage.naturalHeight);
 
   // ── Content-rotation branch ──────────────────────────────────────────
   // Image rotated INSIDE an upright frame. Structure:
@@ -389,26 +376,7 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
   // The proxy imperatively syncs the Group during drag/transform, same
   // pattern as the selection-stroke sync above. The zero-rotation path
   // below is byte-identical to the pre-feature renderer.
-  if (contentRotation !== 0) {
-    const fullW = element.width / existingCropW;
-    const fullH = element.height / existingCropH;
-    const winX = existingCropX * fullW;
-    const winY = existingCropY * fullH;
-    // Normally exactly 1: crop mode already folded any zoom the rotation
-    // needed into the crop values, so the image draws at natural size and
-    // its edges can sit right against the frame. Rises above 1 only to
-    // rescue legacy state that would otherwise show blank corners — and,
-    // crucially, depends only on sizes and the angle, never on where the
-    // window sits, so it can never make the image swim.
-    const cover = contentRenderScale(fullW, fullH, element.width, element.height, contentRotation);
-    // Rotation pivot = the FULL IMAGE'S OWN CENTER (fixed — independent of
-    // where the crop window sits), not the window/frame center. This keeps
-    // the underlying image visually stationary as the window moves (e.g.
-    // during a future re-crop), only its required cover scale changes.
-    // `local` is the pivot's position in the clip Group's LOCAL (i.e.
-    // pre-element.rotation) coordinate space; the outer Group below composes
-    // element.rotation on top of it for free via normal Konva nesting.
-    const local = contentPivotLocalOffset(fullW, fullH, winX, winY);
+  if (plan.kind === 'rotated') {
     const syncGroup = (node: Konva.Node) => {
       const g = clipGroupRef.current;
       if (!g) return;
@@ -423,13 +391,9 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
         <Group
           ref={clipGroupRef}
           key={`${element.id}-clip`}
-          x={element.x}
-          y={element.y}
           // width/height carry the frame size so cache bounds (here and in
           // the export path's re-cache) cover exactly the clipped area.
-          width={element.width}
-          height={element.height}
-          rotation={element.rotation}
+          {...plan.clip}
           clipFunc={(ctx) => {
             ctx.rect(0, 0, element.width, element.height);
           }}
@@ -438,18 +402,7 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
           <KonvaImage
             ref={imageRef}
             image={loadedImage}
-            x={local.x}
-            y={local.y}
-            width={fullW}
-            height={fullH}
-            // Content pivot (fullW/2, fullH/2) is exactly the image's own
-            // center, so it's flip-invariant (fullW/2 == fullW - fullW/2) —
-            // no flip-conditional needed, unlike the old window-center pivot.
-            offsetX={fullW / 2}
-            offsetY={fullH / 2}
-            rotation={contentRotation}
-            scaleX={cover * flipScaleX}
-            scaleY={cover * flipScaleY}
+            {...plan.image}
             listening={false}
             perfectDrawEnabled={false}
           />
@@ -508,16 +461,7 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
         key={element.id}
         id={element.id}
         image={loadedImage}
-        x={element.x}
-        y={element.y}
-        width={element.width}
-        height={element.height}
-        rotation={element.rotation}
-        scaleX={flipScaleX}
-        scaleY={flipScaleY}
-        offsetX={offsetX}
-        offsetY={offsetY}
-        crop={cropConfig}
+        {...plan.image}
         draggable={isDraggable}
         onClick={handleClick}
         onTap={handleTap}
@@ -540,8 +484,8 @@ export const CanvasElementRenderer = memo(function CanvasElementRenderer({
           rotation={element.rotation}
           scaleX={flipScaleX}
           scaleY={flipScaleY}
-          offsetX={offsetX}
-          offsetY={offsetY}
+          offsetX={plan.image.offsetX}
+          offsetY={plan.image.offsetY}
           stroke="#3b82f6"
           strokeWidth={2 / zoomLevel}
           strokeScaleEnabled={false}

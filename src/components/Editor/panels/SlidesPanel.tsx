@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
-import { Stage, Layer, Image as KonvaImage, Rect } from 'react-konva';
+import { Stage, Layer, Group, Image as KonvaImage, Rect } from 'react-konva';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { Element } from '../../../types';
 import { useProjectStore } from '../../../stores/projectStore';
@@ -9,6 +9,7 @@ import { usePanelStore } from '../../../stores/panelStore';
 import { useTemplatesStore } from '../../../stores/templatesStore';
 import { ContextMenu, ContextMenuItem } from '../../common/ContextMenu';
 
+import { planPhotoDraw } from '../../../utils/konvaPhotoProps';
 import { DESIGN_HEIGHT, getDesignSize } from '../../../utils/designConstants';
 const THUMBNAIL_HEIGHT = 80;
 const MAX_SLIDES = 20;
@@ -157,52 +158,56 @@ function SlidePreview({
           {/* White background */}
           <Rect x={0} y={0} width={thumbnailWidth} height={THUMBNAIL_HEIGHT} fill="white" listening={false} />
 
-          {/* Render elements scaled and offset for this slide */}
-          {slideElements
-            .sort((a, b) => a.zIndex - b.zIndex)
-            .map((element) => {
-              const cacheKey = `${element.id}:${element.mediaId}:${element.assetPath || ''}`;
-              const loadedImage = loadedImages.get(cacheKey);
-              if (!loadedImage) return null;
+          {/* Design space → thumbnail space. Doing it as one Group transform
+              (rather than multiplying every coordinate) means elements can be
+              drawn from the SHARED draw plan exactly as the canvas draws
+              them — which is what keeps thumbnails from quietly falling
+              behind when a new image property lands. */}
+          <Group x={-slideOffsetX * scale} scaleX={scale} scaleY={scale} listening={false}>
+            {slideElements
+              .sort((a, b) => a.zIndex - b.zIndex)
+              .map((element) => {
+                const cacheKey = `${element.id}:${element.mediaId}:${element.assetPath || ''}`;
+                const loadedImage = loadedImages.get(cacheKey);
+                if (!loadedImage) return null;
 
-              const flipScaleX = element.flipX ? -1 : 1;
-              const flipScaleY = element.flipY ? -1 : 1;
+                const plan = planPhotoDraw(
+                  element,
+                  loadedImage.naturalWidth,
+                  loadedImage.naturalHeight
+                );
 
-              const existingCropX = element.cropX ?? 0;
-              const existingCropY = element.cropY ?? 0;
-              const existingCropW = element.cropWidth ?? 1;
-              const existingCropH = element.cropHeight ?? 1;
-              const hasCrop = existingCropX > 0 || existingCropY > 0 || existingCropW < 1 || existingCropH < 1;
+                if (plan.kind === 'rotated') {
+                  return (
+                    <Group
+                      key={element.id}
+                      {...plan.clip}
+                      clipFunc={(ctx) => {
+                        ctx.rect(0, 0, element.width, element.height);
+                      }}
+                      listening={false}
+                    >
+                      <KonvaImage
+                        image={loadedImage}
+                        {...plan.image}
+                        listening={false}
+                        perfectDrawEnabled={false}
+                      />
+                    </Group>
+                  );
+                }
 
-              const offsetX = element.flipX ? element.width : 0;
-              const offsetY = element.flipY ? element.height : 0;
-
-              const cropConfig = hasCrop ? {
-                x: existingCropX * loadedImage.naturalWidth,
-                y: existingCropY * loadedImage.naturalHeight,
-                width: existingCropW * loadedImage.naturalWidth,
-                height: existingCropH * loadedImage.naturalHeight,
-              } : undefined;
-
-              return (
-                <KonvaImage
-                  key={element.id}
-                  image={loadedImage}
-                  x={(element.x - slideOffsetX) * scale}
-                  y={element.y * scale}
-                  width={element.width * scale}
-                  height={element.height * scale}
-                  rotation={element.rotation}
-                  scaleX={flipScaleX}
-                  scaleY={flipScaleY}
-                  offsetX={offsetX * scale}
-                  offsetY={offsetY * scale}
-                  crop={cropConfig}
-                  listening={false}
-                  perfectDrawEnabled={false}
-                />
-              );
-            })}
+                return (
+                  <KonvaImage
+                    key={element.id}
+                    image={loadedImage}
+                    {...plan.image}
+                    listening={false}
+                    perfectDrawEnabled={false}
+                  />
+                );
+              })}
+          </Group>
         </Layer>
         </Stage>
 

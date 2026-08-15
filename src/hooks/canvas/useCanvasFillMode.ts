@@ -1,7 +1,11 @@
 import { useEffect, useRef, useCallback } from 'react';
 import type { Element } from '../../types';
 import { useSnapStore, type SnapSettings } from '../../stores/snapStore';
-import { isPointInRotatedRect } from '../../utils/coordinates';
+import {
+  findTopmostElementAt,
+  isEmptyFrame,
+  isDropTarget,
+} from '../../utils/elementHitTest';
 import { useElementStore } from '../../stores/elementStore';
 import {
   calculateSnapLines,
@@ -22,6 +26,19 @@ export interface ReplaceTarget {
   targetType: 'photo' | 'placeholder';
 }
 
+/** Describe a hit element as a drop target. */
+function toTarget(element: Element | null): ReplaceTarget | null {
+  if (!element) return null;
+  return {
+    elementId: element.id,
+    x: element.x,
+    y: element.y,
+    width: element.width,
+    height: element.height,
+    targetType: element.type === 'placeholder' ? 'placeholder' : 'photo',
+  };
+}
+
 /**
  * Topmost placeholder frame under a design-space point, optionally
  * excluding one element (the one being dragged). Standalone (not hook
@@ -35,15 +52,9 @@ export function findPlaceholderAt(
   designY: number,
   excludeId?: string
 ): ReplaceTarget | null {
-  const sorted = [...elements].sort((a, b) => b.zIndex - a.zIndex);
-  for (const el of sorted) {
-    if (excludeId && el.id === excludeId) continue;
-    if (el.type !== 'placeholder') continue;
-    if (designX >= el.x && designX <= el.x + el.width && designY >= el.y && designY <= el.y + el.height) {
-      return { elementId: el.id, x: el.x, y: el.y, width: el.width, height: el.height, targetType: 'placeholder' };
-    }
-  }
-  return null;
+  return toTarget(
+    findTopmostElementAt(elements, designX, designY, { match: isEmptyFrame, excludeId })
+  );
 }
 
 interface UseCanvasFillModeOptions {
@@ -207,28 +218,9 @@ export function useCanvasFillMode({
    */
   const getReplacementTarget = useCallback((designX: number, designY: number, excludeId?: string): ReplaceTarget | null => {
     if (!replaceKeyRef.current) return null;
-
-    // Iterate in reverse z-order (highest zIndex first)
-    const sorted = [...elements].sort((a, b) => b.zIndex - a.zIndex);
-    for (const el of sorted) {
-      if (excludeId && el.id === excludeId) continue;
-      const isPhotoTarget = el.type === 'photo' && !!el.mediaId;
-      const isFrameTarget = el.type === 'placeholder';
-      if (!isPhotoTarget && !isFrameTarget) continue;
-      // Rotation-exact: a tilted frame must be hittable where it is drawn,
-      // not where its unrotated box would have been.
-      if (isPointInRotatedRect(designX, designY, el.x, el.y, el.width, el.height, el.rotation)) {
-        return {
-          elementId: el.id,
-          x: el.x,
-          y: el.y,
-          width: el.width,
-          height: el.height,
-          targetType: isFrameTarget ? 'placeholder' : 'photo',
-        };
-      }
-    }
-    return null;
+    return toTarget(
+      findTopmostElementAt(elements, designX, designY, { match: isDropTarget, excludeId })
+    );
   }, [elements]);
 
   /**
@@ -240,26 +232,9 @@ export function useCanvasFillMode({
    */
   const getSwapTarget = useCallback((designX: number, designY: number, excludeId?: string): ReplaceTarget | null => {
     if (!swapKeyRef.current) return null;
-
-    // Topmost first, matching the other target lookups.
-    const sorted = [...elements].sort((a, b) => b.zIndex - a.zIndex);
-    for (const el of sorted) {
-      if (excludeId && el.id === excludeId) continue;
-      const isPhoto = el.type === 'photo' && !!el.mediaId;
-      const isFrame = el.type === 'placeholder';
-      if (!isPhoto && !isFrame) continue;
-      if (isPointInRotatedRect(designX, designY, el.x, el.y, el.width, el.height, el.rotation)) {
-        return {
-          elementId: el.id,
-          x: el.x,
-          y: el.y,
-          width: el.width,
-          height: el.height,
-          targetType: isFrame ? 'placeholder' : 'photo',
-        };
-      }
-    }
-    return null;
+    return toTarget(
+      findTopmostElementAt(elements, designX, designY, { match: isDropTarget, excludeId })
+    );
   }, [elements]);
 
   return {

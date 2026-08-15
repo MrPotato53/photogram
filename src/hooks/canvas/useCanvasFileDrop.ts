@@ -7,6 +7,7 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useSlideStore } from '../../stores/slideStore';
 import { useElementStore } from '../../stores/elementStore';
 import { useMediaStore } from '../../stores/mediaStore';
+import { isPointerOverMediaPool, toCssPoint } from '../../utils/dropZones';
 
 interface UseCanvasFileDropOptions {
   stageContainerRef: React.RefObject<HTMLDivElement>;
@@ -73,13 +74,22 @@ export function useCanvasFileDrop({
       const dragEvent = event.payload;
       const state = fileDragDropStateRef.current;
 
+      // Tauri broadcasts drag-drop to the whole webview. A drop over the
+      // media pool belongs to the pool alone — without this, both handlers
+      // imported the same files and the second clobbered the first.
+      const rawPosition = dragEvent.type === 'leave' ? null : dragEvent.position;
+      const overMediaPool = !!rawPosition && isPointerOverMediaPool(rawPosition.x, rawPosition.y);
+      // Payload positions are physical pixels; DOM rects are CSS pixels.
+      const position = rawPosition ? toCssPoint(rawPosition.x, rawPosition.y) : null;
+
       if (dragEvent.type === 'over' || dragEvent.type === 'enter') {
-        setIsFileDragOver(true);
-        if (dragEvent.position) {
-          fileDragPositionRef.current = { x: dragEvent.position.x, y: dragEvent.position.y };
+        setIsFileDragOver(!overMediaPool);
+        if (position) {
+          fileDragPositionRef.current = { x: position.x, y: position.y };
         }
       } else if (dragEvent.type === 'drop') {
         setIsFileDragOver(false);
+        if (overMediaPool) return;
         const paths = dragEvent.paths;
 
         if (paths && paths.length > 0 && state.project && stageContainerRef.current) {
@@ -92,8 +102,8 @@ export function useCanvasFileDrop({
           if (imagePaths.length > 0) {
             // Get drop position relative to stage
             const stageRect = stageContainerRef.current.getBoundingClientRect();
-            const dropX = (dragEvent.position?.x ?? 0) - stageRect.left - 24; // 24 is paddingLeft
-            const dropY = (dragEvent.position?.y ?? 0) - stageRect.top;
+            const dropX = (position?.x ?? 0) - stageRect.left - 24; // 24 is paddingLeft
+            const dropY = (position?.y ?? 0) - stageRect.top;
 
             // Check if drop is within canvas bounds
             const totalScreenWidth = state.numSlides * state.canvasSize.width * state.zoomLevel;

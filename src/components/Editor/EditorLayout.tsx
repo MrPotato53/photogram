@@ -24,6 +24,7 @@ import type { Template } from '../../types';
 import { exportSlides, showInFolder, type ExportOptions } from '../../services/tauri';
 import { flushPersistProject } from '../../services/projectPersistence';
 import { useEditorShortcuts } from '../../hooks/useEditorShortcuts';
+import { useThumbnailSync } from '../../hooks/useThumbnailSync';
 import { useShortcutsStore } from '../../stores/shortcutsStore';
 
 interface EditorLayoutProps {
@@ -143,6 +144,11 @@ export function EditorLayout({ projectId }: EditorLayoutProps) {
     onExport: useCallback(() => setIsExportModalOpen(true), []),
     onOpenShortcuts: useCallback(() => setIsShortcutsModalOpen(true), [setIsShortcutsModalOpen]),
   });
+
+  // One owner for the backend's background thumbnail stream, for the whole
+  // session — it must outlive the media pool panel, which the user can close
+  // mid-import.
+  useThumbnailSync();
 
   // Export handler — runs after modal closes. Yields to the event loop between
   // each slide render so the UI stays responsive (toDataURL at high pixelRatio

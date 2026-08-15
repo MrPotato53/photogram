@@ -187,14 +187,9 @@ export const useElementStore = create<ElementState>((set, get) => ({
       // Track deleted asset for undo support (don't delete file yet)
       // File will be deleted when entry falls off history stack
       if (elementToRemove?.assetPath) {
-        const historyStore = useHistoryStore.getState();
-        const currentEntry = historyStore.entries[historyStore.currentIndex];
-        historyStore.trackDeletedAsset({
-          assetPath: elementToRemove.assetPath,
-          mediaId: elementToRemove.mediaId || '',
-          deletedAt: Date.now(),
-          historyEntryId: currentEntry?.id || '',
-        });
+        useHistoryStore
+          .getState()
+          .trackOrphanedAsset(elementToRemove.assetPath, elementToRemove.mediaId);
       }
     } catch (error) {
       console.error('Failed to remove element:', error);
